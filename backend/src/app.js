@@ -97,7 +97,7 @@ app.get('/health', (req, res) => res.json({
   timestamp: new Date().toISOString(),
 }));
 
-app.use('/api/auth', authRateLimiter, authRoutes);
+app.use('/api/auth', authRoutes);
 
 // Issue 8: clearProfileCache is now async — fire-and-forget from the synchronous
 // 'finish' event callback so we don't need to await in an event handler.

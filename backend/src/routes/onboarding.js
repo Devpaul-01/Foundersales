@@ -107,9 +107,6 @@ const updateWorkspaceProfile = async (workspaceId, userId, updates) => {
   if (error) throw error;
 };
 
-
-
-
 // GET /api/onboarding/questions
 router.get('/questions', asyncHandler(async (req, res) => {
   const elapsed = timer();
@@ -144,18 +141,25 @@ router.get('/questions', asyncHandler(async (req, res) => {
 }
 
   // Bug H: was buildContextForAI(req) — replaced with buildUserContext(req)
-  const burst = await groqQueue.run(`burst${currentStep + 1}`, () =>
-  groqService.generateNextBurst(buildUserContext(req), currentAnswers, currentStep + 1)
+  // In onboarding.js - Call as object
+const burst = await groqQueue.run(`burst${currentStep + 1}`, () =>
+  groqService.generateNextBurst({
+    burst_number: currentStep + 1,
+    previous_answers: currentAnswers,
+    basic_info: buildUserContext(req)
+  })
 );
   
-  );
+  
+  
   log('GET /questions DONE', { userId, workspaceId, elapsed: elapsed() });
+  console.log(`Burst 2 questioks received:${formatQuestions(burst, 1)} `)
   res.json({ 
   questions: formatQuestions(burst, 1), 
   burst: currentStep + 1, 
   step: currentStep + 1 
 });
-});
+}));
 
 // POST /api/onboarding/basic
 // Section 6: onboardingBasicSchema validates known fields; unknown extra fields

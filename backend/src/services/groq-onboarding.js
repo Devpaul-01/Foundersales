@@ -152,7 +152,7 @@ RETURN EXACT JSON:
     const { content } = await callGroq({
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.4,
-      maxTokens: 800,
+      maxTokens: 2000,
       modelName: PRO_MODEL
     });
 
@@ -274,7 +274,7 @@ Return ONLY this JSON:
     const { content } = await callGroq({
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.7,
-      maxTokens: 600,
+      maxTokens: 2000,
       modelName: PRO_MODEL
     });
 

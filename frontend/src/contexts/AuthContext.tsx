@@ -1,3 +1,4 @@
+// src/contexts/AuthContext.tsx
 import React, {
   createContext,
   useContext,
@@ -35,10 +36,10 @@ interface AuthContextValue {
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [user,             setUserState]            = useState<User | null>(null);
-  const [activeWorkspace,  setActiveWorkspaceState] = useState<Workspace | null>(null);
-  const [activeMembership, setActiveMembership]     = useState<ActiveMembership | null>(null);
-  const [isLoading,        setIsLoading]            = useState(true);
+  const [user, setUserState] = useState<User | null>(null);
+  const [activeWorkspace, setActiveWorkspaceState] = useState<Workspace | null>(null);
+  const [activeMembership, setActiveMembership] = useState<ActiveMembership | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
 
   // ── Core: fetch /me and hydrate state ───────────────────────
   const refreshUser = useCallback(async () => {
@@ -52,19 +53,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  // ── Token refresh helper ─────────────────────────────────────
+  // ── Token refresh helper (NO LONGER NEEDS REFRESH TOKEN) ──
   const doTokenRefresh = useCallback(async () => {
-    const { refreshToken } = getTokens();
-    if (!refreshToken) throw new Error('No refresh token');
-    const { data } = await authApi.refresh(refreshToken);
-    setTokens(data.access_token, data.refresh_token, data.expires_in);
+    const { data } = await authApi.refresh();
+    setTokens(data.access_token, '', data.expires_in);
     scheduleRefresh(data.expires_in);
   }, []);
 
   // ── Initialize on mount ──────────────────────────────────────
   useEffect(() => {
     const init = async () => {
-      const { accessToken, refreshToken } = getTokens();
+      const { accessToken } = getTokens();
 
       if (!accessToken) {
         setIsLoading(false);
@@ -75,9 +74,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         await refreshUser();
         scheduleRefresh(getRemainingTTL());
       } catch (err: unknown) {
-        // 401 — try refresh first
         const status = (err as { status?: number })?.status;
-        if (status === 401 && refreshToken) {
+        if (status === 401) {
           try {
             await doTokenRefresh();
             await refreshUser();
@@ -92,27 +90,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
     };
 
-    // Register the global refresh callback used by scheduled refresh timer
     setRefreshCallback(doTokenRefresh);
-
     init();
-
-    // Visibility guard: refresh when user returns to tab with expiring token
     const cleanup = setupVisibilityRefreshGuard(doTokenRefresh);
     return cleanup;
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [doTokenRefresh, refreshUser]);
 
   // ── login ────────────────────────────────────────────────────
   const login = useCallback(async (email: string, password: string) => {
     const { data } = await authApi.login({ email, password });
-    setTokens(data.access_token, data.refresh_token, data.expires_in);
+    setTokens(data.access_token, data.refresh_token || '', data.expires_in);
     scheduleRefresh(data.expires_in);
     await refreshUser();
   }, [refreshUser]);
 
   // ── logout ───────────────────────────────────────────────────
   const logout = useCallback(async () => {
-    try { await authApi.logout(); } catch { /* ignore */ }
+    try { 
+      await authApi.logout(); 
+    } catch { 
+      /* ignore */ 
+    }
     clearTokens();
     setUserState(null);
     setActiveWorkspaceState(null);
@@ -124,13 +122,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       user,
       activeWorkspace,
       activeMembership,
-      accessToken:      getTokens().accessToken,
-      isAuthenticated:  !!user,
+      accessToken: getTokens().accessToken,
+      isAuthenticated: !!user,
       isLoading,
       login,
       logout,
       refreshUser,
-      setUser:          setUserState,
+      setUser: setUserState,
       setActiveWorkspace: setActiveWorkspaceState,
     }),
     [user, activeWorkspace, activeMembership, isLoading, login, logout, refreshUser],

@@ -5,6 +5,9 @@
 import 'dotenv/config';
 import { validateEnv }                from './config/validateEnv.js';
 validateEnv();
+import cookieParser from 'cookie-parser';
+
+// Add this before your routes
 
 import express       from 'express';
 import cors          from 'cors';
@@ -60,7 +63,7 @@ const pipelineRateLimiter = rateLimit({
   keyGenerator: (req) => req.user?.id || req.ip,
   message: { error: 'RATE_LIMIT_EXCEEDED', message: 'Too many pipeline requests.' },
 });
-
+app.use(cookieParser());
 app.use(helmet({ crossOriginEmbedderPolicy: false }));
 app.use(cors({
   origin: (origin, callback) => {

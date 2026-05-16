@@ -1,30 +1,35 @@
+// src/lib/auth.ts
 const ACCESS_TOKEN_KEY  = 'fs_access_token';
-const REFRESH_TOKEN_KEY = 'fs_refresh_token';
+const REFRESH_TOKEN_KEY = 'fs_refresh_token'; // KEPT FOR BACKWARDS COMPATIBILITY BUT NOT USED
 const EXPIRES_AT_KEY    = 'fs_token_expires_at';
 
 export interface StoredTokens {
   accessToken:  string | null;
-  refreshToken: string | null;
+  refreshToken: string | null; // Will always be null now (stored in HTTP-only cookie)
   expiresAt:    number | null; // unix ms
 }
 
 export function getTokens(): StoredTokens {
   return {
     accessToken:  localStorage.getItem(ACCESS_TOKEN_KEY),
-    refreshToken: localStorage.getItem(REFRESH_TOKEN_KEY),
+    refreshToken: null, // ❌ No longer stored in localStorage
     expiresAt:    Number(localStorage.getItem(EXPIRES_AT_KEY)) || null,
   };
 }
 
 export function setTokens(
   accessToken:  string,
-  refreshToken: string,
+  refreshToken: string, // Kept for API compatibility but not stored
   expiresIn:    number, // seconds
 ): void {
   const expiresAt = Date.now() + expiresIn * 1000;
   localStorage.setItem(ACCESS_TOKEN_KEY,  accessToken);
-  localStorage.setItem(REFRESH_TOKEN_KEY, refreshToken);
+  // ❌ DO NOT store refresh token in localStorage anymore
+  // localStorage.setItem(REFRESH_TOKEN_KEY, refreshToken);
   localStorage.setItem(EXPIRES_AT_KEY,    String(expiresAt));
+  
+  // Optional: Clear old refresh token if exists
+  localStorage.removeItem(REFRESH_TOKEN_KEY);
 }
 
 export function clearTokens(): void {

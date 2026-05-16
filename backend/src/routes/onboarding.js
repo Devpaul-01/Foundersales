@@ -10,6 +10,8 @@
 //             this version — no require() or top-level await issue present).
 //  Section 6: Zod schemas onboardingBasicSchema + onboardingAnswersSchema added
 //             to POST /basic and POST /answers routes.
+//  FIX:       Added onboarding_questions JSONB column to persist generated questions
+//             so users see the same questions when returning to a burst.
 // ============================================================
 import { Router }          from 'express';
 import { z }               from 'zod';
@@ -95,10 +97,6 @@ const buildFallbackVoiceProfile = (basicInfo = {}) => ({
   avoid_phrases:               ['just checking in', 'hope this finds you well', 'revolutionary'],
 });
 
-// Bug H: buildContextForAI removed — it was a duplicate of buildUserContext(req)
-// from workspace.js which is already imported above. The two call sites in
-// GET /questions now call buildUserContext(req) directly.
-
 const updateWorkspaceProfile = async (workspaceId, userId, updates) => {
   const { error } = await supabaseAdmin
     .from('workspace_profiles')
@@ -107,64 +105,123 @@ const updateWorkspaceProfile = async (workspaceId, userId, updates) => {
   if (error) throw error;
 };
 
-// GET /api/onboarding/questions
-router.get('/questions', asyncHandler(async (req, res) => {
-  const elapsed = timer();
-  const userId = req.user.id, workspaceId = req.workspace.id;
-  const formatQuestions = (burstResult, startIndex = 1) => {
+// Helper to format questions with IDs
+const formatQuestions = (burstResult, startIndex = 1) => {
   const questions = burstResult.questions || [];
   return questions.map((q, idx) => ({
     id: `q${startIndex + idx}`,
     question: q
   }));
 };
+
+// Helper to save generated questions for a burst
+const saveQuestionsForBurst = async (workspaceId, userId, burstNumber, questions) => {
+  const { data: currentProfile } = await supabaseAdmin
+    .from('workspace_profiles')
+    .select('onboarding_questions')
+    .eq('workspace_id', workspaceId).eq('user_id', userId)
+    .single();
+  
+  const currentQuestions = currentProfile?.onboarding_questions || {};
+  const updatedQuestions = {
+    ...currentQuestions,
+    [`burst_${burstNumber}`]: questions
+  };
+  
+  await updateWorkspaceProfile(workspaceId, userId, { onboarding_questions: updatedQuestions });
+  console.log(`[Onboarding] Saved questions for burst ${burstNumber}:`, JSON.stringify(questions, null, 2));
+};
+
+// Helper to get saved questions for a burst
+const getSavedQuestionsForBurst = async (workspaceId, userId, burstNumber) => {
+  const { data: profile } = await supabaseAdmin
+    .from('workspace_profiles')
+    .select('onboarding_questions')
+    .eq('workspace_id', workspaceId).eq('user_id', userId)
+    .single();
+  
+  const savedQuestions = profile?.onboarding_questions?.[`burst_${burstNumber}`];
+  if (savedQuestions) {
+    console.log(`[Onboarding] Retrieved saved questions for burst ${burstNumber}:`, JSON.stringify(savedQuestions, null, 2));
+  }
+  return savedQuestions || null;
+};
+
+// GET /api/onboarding/questions
+router.get('/questions', asyncHandler(async (req, res) => {
+  const elapsed = timer();
+  const userId = req.user.id, workspaceId = req.workspace.id;
+  
+  console.log('\n========================================');
+  console.log('[Onboarding] GET /questions called');
+  console.log(`[Onboarding] userId: ${userId}, workspaceId: ${workspaceId}`);
+  
   log('GET /questions', { userId, workspaceId });
 
   const { data: profile } = await supabaseAdmin
     .from('workspace_profiles')
-    .select('business_name, product_description, target_audience, role, industry, experience_level, business_stage, preferred_platforms, onboarding_answers, onboarding_step')
+    .select('business_name, product_description, target_audience, role, industry, experience_level, business_stage, preferred_platforms, onboarding_answers, onboarding_step, onboarding_questions')
     .eq('workspace_id', workspaceId).eq('user_id', userId).single();
 
   const currentProfile = profile || {};
   const currentStep    = currentProfile.onboarding_step || 0;
   const currentAnswers = currentProfile.onboarding_answers || {};
+  const nextStep       = currentStep === 0 ? 1 : currentStep + 1;
+  
+  console.log(`[Onboarding] currentStep: ${currentStep}, nextStep: ${nextStep}`);
 
-  if (currentStep === 0) {
-  const burst1 = await groqQueue.run('burst1', () =>
-    groqService.generateBurst1Questions(buildUserContext(req))
-  );
-  return res.json({ 
-    questions: formatQuestions(burst1, 1), 
-    burst: 1, 
-    step: 1 
-  });
-}
+  // Check if questions for this step are already saved
+  const savedQuestions = await getSavedQuestionsForBurst(workspaceId, userId, nextStep);
+  
+  if (savedQuestions && savedQuestions.length > 0) {
+    console.log(`[Onboarding] Using saved questions for burst ${nextStep}`);
+    console.log(`[Onboarding] Returning ${savedQuestions.length} questions`);
+    return res.json({ 
+      questions: savedQuestions, 
+      burst: nextStep, 
+      step: nextStep 
+    });
+  }
 
-  // Bug H: was buildContextForAI(req) — replaced with buildUserContext(req)
-  // In onboarding.js - Call as object
-const burst = await groqQueue.run(`burst${currentStep + 1}`, () =>
-  groqService.generateNextBurst({
-    burst_number: currentStep + 1,
-    previous_answers: currentAnswers,
-    basic_info: buildUserContext(req)
-  })
-);
+  console.log(`[Onboarding] No saved questions found for burst ${nextStep}, generating new ones...`);
+
+  let burstResult;
+  if (nextStep === 1) {
+    console.log('[Onboarding] Generating burst 1 questions...');
+    burstResult = await groqQueue.run('burst1', () =>
+      groqService.generateBurst1Questions(buildUserContext(req))
+    );
+    console.log('[Onboarding] Burst 1 result:', JSON.stringify(burstResult, null, 2));
+  } else {
+    console.log(`[Onboarding] Generating burst ${nextStep} questions...`);
+    burstResult = await groqQueue.run(`burst${nextStep}`, () =>
+      groqService.generateNextBurst({
+        burst_number: nextStep,
+        previous_answers: currentAnswers,
+        basic_info: buildUserContext(req)
+      })
+    );
+    console.log(`[Onboarding] Burst ${nextStep} result:`, JSON.stringify(burstResult, null, 2));
+  }
+
+  const formattedQuestions = formatQuestions(burstResult, 1);
+  console.log(`[Onboarding] Formatted questions:`, JSON.stringify(formattedQuestions, null, 2));
   
-  
-  
+  // Save generated questions
+  await saveQuestionsForBurst(workspaceId, userId, nextStep, formattedQuestions);
+  console.log(`[Onboarding] Saved questions for burst ${nextStep}`);
+
   log('GET /questions DONE', { userId, workspaceId, elapsed: elapsed() });
-  console.log(`Burst 2 questioks received:${formatQuestions(burst, 1)} `)
+  console.log('========================================\n');
+  
   res.json({ 
-  questions: formatQuestions(burst, 1), 
-  burst: currentStep + 1, 
-  step: currentStep + 1 
-});
+    questions: formattedQuestions, 
+    burst: nextStep, 
+    step: nextStep 
+  });
 }));
 
 // POST /api/onboarding/basic
-// Section 6: onboardingBasicSchema validates known fields; unknown extra fields
-// are stripped by Zod's default behaviour (non-strict mode), preventing accidental
-// injection of unintended DB columns.
 router.post('/basic', validate(onboardingBasicSchema), asyncHandler(async (req, res) => {
   const elapsed = timer();
   const userId = req.user.id, workspaceId = req.workspace.id;
@@ -196,12 +253,17 @@ router.post('/basic', validate(onboardingBasicSchema), asyncHandler(async (req, 
 }));
 
 // POST /api/onboarding/answers
-// Section 6: onboardingAnswersSchema ensures `answers` is a non-null object
-// and `burst` (if present) is a valid integer in range.
 router.post('/answers', validate(onboardingAnswersSchema), asyncHandler(async (req, res) => {
   const elapsed = timer();
   const userId = req.user.id, workspaceId = req.workspace.id;
   const { answers, burst } = req.body;
+  
+  console.log('\n========================================');
+  console.log('[Onboarding] POST /answers called');
+  console.log(`[Onboarding] userId: ${userId}, workspaceId: ${workspaceId}`);
+  console.log(`[Onboarding] burst: ${burst}`);
+  console.log(`[Onboarding] answers received:`, JSON.stringify(answers, null, 2));
+  
   log('POST /answers START', { userId, workspaceId, burst });
 
   const { data: currentProfileData } = await supabaseAdmin
@@ -211,14 +273,21 @@ router.post('/answers', validate(onboardingAnswersSchema), asyncHandler(async (r
   const currentProfile = currentProfileData || {};
   const mergedAnswers  = { ...(currentProfile.onboarding_answers || {}), ...answers };
   const newStep        = Math.min(3, (currentProfile.onboarding_step || 0) + 1);
+  
+  console.log(`[Onboarding] current onboarding_step: ${currentProfile.onboarding_step || 0}`);
+  console.log(`[Onboarding] newStep: ${newStep}`);
+  console.log(`[Onboarding] mergedAnswers:`, JSON.stringify(mergedAnswers, null, 2));
 
   if (newStep < 3) {
+    console.log(`[Onboarding] Saving partial progress (step ${newStep})`);
     await updateWorkspaceProfile(workspaceId, userId, { onboarding_answers: mergedAnswers, onboarding_step: newStep });
     log('POST /answers partial', { userId, burst, newStep, elapsed: elapsed() });
+    console.log('========================================\n');
     return res.json({ success: true, step: newStep, complete: false });
   }
 
   // Final burst — build voice profile
+  console.log('[Onboarding] Final burst — building voice profile...');
   const userContext = { ...req.user, ...currentProfile, onboarding_answers: mergedAnswers, workspace_id: workspaceId };
   logAI('buildVoiceProfile', { userId, workspaceId });
   let voiceProfile;
@@ -226,14 +295,16 @@ router.post('/answers', validate(onboardingAnswersSchema), asyncHandler(async (r
     voiceProfile = await groqQueue.run('buildVoiceProfile', () =>
       groqService.buildVoiceProfile(userContext, mergedAnswers)
     );
+    console.log('[Onboarding] voiceProfile generated:', JSON.stringify(voiceProfile, null, 2));
     logAI('buildVoiceProfile DONE', { userId, elapsed: elapsed() });
   } catch (vpError) {
+    console.error('[Onboarding] buildVoiceProfile error:', vpError);
     logError('buildVoiceProfile', vpError, { userId });
     voiceProfile = buildFallbackVoiceProfile(currentProfile);
+    console.log('[Onboarding] Using fallback voiceProfile');
   }
 
-  // RECONSIDER-03: workspace_profiles is PRIMARY — throw on failure
-  logDB('UPDATE', 'workspace_profiles', { userId, workspaceId, step: 'completed' });
+  console.log('[Onboarding] Updating workspace_profiles with completed onboarding...');
   await updateWorkspaceProfile(workspaceId, userId, {
     onboarding_answers:   mergedAnswers,
     voice_profile:        voiceProfile,
@@ -241,13 +312,14 @@ router.post('/answers', validate(onboardingAnswersSchema), asyncHandler(async (r
     onboarding_step:      3,
   });
 
-  // RECONSIDER-03: users write is SECONDARY — non-fatal
+  // Update users table (non-fatal)
   try {
-    logDB('UPDATE', 'users', { userId, onboarding_completed: true });
+    console.log('[Onboarding] Updating users table...');
     await supabaseAdmin.from('users')
       .update({ onboarding_completed: true, onboarding_step: 3 })
       .eq('id', userId);
   } catch (userWriteErr) {
+    console.error('[Onboarding] users.update error (non-fatal):', userWriteErr);
     logError('POST /answers users.update (non-fatal)', userWriteErr, { userId });
   }
 
@@ -255,7 +327,8 @@ router.post('/answers', validate(onboardingAnswersSchema), asyncHandler(async (r
   const freshContext = { ...userContext, ...currentProfile, ...mergedAnswers };
   const fullContext  = { ...req.user, ...currentProfile, voice_profile: voiceProfile, onboarding_answers: mergedAnswers };
 
-  // IMP-02: durable background queue — retryable, observable in Bull Board
+  // Background jobs (fire and forget)
+  console.log('[Onboarding] Queueing background jobs...');
   await backgroundQueue.add(BACKGROUND_JOB_TYPES.SEED_MEMORY, {
     userId, context: freshContext, answers: mergedAnswers, voiceProfile, isRebuild: false,
   }).catch(err => logError('backgroundQueue seed_memory', err, { userId }));
@@ -269,10 +342,12 @@ router.post('/answers', validate(onboardingAnswersSchema), asyncHandler(async (r
   }).catch(err => logError('backgroundQueue opportunities_refresh', err, { userId }));
 
   log('POST /answers COMPLETE', { userId, workspaceId, elapsed: elapsed() });
+  console.log('========================================\n');
+  
   res.json({ success: true, voice_profile: voiceProfile });
 }));
 
-// POST /api/onboarding/abbreviated — for invited members
+// POST /api/onboarding/abbreviated
 router.post('/abbreviated', asyncHandler(async (req, res) => {
   const userId = req.user.id, workspaceId = req.workspace.id;
   const { role, primary_goal } = req.body;
@@ -339,9 +414,15 @@ router.post('/sample-message', asyncHandler(async (req, res) => {
 }));
 
 // GET /api/onboarding/status
+// GET /api/onboarding/status
 router.get('/status', asyncHandler(async (req, res) => {
   const userId = req.user.id, workspaceId = req.workspace.id;
   log('GET /status', { userId, workspaceId });
+
+  // ✅ Disable all caching
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
 
   const { data: profile, error } = await supabaseAdmin
     .from('workspace_profiles')
@@ -349,9 +430,13 @@ router.get('/status', asyncHandler(async (req, res) => {
     .eq('workspace_id', workspaceId).eq('user_id', userId).single();
 
   if (error) throw error;
+  
+  const currentStep = profile?.onboarding_step || 0;
+  console.log(`[Onboarding] GET /status: step=${currentStep}, completed=${profile?.onboarding_completed}`);
+
   res.json({
     completed:        profile?.onboarding_completed || false,
-    step:             profile?.onboarding_step      || 0,
+    step:             currentStep,
     has_voice_profile: !!profile?.voice_profile,
     has_primary_goal:  !!profile?.primary_goal,
     name:             req.user.name,

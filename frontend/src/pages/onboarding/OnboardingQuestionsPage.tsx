@@ -5,18 +5,18 @@ import { onboardingApi } from '@/api/onboarding';
 import { useAuth } from '@/hooks/useAuth';
 import { Button } from '@/components/ui/Button';
 import { Textarea } from '@/components/ui/Input';
-import { Skeleton, SkeletonText } from '@/components/ui/Skeleton';
+import { Skeleton } from '@/components/ui/Skeleton';
 import { InlineAlert } from '@/components/common/index';
 import { AppError } from '@/api/types';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
 import { SLIDE_UP } from '@/lib/animations';
 
 export default function OnboardingQuestionsPage() {
-  const { burst }       = useParams<{ burst: string }>();
-  const burstNum        = parseInt(burst ?? '1', 10);
-  const navigate        = useNavigate();
-  const { refreshUser, setUser } = useAuth();
-  const [answers, setAnswers]   = useState<Record<string, string>>({});
+  const { burst }    = useParams<{ burst: string }>();
+  const burstNum     = parseInt(burst ?? '1', 10);
+  const navigate     = useNavigate();
+  const { refreshUser } = useAuth();
+  const [answers, setAnswers]         = useState<Record<string, string>>({});
   const [serverError, setServerError] = useState('');
   const [showCelebration, setShowCelebration] = useState(false);
 
@@ -25,6 +25,7 @@ export default function OnboardingQuestionsPage() {
     queryFn:  () => onboardingApi.getQuestions().then((r) => r.data),
   });
 
+  // Clear answers whenever the user moves to a new burst
   useEffect(() => {
     setAnswers({});
   }, [burstNum]);
@@ -32,16 +33,26 @@ export default function OnboardingQuestionsPage() {
   const submitMutation = useMutation({
     mutationFn: () =>
       onboardingApi.submitAnswers({ answers, burst: burstNum }).then((r) => r.data),
+
     onSuccess: async (result) => {
       if ('voice_profile' in result && result.voice_profile) {
-        // Final burst complete — voice profile generated
+        // ── Final burst complete ──────────────────────────────────
+        // Navigate FIRST, then refresh. Refreshing before navigating
+        // lets the route guard see onboarding_completed=true and
+        // redirect home before we ever reach /onboarding/preview.
         setShowCelebration(true);
-        await refreshUser();
-        setTimeout(() => navigate('/onboarding/preview'), 2200);
+        setTimeout(async () => {
+          navigate('/onboarding/preview', { replace: true });
+          await refreshUser();
+        }, 2200);
       } else if ('step' in result) {
-        navigate(`/onboarding/q/${result.step}`);
+        // ── Partial burst complete ────────────────────────────────
+        // result.step is the *completed* step (1 or 2).
+        // The next burst to answer is always step + 1.
+        navigate(`/onboarding/q/${result.step + 1}`);
       }
     },
+
     onError: (err) => {
       setServerError(err instanceof AppError ? err.message : 'Submission failed.');
     },

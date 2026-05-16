@@ -13,8 +13,9 @@ export const authApi = {
   logout: () =>
     apiClient.post<{ success: boolean }>('/api/auth/logout'),
 
-  refresh: (refreshToken: string) =>
-    apiClient.post<SessionTokens>('/api/auth/refresh', { refresh_token: refreshToken }),
+  // src/api/auth.ts - Updated
+refresh: () =>
+  apiClient.post<SessionTokens>('/api/auth/refresh', {}), // Empty body, cookie handles it
 
   getMe: () =>
     apiClient.get<{

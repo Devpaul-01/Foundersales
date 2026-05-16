@@ -1,42 +1,39 @@
 // src/routes/auth.js
 // ============================================================
-// AUTH ROUTES — WORKSPACE REFACTOR
-//
-// FIXES APPLIED (refinement plan):
-//  Section 6: Zod registerSchema and loginSchema added to POST /register
-//             and POST /login using the existing validate middleware.
-//             This adds structured validation errors before any DB call,
-//             replacing the ad-hoc if/else checks (kept inline as fallbacks
-//             but now redundant for the validated fields).
+// AUTH ROUTES — HTTP-ONLY COOKIE REFRESH TOKEN
 // ============================================================
 
-import { Router }       from 'express';
-import { z }            from 'zod';
+import { Router } from 'express';
+import { z } from 'zod';
 import { asyncHandler } from '../middleware/errorHandler.js';
-import { validate }     from '../middleware/validate.js';
-import supabaseAdmin    from '../config/supabase.js';
-import authenticate     from '../middleware/auth.js';
+import { validate } from '../middleware/validate.js';
+import supabaseAdmin from '../config/supabase.js';
+import authenticate from '../middleware/auth.js';
 import { createLogger } from '../utils/logger.js';
 
 const router = Router();
 const { log, logError, logDB, logJob } = createLogger('Auth');
 
 const elapsedMs = (startMs) => `${Date.now() - startMs}ms`;
-const sleep     = (ms) => new Promise(r => setTimeout(r, ms));
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-// Section 6: Zod schemas
-// registerSchema: validates before the auth.signUp call so invalid payloads
-// never hit Supabase, giving the client a structured VALIDATION_ERROR response.
+// Cookie configuration
+const cookieConfig = {
+  httpOnly: true,
+  secure: process.env.NODE_ENV === 'production',
+  sameSite: 'strict',
+  path: '/api/auth/refresh', // Only sent to refresh endpoint
+  maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
+};
+
 const registerSchema = z.object({
-  email:    z.string().email('Invalid email format').max(255),
+  email: z.string().email('Invalid email format').max(255),
   password: z.string().min(8, 'Password must be at least 8 characters').max(128),
-  name:     z.string().max(100).optional(),
+  name: z.string().max(100).optional(),
 });
 
-// loginSchema: light validation — email/password presence and format.
-// The full auth check (wrong credentials) is still handled by Supabase.
 const loginSchema = z.object({
-  email:    z.string().email().max(255),
+  email: z.string().email().max(255),
   password: z.string().min(1, 'Password required'),
 });
 
@@ -50,54 +47,36 @@ router.post('/register', validate(registerSchema), asyncHandler(async (req, res)
 
   log('REGISTER Request', { ip: clientIp });
 
-  // Inline guards are now redundant for email/password (Zod handles them)
-  // but kept for explicitness in error messaging.
-  if (!email?.trim()) {
-    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Email is required' });
-  }
-  if (!password) {
-    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Password is required' });
-  }
-  if (password.length < 8) {
-    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Password must be at least 8 characters' });
-  }
-
   const normalizedEmail = email.trim().toLowerCase();
-  log('REGISTER Validation Passed', { hasName: !!name?.trim(), ip: clientIp });
 
-  log('REGISTER Step 1 — Creating Supabase Auth User', { ip: clientIp });
   const { data: authData, error: authError } = await supabaseAdmin.auth.signUp({
-    email:    normalizedEmail,
+    email: normalizedEmail,
     password,
     options: {
       data: { name: name?.trim() || '' },
-      emailRedirectTo:
-        process.env.OAUTH_REDIRECT_URL ||
-        `${process.env.FRONTEND_URL}/auth/callback`,
+      emailRedirectTo: process.env.OAUTH_REDIRECT_URL || `${process.env.FRONTEND_URL}/auth/callback`,
     },
   });
 
   if (authData?.user?.identities?.length === 0) {
-    log('REGISTER Blocked — Email Already Registered (identities=[])', { ip: clientIp });
     return res.status(409).json({
-      error:   'EMAIL_TAKEN',
+      error: 'EMAIL_TAKEN',
       message: 'An account with this email already exists. Please sign in.',
     });
   }
 
   if (authError) {
-    const isEmailTaken =
-      authError.message?.toLowerCase().includes('already registered') ||
-      authError.message?.toLowerCase().includes('user already registered');
+    const isEmailTaken = authError.message?.toLowerCase().includes('already registered') ||
+                         authError.message?.toLowerCase().includes('user already registered');
     if (isEmailTaken) {
       return res.status(409).json({
-        error:   'EMAIL_TAKEN',
+        error: 'EMAIL_TAKEN',
         message: 'An account with this email already exists. Please sign in.',
       });
     }
     logError('POST /register → signUp', authError, { ip: clientIp });
     return res.status(400).json({
-      error:   'REGISTRATION_ERROR',
+      error: 'REGISTRATION_ERROR',
       message: authError.message || 'Registration failed. Please try again.',
     });
   }
@@ -106,43 +85,39 @@ router.post('/register', validate(registerSchema), asyncHandler(async (req, res)
   if (!userId) {
     logError('POST /register → signUp', new Error('No userId returned'), { ip: clientIp });
     return res.status(500).json({
-      error:   'REGISTRATION_FAILED',
+      error: 'REGISTRATION_FAILED',
       message: 'Account setup failed. Please try again.',
     });
   }
 
   log('REGISTER Step 1 Done — Auth User Created', { userId, elapsed: elapsedMs(startTime) });
 
-  log('REGISTER Step 2 — Creating User + Workspace (atomic RPC)', { userId });
-  logDB('RPC', 'create_user_with_workspace', { userId, tier: 'free', hasName: !!name?.trim() });
-
   const profileCreated = await createUserWithWorkspaceRetry(userId, {
-    name:  name?.trim() || null,
+    name: name?.trim() || null,
     email: normalizedEmail,
-    tier:  'free',
+    tier: 'free',
   });
 
   if (!profileCreated) {
     logError('POST /register → createUserWithWorkspaceRetry', new Error('All retries exhausted'), { userId });
-    logJob('deleteAuthUser', { userId, reason: 'workspace_creation_failed', action: 'rollback' });
     await deleteAuthUserWithRetry(userId);
     return res.status(500).json({
-      error:   'REGISTRATION_FAILED',
+      error: 'REGISTRATION_FAILED',
       message: 'Account setup failed. Please try again in a moment.',
     });
   }
 
   log('REGISTER Complete', { userId, needsVerification: true, elapsed: elapsedMs(startTime) });
   return res.status(201).json({
-    success:           true,
+    success: true,
     needsVerification: true,
-    message:           'Account created! Please check your email to verify your account before signing in.',
-    email:             normalizedEmail,
+    message: 'Account created! Please check your email to verify your account before signing in.',
+    email: normalizedEmail,
   });
 }));
 
 // ──────────────────────────────────────────
-// POST /api/auth/login
+// POST /api/auth/login — WITH HTTP-ONLY COOKIE
 // ──────────────────────────────────────────
 router.post('/login', validate(loginSchema), asyncHandler(async (req, res) => {
   const startTime = Date.now();
@@ -151,73 +126,119 @@ router.post('/login', validate(loginSchema), asyncHandler(async (req, res) => {
 
   log('LOGIN Request', { ip: clientIp });
 
-  if (!email?.trim() || !password) {
-    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Email and password are required' });
-  }
-
   const { data, error } = await supabaseAdmin.auth.signInWithPassword({
-    email:    email.trim().toLowerCase(),
+    email: email.trim().toLowerCase(),
     password,
   });
 
   if (error) {
     log('LOGIN Failed', { reason: error.message, ip: clientIp });
-    const isInvalid =
-      error.message?.toLowerCase().includes('invalid') ||
-      error.message?.toLowerCase().includes('credentials');
+    const isInvalid = error.message?.toLowerCase().includes('invalid') ||
+                      error.message?.toLowerCase().includes('credentials');
     return res.status(isInvalid ? 401 : 400).json({
-      error:   isInvalid ? 'INVALID_CREDENTIALS' : 'LOGIN_ERROR',
+      error: isInvalid ? 'INVALID_CREDENTIALS' : 'LOGIN_ERROR',
       message: isInvalid ? 'Incorrect email or password.' : error.message,
     });
   }
 
+  // Set refresh_token as HTTP-only cookie
+  res.cookie('refresh_token', data.session.refresh_token, cookieConfig);
+
   log('LOGIN Success', { userId: data.user?.id, elapsed: elapsedMs(startTime) });
+  
+  // Return access_token in response body (not in cookie)
   return res.json({
-    access_token:  data.session?.access_token,
-    refresh_token: data.session?.refresh_token,
-    expires_in:    data.session?.expires_in,
+    access_token: data.session?.access_token,
+    expires_in: data.session?.expires_in,
+    token_type: 'Bearer',
     user: {
-      id:    data.user?.id,
+      id: data.user?.id,
       email: data.user?.email,
     },
   });
 }));
 
 // ──────────────────────────────────────────
-// POST /api/auth/logout
-// ──────────────────────────────────────────
-router.post('/logout', asyncHandler(async (req, res) => {
-  const authHeader = req.headers.authorization;
-  if (authHeader?.startsWith('Bearer ')) {
-    const token = authHeader.slice(7);
-    await supabaseAdmin.auth.admin.signOut(token).catch(() => {});
-  }
-  res.json({ success: true });
-}));
-
-// ──────────────────────────────────────────
-// POST /api/auth/refresh
+// POST /api/auth/refresh — READ REFRESH TOKEN FROM COOKIE
 // ──────────────────────────────────────────
 router.post('/refresh', asyncHandler(async (req, res) => {
-  const { refresh_token } = req.body;
+  // Get refresh_token from cookie instead of request body
+  const refresh_token = req.cookies?.refresh_token;
+  
   if (!refresh_token) {
-    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'refresh_token required' });
+    return res.status(401).json({ 
+      error: 'REFRESH_FAILED', 
+      message: 'No refresh token found' 
+    });
   }
 
   const { data, error } = await supabaseAdmin.auth.refreshSession({ refresh_token });
+  
   if (error) {
-    return res.status(401).json({ error: 'REFRESH_FAILED', message: error.message });
+    // Clear the invalid cookie
+    res.clearCookie('refresh_token', cookieConfig);
+    return res.status(401).json({ 
+      error: 'REFRESH_FAILED', 
+      message: error.message 
+    });
+  }
+
+  // Set the new refresh_token as HTTP-only cookie
+  if (data.session?.refresh_token) {
+    res.cookie('refresh_token', data.session.refresh_token, cookieConfig);
   }
 
   res.json({
-    access_token:  data.session?.access_token,
-    refresh_token: data.session?.refresh_token,
-    expires_in:    data.session?.expires_in,
+    access_token: data.session?.access_token,
+    expires_in: data.session?.expires_in,
+    token_type: 'Bearer',
   });
 }));
 
 // ──────────────────────────────────────────
-// GET /api/auth/me
+// POST /api/auth/logout — CLEAR COOKIE
+// ──────────────────────────────────────────
+router.post('/logout', asyncHandler(async (req, res) => {
+  const startTime = Date.now();
+  const authHeader = req.headers.authorization;
+  const refresh_token = req.cookies?.refresh_token;
+  const clientIp = req.ip || req.headers['x-forwarded-for'] || 'unknown';
+  
+  log('LOGOUT Request', { ip: clientIp, hasToken: !!authHeader });
+
+  // Clear the refresh token cookie first
+  res.clearCookie('refresh_token', cookieConfig);
+
+  // Invalidate the access token if present
+  if (authHeader?.startsWith('Bearer ')) {
+    const token = authHeader.slice(7);
+    try {
+      await supabaseAdmin.auth.admin.signOut(token);
+      log('LOGOUT Success — Access token invalidated', { elapsed: elapsedMs(startTime) });
+    } catch (error) {
+      log('LOGOUT Warning — Token invalidation failed', { reason: error.message });
+    }
+  }
+
+  // If we have a refresh token, try to revoke it too
+  if (refresh_token) {
+    try {
+      // Attempt to sign out with refresh token
+      await supabaseAdmin.auth.refreshSession({ refresh_token })
+        .catch(() => {});
+    } catch (err) {
+      // Ignore errors here
+    }
+  }
+
+  res.json({ 
+    success: true, 
+    message: 'Logged out successfully' 
+  });
+}));
+
+// ──────────────────────────────────────────
+// GET /api/auth/me (unchanged)
 // ──────────────────────────────────────────
 router.get('/me', authenticate, asyncHandler(async (req, res) => {
   const userId = req.user.id;
@@ -232,7 +253,6 @@ router.get('/me', authenticate, asyncHandler(async (req, res) => {
       )
       .eq('id', userId)
       .single(),
-
     req.user.active_workspace_id
       ? supabaseAdmin
           .from('workspace_members')
@@ -251,13 +271,13 @@ router.get('/me', authenticate, asyncHandler(async (req, res) => {
     return res.status(404).json({ error: 'PROFILE_NOT_FOUND', message: 'User profile not found' });
   }
 
-  const profile    = profileResult.data;
+  const profile = profileResult.data;
   const membership = workspaceResult.data;
 
   res.json({
-    user:               profile,
-    active_workspace:   membership?.workspaces || null,
-    active_membership:  membership
+    user: profile,
+    active_workspace: membership?.workspaces || null,
+    active_membership: membership
       ? { role: membership.role, status: membership.status, joined_at: membership.joined_at }
       : null,
   });
@@ -333,6 +353,74 @@ router.get('/google/url', asyncHandler(async (req, res) => {
 }));
 
 // ──────────────────────────────────────────
+// POST /api/auth/google/callback
+// ──────────────────────────────────────────
+router.post('/google/callback', asyncHandler(async (req, res) => {
+  const { access_token, refresh_token } = req.body;
+  const clientIp = req.ip || req.headers['x-forwarded-for'] || 'unknown';
+
+  log('GOOGLE CALLBACK Request', { ip: clientIp });
+
+  if (!access_token) {
+    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Access token required' });
+  }
+
+  try {
+    // Exchange the OAuth access token for a Supabase session
+    const { data, error } = await supabaseAdmin.auth.signInWithIdToken({
+      provider: 'google',
+      token: access_token,
+    });
+
+    if (error || !data.session) {
+      logError('POST /google/callback → signInWithIdToken', error, { ip: clientIp });
+      return res.status(401).json({
+        error: 'GOOGLE_AUTH_FAILED',
+        message: 'Could not authenticate with Google. Please try again.',
+      });
+    }
+
+    // Set refresh_token as HTTP-only cookie
+    res.cookie('refresh_token', data.session.refresh_token, cookieConfig);
+
+    // Ensure user profile exists
+    const userId = data.user.id;
+    const userEmail = data.user.email;
+    const userName = data.user.user_metadata?.full_name || data.user.user_metadata?.name;
+
+    const profileCreated = await createUserWithWorkspaceRetry(userId, {
+      name: userName || null,
+      email: userEmail,
+      tier: 'free',
+    });
+
+    if (!profileCreated) {
+      logError('POST /google/callback → createUserWithWorkspaceRetry', new Error('Profile creation failed'), { userId });
+      // Don't fail the login, just log it - profile can be created later via /profile/ensure
+    }
+
+    log('GOOGLE CALLBACK Success', { userId, elapsed: elapsedMs(Date.now()) });
+
+    res.json({
+      access_token: data.session.access_token,
+      expires_in: data.session.expires_in,
+      token_type: 'Bearer',
+      user: {
+        id: data.user.id,
+        email: data.user.email,
+        name: userName,
+      },
+    });
+  } catch (err) {
+    logError('POST /google/callback', err, { ip: clientIp });
+    res.status(500).json({
+      error: 'GOOGLE_AUTH_FAILED',
+      message: 'Authentication failed. Please try again.',
+    });
+  }
+}));
+
+// ──────────────────────────────────────────
 // POST /api/auth/resend-verification
 // ──────────────────────────────────────────
 router.post('/resend-verification', asyncHandler(async (req, res) => {
@@ -353,6 +441,115 @@ router.post('/resend-verification', asyncHandler(async (req, res) => {
   res.json({
     success: true,
     message: 'If an account with this email exists, a verification email has been sent.',
+  });
+}));
+
+// ──────────────────────────────────────────
+// POST /api/auth/verify-email
+// ──────────────────────────────────────────
+router.post('/verify-email', asyncHandler(async (req, res) => {
+  const { token, email } = req.body;
+
+  if (!token || !email) {
+    return res.status(400).json({
+      error: 'VALIDATION_ERROR',
+      message: 'Token and email are required',
+    });
+  }
+
+  // Verify the email confirmation token
+  const { error } = await supabaseAdmin.auth.verifyOtp({
+    email: email.trim().toLowerCase(),
+    token,
+    type: 'email',
+  });
+
+  if (error) {
+    logError('POST /verify-email', error);
+    return res.status(400).json({
+      error: 'VERIFICATION_FAILED',
+      message: 'Invalid or expired verification token. Please request a new verification email.',
+    });
+  }
+
+  res.json({
+    success: true,
+    message: 'Email verified successfully! You can now log in.',
+  });
+}));
+
+// ──────────────────────────────────────────
+// POST /api/auth/forgot-password
+// ──────────────────────────────────────────
+router.post('/forgot-password', asyncHandler(async (req, res) => {
+  const { email } = req.body;
+
+  if (!email?.trim()) {
+    return res.status(400).json({
+      error: 'VALIDATION_ERROR',
+      message: 'Email is required',
+    });
+  }
+
+  const redirectTo = `${process.env.FRONTEND_URL}/auth/reset-password`;
+
+  const { error } = await supabaseAdmin.auth.resetPasswordForEmail(email.trim().toLowerCase(), {
+    redirectTo,
+  });
+
+  if (error) {
+    logError('POST /forgot-password', error);
+    // Don't reveal if email exists or not for security
+    return res.json({
+      success: true,
+      message: 'If an account exists with this email, you will receive password reset instructions.',
+    });
+  }
+
+  res.json({
+    success: true,
+    message: 'Password reset email sent. Please check your inbox.',
+  });
+}));
+
+// ──────────────────────────────────────────
+// POST /api/auth/reset-password
+// ──────────────────────────────────────────
+router.post('/reset-password', asyncHandler(async (req, res) => {
+  const { access_token, new_password } = req.body;
+
+  if (!access_token || !new_password) {
+    return res.status(400).json({
+      error: 'VALIDATION_ERROR',
+      message: 'Access token and new password are required',
+    });
+  }
+
+  if (new_password.length < 8) {
+    return res.status(400).json({
+      error: 'VALIDATION_ERROR',
+      message: 'Password must be at least 8 characters',
+    });
+  }
+
+  // Update the user's password using the access token from the email link
+  const { error } = await supabaseAdmin.auth.updateUser({
+    password: new_password,
+  }, {
+    accessToken: access_token,
+  });
+
+  if (error) {
+    logError('POST /reset-password', error);
+    return res.status(400).json({
+      error: 'RESET_FAILED',
+      message: error.message || 'Failed to reset password. Please request a new reset link.',
+    });
+  }
+
+  res.json({
+    success: true,
+    message: 'Password reset successfully! You can now log in with your new password.',
   });
 }));
 
@@ -394,7 +591,10 @@ const deleteAuthUserWithRetry = async (userId, maxRetries = 3) => {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const { error } = await supabaseAdmin.auth.admin.deleteUser(userId);
-      if (!error) return;
+      if (!error) {
+        logJob('deleteAuthUser', { status: 'success', attempt, userId });
+        return;
+      }
       logError(`deleteAuthUser attempt ${attempt}/${maxRetries}`, error, { userId });
       if (attempt < maxRetries) await sleep(attempt * 1000);
     } catch (err) {

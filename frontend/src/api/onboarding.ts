@@ -2,15 +2,15 @@ import apiClient from './client';
 import type { VoiceProfile } from './types';
 
 export const onboardingApi = {
-  getStatus: () =>
-    apiClient.get<{
-      completed:         boolean;
-      step:              number;
-      has_voice_profile: boolean;
-      has_primary_goal:  boolean;
-      name:              string | null;
-      business_name:     string | null;
-    }>('/api/onboarding/status'),
+  getStatus: (params?: { _t?: number }) =>
+  apiClient.get<{
+    completed:         boolean;
+    step:              number;
+    has_voice_profile: boolean;
+    has_primary_goal:  boolean;
+    name:              string | null;
+    business_name:     string | null;
+  }>('/api/onboarding/status', { params }),
 
   submitBasic: (body: {
     name?:                string;

@@ -23,29 +23,74 @@ const PLATFORM_LABELS: Record<string,string> = {
   indiehackers:'Indie Hackers', hackernews:'Hacker News', quora:'Quora', youtube:'YouTube',
 };
 
+// Country list for dropdown (common countries)
+const COUNTRIES = [
+  { value: 'United States', label: 'United States' },
+  { value: 'Nigeria', label: 'Nigeria' },
+  { value: 'United Kingdom', label: 'United Kingdom' },
+  { value: 'Canada', label: 'Canada' },
+  { value: 'Australia', label: 'Australia' },
+  { value: 'Germany', label: 'Germany' },
+  { value: 'France', label: 'France' },
+  { value: 'India', label: 'India' },
+  { value: 'Kenya', label: 'Kenya' },
+  { value: 'South Africa', label: 'South Africa' },
+  { value: 'Ghana', label: 'Ghana' },
+  { value: 'Other', label: 'Other (please specify)' },
+];
+
 export default function OnboardingBasicPage() {
   const navigate = useNavigate();
   const { refreshUser } = useAuth();
   const [serverError, setServerError] = useState('');
   const [selectedPlatforms, setSelectedPlatforms] = useState<string[]>([]);
+  const [selectedCountry, setSelectedCountry] = useState<string>('');
+  const [otherCountry, setOtherCountry] = useState<string>('');
 
-  const { register, handleSubmit, watch, formState: { errors, isSubmitting } } =
+  const { register, handleSubmit, watch, setValue, formState: { errors, isSubmitting } } =
     useForm<OnboardingBasicSchema>({ resolver: zodResolver(onboardingBasicSchema) });
 
   const productDesc = watch('product_description', '');
+  const countryValue = watch('country', '');
 
   const togglePlatform = (p: string) =>
     setSelectedPlatforms((prev) =>
       prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p],
     );
 
+  const handleCountryChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const value = e.target.value;
+    setSelectedCountry(value);
+    if (value !== 'Other') {
+      setValue('country', value);
+      setOtherCountry('');
+    } else {
+      setValue('country', '');
+    }
+  };
+
+  const handleOtherCountryChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value;
+    setOtherCountry(value);
+    setValue('country', value);
+  };
+
   const onSubmit = async (data: OnboardingBasicSchema) => {
     setServerError('');
+    
+    // Log the data being sent to backend
+    console.log('[OnboardingBasic] Submitting data:', JSON.stringify({
+      ...data,
+      preferred_platforms: selectedPlatforms,
+    }, null, 2));
+    
     try {
       await onboardingApi.submitBasic({ ...data, preferred_platforms: selectedPlatforms });
+      console.log('[OnboardingBasic] Submit successful');
       await refreshUser();
       navigate('/onboarding/q/1');
     } catch (err) {
+      console.error('[OnboardingBasic] Submit error:', err);
       setServerError(err instanceof AppError ? err.message : 'Something went wrong.');
     }
   };
@@ -70,6 +115,38 @@ export default function OnboardingBasicPage() {
           <Input label="Your name" placeholder="Jane Doe" required error={errors.name?.message} {...register('name')} />
           <Input label="Business name" placeholder="Acme Inc." {...register('business_name')} />
           <Input label="Website" type="url" placeholder="https://yoursite.com" error={errors.website?.message} {...register('website')} />
+          
+          {/* Location Section - NEW */}
+          <div className="pt-2 border-t border-gray-100">
+            <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wider mb-3">Location</h3>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <Select
+                  label="Country"
+                  options={COUNTRIES}
+                  placeholder="Select country"
+                  value={selectedCountry}
+                  onChange={handleCountryChange}
+                  error={errors.country?.message}
+                />
+                {selectedCountry === 'Other' && (
+                  <Input
+                    label="Country (specify)"
+                    placeholder="Enter your country"
+                    value={otherCountry}
+                    onChange={handleOtherCountryChange}
+                    className="mt-2"
+                  />
+                )}
+              </div>
+              <Input 
+                label="State / Region" 
+                placeholder="e.g., California, Lagos, London" 
+                error={errors.state?.message}
+                {...register('state')} 
+              />
+            </div>
+          </div>
         </div>
 
         {/* Product */}

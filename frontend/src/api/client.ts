@@ -1,3 +1,4 @@
+// src/lib/client.ts
 import axios, { type AxiosInstance, type AxiosResponse, type InternalAxiosRequestConfig } from 'axios';
 import { getTokens, setTokens, clearTokens, scheduleRefresh } from '@/lib/auth';
 import { AppError } from '@/api/types';
@@ -27,13 +28,15 @@ const ERROR_MESSAGES: Record<string, string> = {
   VALIDATION_ERROR:        'Please check your input and try again.',
 };
 
+// ✅ STEP 1: Create the axios instance FIRST
 export const apiClient: AxiosInstance = axios.create({
   baseURL: BASE_URL,
   timeout: 30_000,
   headers: { 'Content-Type': 'application/json' },
+  withCredentials: true, // Send cookies with requests
 });
 
-// ── REQUEST interceptor ───────────────────────────────────────
+// ✅ STEP 2: Then add the request interceptor
 apiClient.interceptors.request.use(
   (config: InternalAxiosRequestConfig) => {
     const { accessToken } = getTokens();
@@ -45,7 +48,7 @@ apiClient.interceptors.request.use(
   (error) => Promise.reject(error),
 );
 
-// ── RESPONSE interceptor (token refresh with queuing) ─────────
+// ✅ STEP 3: Then add the response interceptor
 let isRefreshing = false;
 let refreshQueue: Array<(token: string) => void> = [];
 
@@ -54,10 +57,8 @@ apiClient.interceptors.response.use(
   async (error) => {
     const originalRequest = error.config as InternalAxiosRequestConfig & { _retry?: boolean };
 
-    // ── 401 → attempt token refresh ──────────────────────────
     if (error.response?.status === 401 && !originalRequest._retry) {
       if (isRefreshing) {
-        // Queue concurrent requests until refresh completes
         return new Promise<AxiosResponse>((resolve) => {
           refreshQueue.push((token: string) => {
             if (originalRequest.headers) {
@@ -72,15 +73,15 @@ apiClient.interceptors.response.use(
       isRefreshing = true;
 
       try {
-        const { refreshToken } = getTokens();
-        if (!refreshToken) throw new Error('No refresh token');
-
-        const res = await axios.post(`${BASE_URL}/api/auth/refresh`, {
-          refresh_token: refreshToken,
+        // No body needed - cookie is sent automatically with withCredentials: true
+        const res = await axios.post(`${BASE_URL}/api/auth/refresh`, {}, {
+          withCredentials: true,
         });
 
-        const { access_token, refresh_token, expires_in } = res.data;
-        setTokens(access_token, refresh_token, expires_in);
+        const { access_token, expires_in } = res.data;
+        
+        // Update stored tokens (only access token)
+        setTokens(access_token, '', expires_in);
         scheduleRefresh(expires_in);
 
         // Flush queued requests
@@ -94,7 +95,6 @@ apiClient.interceptors.response.use(
       } catch (refreshError) {
         clearTokens();
         refreshQueue = [];
-        // Redirect to login
         if (typeof window !== 'undefined') {
           window.location.href = '/login';
         }
@@ -103,12 +103,11 @@ apiClient.interceptors.response.use(
         isRefreshing = false;
       }
     }
-
-    // ── Build AppError from response ─────────────────────────
-    const data    = error.response?.data;
-    const code    = (data?.error as string)   ?? 'UNKNOWN';
+    
+    const data = error.response?.data;
+    const code = (data?.error as string) ?? 'UNKNOWN';
     const message = (data?.message as string) ?? ERROR_MESSAGES[code] ?? 'Something went wrong.';
-    const status  = error.response?.status    ?? 0;
+    const status = error.response?.status ?? 0;
     const details = data?.details as Record<string, string[]> | undefined;
 
     throw new AppError(

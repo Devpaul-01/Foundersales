@@ -13,6 +13,7 @@ import { InlineAlert } from '@/components/common/index';
 import { AppError } from '@/api/types';
 import { ROUTES } from '@/lib/constants';
 import { authApi } from '@/api/auth';
+import { onboardingApi } from '@/api/onboarding';
 
 export default function LoginPage() {
   const { login }       = useAuth();
@@ -31,7 +32,27 @@ export default function LoginPage() {
     setServerError('');
     try {
       await login(data.email, data.password);
-      navigate(from, { replace: true });
+
+      const s = await onboardingApi.getStatus({ params: { _t: Date.now() } });
+      const status = s.data;
+      console.log('[Login] Onboarding status:', status);
+
+      // FIX: onboarding_step stores the *last completed* burst.
+      // step 0 → hasn't started         → /onboarding/basic
+      // step 1 → burst 1 done           → resume at burst 2
+      // step 2 → burst 2 done           → resume at burst 3
+      // completed true                  → go to app
+      if (status.completed) {
+        navigate(from, { replace: true });
+      } else if (status.step === 0) {
+        navigate('/onboarding/basic', { replace: true });
+      } else if (status.step === 1) {
+        navigate('/onboarding/q/2', { replace: true });
+      } else if (status.step === 2) {
+        navigate('/onboarding/q/3', { replace: true });
+      } else {
+        navigate('/onboarding/q/3', { replace: true });
+      }
     } catch (err) {
       setServerError(err instanceof AppError ? err.message : 'Login failed. Please try again.');
     }
@@ -115,4 +136,3 @@ export default function LoginPage() {
     </>
   );
 }
-

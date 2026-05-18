@@ -330,8 +330,14 @@ router.post('/answers', validate(onboardingAnswersSchema), asyncHandler(async (r
   // Background jobs (fire and forget)
   console.log('[Onboarding] Queueing background jobs...');
   await backgroundQueue.add(BACKGROUND_JOB_TYPES.SEED_MEMORY, {
-    userId, context: freshContext, answers: mergedAnswers, voiceProfile, isRebuild: false,
-  }).catch(err => logError('backgroundQueue seed_memory', err, { userId }));
+  userId,
+  workspaceId,                 // ✅ ADD THIS
+  context: freshContext,
+  answers: mergedAnswers,
+  voiceProfile,
+  isRebuild: false,
+}).catch(err => logError('backgroundQueue seed_memory', err, { userId }));
+  
 
   await backgroundQueue.add(BACKGROUND_JOB_TYPES.ARCHETYPE_DETECT, {
     userId, workspaceId, userContext: freshContext,
@@ -489,10 +495,16 @@ router.post('/rebuild-voice-profile', asyncHandler(async (req, res) => {
   logDB('UPDATE', 'workspace_profiles', { userId, workspaceId, fields: 'voice_profile' });
   await updateWorkspaceProfile(workspaceId, userId, { voice_profile: voiceProfile });
   await clearWorkspaceCache(userId, workspaceId);
-
   await backgroundQueue.add(BACKGROUND_JOB_TYPES.SEED_MEMORY, {
-    userId, context: userContext, answers: profile.onboarding_answers, voiceProfile, isRebuild: true,
-  }).catch(err => logError('backgroundQueue seed_memory (rebuild)', err, { userId }));
+  userId,
+  workspaceId,                 // ✅ ADD THIS
+  context: userContext,
+  answers: profile.onboarding_answers,
+  voiceProfile,
+  isRebuild: true,
+});
+
+  
 
   log('POST /rebuild-voice-profile COMPLETE', { userId, elapsed: elapsed() });
   res.json({ success: true, voice_profile: voiceProfile });

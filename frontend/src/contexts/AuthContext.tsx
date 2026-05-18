@@ -26,7 +26,9 @@ interface AuthContextValue {
   accessToken:       string | null;
   isAuthenticated:   boolean;
   isLoading:         boolean;
-  login:             (email: string, password: string) => Promise<void>;
+  onboardingStep:    number;      // ✅ NEW
+  onboardingCompleted: boolean;   // ✅ NEW
+  login:             (email: string, password: string) => Promise<{ onboarding: { step: number; completed: boolean } }>;
   logout:            () => Promise<void>;
   refreshUser:       () => Promise<void>;
   setUser:           (user: User) => void;
@@ -40,6 +42,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [activeWorkspace, setActiveWorkspaceState] = useState<Workspace | null>(null);
   const [activeMembership, setActiveMembership] = useState<ActiveMembership | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  
+  // ✅ NEW: Onboarding state
+  const [onboardingStep, setOnboardingStep] = useState<number>(0);
+  const [onboardingCompleted, setOnboardingCompleted] = useState<boolean>(false);
 
   // ── Core: fetch /me and hydrate state ───────────────────────
   const refreshUser = useCallback(async () => {
@@ -53,7 +59,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  // ── Token refresh helper (NO LONGER NEEDS REFRESH TOKEN) ──
+  // ── Token refresh helper ────────────────────────────────────
   const doTokenRefresh = useCallback(async () => {
     const { data } = await authApi.refresh();
     setTokens(data.access_token, '', data.expires_in);
@@ -102,6 +108,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setTokens(data.access_token, data.refresh_token || '', data.expires_in);
     scheduleRefresh(data.expires_in);
     await refreshUser();
+    
+    // ✅ Update onboarding states
+    setOnboardingStep(data.onboarding.step);
+    setOnboardingCompleted(data.onboarding.completed);
+    
+    return { onboarding: data.onboarding };
   }, [refreshUser]);
 
   // ── logout ───────────────────────────────────────────────────
@@ -115,6 +127,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUserState(null);
     setActiveWorkspaceState(null);
     setActiveMembership(null);
+    // ✅ Reset onboarding states on logout
+    setOnboardingStep(0);
+    setOnboardingCompleted(false);
   }, []);
 
   const value = useMemo<AuthContextValue>(
@@ -125,13 +140,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       accessToken: getTokens().accessToken,
       isAuthenticated: !!user,
       isLoading,
+      onboardingStep,
+      onboardingCompleted,
       login,
       logout,
       refreshUser,
       setUser: setUserState,
       setActiveWorkspace: setActiveWorkspaceState,
     }),
-    [user, activeWorkspace, activeMembership, isLoading, login, logout, refreshUser],
+    [user, activeWorkspace, activeMembership, isLoading, onboardingStep, onboardingCompleted, login, logout, refreshUser],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

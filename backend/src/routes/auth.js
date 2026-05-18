@@ -119,6 +119,7 @@ router.post('/register', validate(registerSchema), asyncHandler(async (req, res)
 // ──────────────────────────────────────────
 // POST /api/auth/login — WITH HTTP-ONLY COOKIE
 // ──────────────────────────────────────────
+// POST /api/auth/login — WITH HTTP-ONLY COOKIE + ONBOARDING STATUS
 router.post('/login', validate(loginSchema), asyncHandler(async (req, res) => {
   const startTime = Date.now();
   const { email, password } = req.body;
@@ -144,17 +145,59 @@ router.post('/login', validate(loginSchema), asyncHandler(async (req, res) => {
   // Set refresh_token as HTTP-only cookie
   res.cookie('refresh_token', data.session.refresh_token, cookieConfig);
 
-  log('LOGIN Success', { userId: data.user?.id, elapsed: elapsedMs(startTime) });
+  const userId = data.user?.id;
   
-  // Return access_token in response body (not in cookie)
+  // ✅ Fetch onboarding status for this user
+  let onboardingStatus = { step: 0, completed: false };
+  
+  if (userId) {
+    try {
+      // Get user's active workspace
+      const { data: workspaceMember } = await supabaseAdmin
+        .from('workspace_members')
+        .select('workspace_id')
+        .eq('user_id', userId)
+        .eq('is_active', true)
+        .maybeSingle();
+      
+      if (workspaceMember?.workspace_id) {
+        const { data: profile } = await supabaseAdmin
+          .from('workspace_profiles')
+          .select('onboarding_step, onboarding_completed')
+          .eq('workspace_id', workspaceMember.workspace_id)
+          .eq('user_id', userId)
+          .maybeSingle();
+        
+        if (profile) {
+          onboardingStatus = {
+            step: profile.onboarding_step || 0,
+            completed: profile.onboarding_completed || false,
+          };
+        }
+      }
+    } catch (err) {
+      log('LOGIN Onboarding fetch warning', { error: err.message });
+    }
+  }
+
+  log('LOGIN Success', { 
+    userId: data.user?.id, 
+    onboarding_step: onboardingStatus.step, 
+    elapsed: elapsedMs(startTime) 
+  });
+  
+  // ✅ Return access_token + onboarding status together
   return res.json({
     access_token: data.session?.access_token,
+    refresh_token: data.session?.refresh_token,
     expires_in: data.session?.expires_in,
     token_type: 'Bearer',
     user: {
       id: data.user?.id,
       email: data.user?.email,
+      name: data.user?.user_metadata?.name,
     },
+    onboarding: onboardingStatus,
   });
 }));
 

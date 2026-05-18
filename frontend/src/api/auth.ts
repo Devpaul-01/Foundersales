@@ -1,5 +1,19 @@
+// src/api/auth.ts
 import apiClient from './client';
-import type { User, Workspace, ActiveMembership, SessionTokens, LoginResponse, VoiceProfile } from './types';
+import type { User, Workspace, ActiveMembership, SessionTokens, VoiceProfile } from './types';
+
+// Add this interface
+export interface LoginResponse extends SessionTokens {
+  user: {
+    id: string;
+    email: string;
+    name?: string;
+  };
+  onboarding: {
+    step: number;
+    completed: boolean;
+  };
+}
 
 export const authApi = {
   register: (body: { email: string; password: string; name?: string }) =>
@@ -13,9 +27,21 @@ export const authApi = {
   logout: () =>
     apiClient.post<{ success: boolean }>('/api/auth/logout'),
 
-  // src/api/auth.ts - Updated
-refresh: () =>
-  apiClient.post<SessionTokens>('/api/auth/refresh', {}), // Empty body, cookie handles it
+  refresh: () =>
+    apiClient.post<SessionTokens>('/api/auth/refresh', {}),
+  // src/api/auth.ts — add these to the authApi object
+
+forgotPassword: (email: string) =>
+  apiClient.post<{ success: boolean; message: string }>(
+    '/api/auth/forgot-password', 
+    { email }
+  ),
+
+resetPassword: (accessToken: string, newPassword: string) =>
+  apiClient.post<{ success: boolean; message: string }>(
+    '/api/auth/reset-password',
+    { access_token: accessToken, new_password: newPassword }
+  ),
 
   getMe: () =>
     apiClient.get<{
@@ -24,7 +50,6 @@ refresh: () =>
       active_membership:  ActiveMembership | null;
     }>('/api/auth/me'),
 
-  /** PUT /api/auth/me — updates user + workspace profile fields */
   updateMe: (body: {
     name?:                string;
     business_name?:       string;

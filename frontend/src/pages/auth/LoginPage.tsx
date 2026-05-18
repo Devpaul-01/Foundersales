@@ -28,35 +28,32 @@ export default function LoginPage() {
     formState: { errors, isSubmitting },
   } = useForm<LoginSchema>({ resolver: zodResolver(loginSchema) });
 
-  const onSubmit = async (data: LoginSchema) => {
-    setServerError('');
-    try {
-      await login(data.email, data.password);
-
-      const s = await onboardingApi.getStatus({ params: { _t: Date.now() } });
-      const status = s.data;
-      console.log('[Login] Onboarding status:', status);
-
-      // FIX: onboarding_step stores the *last completed* burst.
-      // step 0 → hasn't started         → /onboarding/basic
-      // step 1 → burst 1 done           → resume at burst 2
-      // step 2 → burst 2 done           → resume at burst 3
-      // completed true                  → go to app
-      if (status.completed) {
-        navigate(from, { replace: true });
-      } else if (status.step === 0) {
-        navigate('/onboarding/basic', { replace: true });
-      } else if (status.step === 1) {
-        navigate('/onboarding/q/2', { replace: true });
-      } else if (status.step === 2) {
-        navigate('/onboarding/q/3', { replace: true });
-      } else {
-        navigate('/onboarding/q/3', { replace: true });
-      }
-    } catch (err) {
-      setServerError(err instanceof AppError ? err.message : 'Login failed. Please try again.');
+  // src/pages/auth/LoginPage.tsx
+const onSubmit = async (data: LoginSchema) => {
+  setServerError('');
+  try {
+    // ✅ Login now returns onboarding status directly
+    const result = await login(data.email, data.password);
+    const status = result.onboarding;
+    
+    console.log('[Login] Onboarding status:', status);
+    
+    // Redirect based on onboarding step
+    if (status.completed) {
+      navigate(from, { replace: true });
+    } else if (status.step === 0) {
+      navigate('/onboarding/basic', { replace: true });
+    } else if (status.step === 1) {
+      navigate('/onboarding/q/2', { replace: true });
+    } else if (status.step === 2) {
+      navigate('/onboarding/q/3', { replace: true });
+    } else {
+      navigate('/onboarding/q/3', { replace: true });
     }
-  };
+  } catch (err) {
+    setServerError(err instanceof AppError ? err.message : 'Login failed. Please try again.');
+  }
+};
 
   const handleGoogle = async () => {
     setGoogleLoading(true);
@@ -98,6 +95,12 @@ export default function LoginPage() {
         <Button type="submit" fullWidth isLoading={isSubmitting} size="md">
           Sign in
         </Button>
+        // Inside the form, after the Password Input
+<div className="text-right">
+  <Link to="/forgot-password" className="text-xs text-brand hover:underline">
+    Forgot password?
+  </Link>
+</div>
       </form>
 
       <div className="relative my-5">

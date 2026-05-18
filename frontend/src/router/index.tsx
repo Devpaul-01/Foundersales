@@ -15,6 +15,8 @@ const LoginPage           = lazy(() => import('@/pages/auth/LoginPage'));
 const RegisterPage        = lazy(() => import('@/pages/auth/RegisterPage'));
 const OAuthCallbackPage   = lazy(() => import('@/pages/auth/OAuthCallbackPage'));
 const AcceptInvitePage    = lazy(() => import('@/pages/auth/AcceptInvitePage'));
+import ForgotPasswordPage from '@/pages/auth/ForgotPasswordPage';
+import ResetPasswordPage from '@/pages/auth/ResetPasswordPage';
 
 // Onboarding
 const OnboardingBasicPage     = lazy(() => import('@/pages/onboarding/OnboardingBasicPage'));
@@ -87,13 +89,16 @@ export const router = createBrowserRouter([
     children: [
 
       // ── PUBLIC AUTH ────────────────────────────────────────
-      {
-        element: <AuthLayout />,
-        children: [
-          { path: '/login',    element: <Page><LoginPage /></Page> },
-          { path: '/register', element: <Page><RegisterPage /></Page> },
-        ],
-      },
+
+{
+  element: <AuthLayout />,
+  children: [
+    { path: '/login',          element: <Page><LoginPage /></Page> },
+    { path: '/register',       element: <Page><RegisterPage /></Page> },
+    { path: '/forgot-password',element: <Page><ForgotPasswordPage /></Page> },  // ✅ ADD
+    { path: '/reset-password', element: <Page><ResetPasswordPage /></Page> },   // ✅ ADD
+  ],
+},
       { path: '/auth/callback',  element: <Page><OAuthCallbackPage /></Page> },
       { path: '/invite/:token',  element: <Page><AcceptInvitePage /></Page> },
 

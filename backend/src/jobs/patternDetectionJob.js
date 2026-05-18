@@ -24,20 +24,19 @@ const clampNum = (val, min, max) => {
 export const runPatternDetectionJob = async () => {
   const startTime = Date.now();
   console.log(`[PatternDetection] Starting ${new Date().toISOString()}`);
-  await logJob('pattern_detection', 'started');
-
   let processed = 0, patternsFound = 0;
 
   try {
+    try { await logJob('pattern_detection', 'started'); } catch (e) { console.warn('[PatternDetection] logJob(started) failed silently:', e.message); }
     const { data: eligibleRows } = await supabaseAdmin
       .from('conversation_analyses')
       .select('user_id, workspace_id')
       .gte('created_at', new Date(Date.now() - 60 * 86400000).toISOString());
 
     if (!eligibleRows?.length) {
-      await logJob('pattern_detection', 'completed', {
+      try { await logJob('pattern_detection', 'completed', {
         processed: 0, patterns_found: 0, duration_ms: Date.now() - startTime,
-      });
+      }); } catch (e) { console.warn('[PatternDetection] logJob(completed) errored silently:', e.message); }
       await scheduledQueue.add('pattern_insights', {}, { attempts: 2, removeOnComplete: { count: 50 } });
       return;
     }
@@ -68,13 +67,13 @@ export const runPatternDetectionJob = async () => {
       await sleep(2500);
     }
 
-    await logJob('pattern_detection', 'completed', {
+    try { await logJob('pattern_detection', 'completed', {
       processed, patterns_found: patternsFound, duration_ms: Date.now() - startTime,
-    });
+    }); } catch (e) { console.warn('[PatternDetection] logJob(completed) errored silently:', e.message); }
     console.log(`[PatternDetection] Done — ${patternsFound} patterns detected across ${processed} pairs`);
   } catch (err) {
     console.error('[PatternDetection] Fatal:', err.message);
-    await logJob('pattern_detection', 'failed', { error_message: err.message, duration_ms: Date.now() - startTime });
+    try { await logJob('pattern_detection', 'failed', { error_message: err.message, duration_ms: Date.now() - startTime }); } catch (e) { console.warn('[PatternDetection] logJob(failed) errored silently:', e.message); }
   }
 
   await scheduledQueue.add('pattern_insights', {}, { attempts: 2, removeOnComplete: { count: 50 } });
@@ -98,13 +97,13 @@ const detectPatternsForUser = async (userId, workspaceId) => {
     .select('product_description, target_audience, archetype')
     .eq('workspace_id', workspaceId)
     .eq('user_id', userId)
-    .single();
+    .maybeSingle();
 
   const { data: userTierRow } = await supabaseAdmin
     .from('users')
     .select('tier')
     .eq('id', userId)
-    .single();
+    .maybeSingle();
 
   const user = { ...wp, tier: userTierRow?.tier || 'free' };
   if (!user.product_description) return 0;
@@ -217,7 +216,7 @@ Return ONLY a JSON array:
           last_reinforced_at: new Date().toISOString(),
         }, { onConflict: 'workspace_id,user_id,pattern_label', ignoreDuplicates: false })
         .select('id')
-        .single();
+        .maybeSingle();
 
       await supabaseAdmin.from('growth_cards').insert({
         workspace_id: workspaceId,

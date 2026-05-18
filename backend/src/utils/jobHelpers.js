@@ -21,5 +21,9 @@ export const sleep = (ms) => new Promise(r => setTimeout(r, ms));
  * @param {object} data   - any extra columns to merge in (duration_ms, error_message, …)
  */
 export const logJob = async (name, status, data = {}) => {
-  await supabaseAdmin.from('job_logs').insert({ job_name: name, status, ...data }).catch(() => {});
+  try {
+    await supabaseAdmin.from('job_logs').insert({ job_name: name, status, ...data });
+  } catch {
+    // Swallow — a logging failure must never kill a job
+  }
 };

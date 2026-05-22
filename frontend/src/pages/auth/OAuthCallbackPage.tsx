@@ -1,6 +1,4 @@
-// ============================================================
-// FILE: src/pages/auth/OAuthCallbackPage.tsx
-// ============================================================
+// src/pages/auth/OAuthCallbackPage.tsx
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@/hooks/useAuth';
@@ -16,45 +14,59 @@ export default function OAuthCallbackPage() {
 
   useEffect(() => {
     const handle = async () => {
-      try {
-        // Supabase sets the session in the URL hash; use the Supabase client to extract it
-        const { createClient } = await import('@supabase/supabase-js');
-        const supabase = createClient(
-          import.meta.env.VITE_SUPABASE_URL,
-          import.meta.env.VITE_SUPABASE_ANON_KEY,
-        );
-        const { data: sessionData } = await supabase.auth.getSession();
-        const session = sessionData?.session;
+  try {
+    // ✅ Tokens are in the hash — parse them directly, no Supabase client needed
+    const hash = window.location.hash.substring(1);
+    const params = new URLSearchParams(hash);
+    const access_token = params.get('access_token');
+    const refresh_token = params.get('refresh_token');
+    const expires_in = parseInt(params.get('expires_in') || '3600', 10);
 
-        if (!session?.access_token) throw new Error('No session');
+    if (!access_token) throw new Error('No access token in callback URL');
 
-        // Store tokens from Supabase OAuth session
-        setTokens(
-          session.access_token,
-          session.refresh_token ?? '',
-          session.expires_in ?? 3600,
-        );
-        scheduleRefresh(session.expires_in ?? 3600);
+    const response = await authApi.googleCallback({
+      access_token,
+      refresh_token: refresh_token ?? undefined,
+      expires_in,
+    });
 
-        // Ensure profile exists (creates workspace if new user)
-        const { data } = await authApi.ensureProfile({
-          name:     session.user?.user_metadata?.full_name,
-          provider: 'google',
-        });
+    setTokens(response.access_token, response.refresh_token || '', response.expires_in || 3600);
+    scheduleRefresh(response.expires_in || 3600);
+    await refreshUser();
 
-        await refreshUser();
+    // AFTER
+console.log('[OAuth Callback Response]', JSON.stringify(response, null, 2));
 
-        if (data.isNewUser) {
-          navigate(ROUTES.ONBOARDING_BASIC, { replace: true });
-        } else {
-          navigate(ROUTES.HOME, { replace: true });
-        }
-      } catch (err) {
-        setError('Authentication failed. Please try again.');
-      }
-    };
+// ✅ Decouple password flag from isNewUser timing window.
+// has_password comes directly from Supabase identity — always reliable.
+if (response.user?.has_password === false) {
+  localStorage.setItem('needs_password_set', 'true');
+} else {
+  localStorage.removeItem('needs_password_set');
+}
+
+if (response.isNewUser) {
+  navigate(ROUTES.ONBOARDING_BASIC, { replace: true });
+} else {
+  if (response.onboarding?.completed) {
+    navigate(ROUTES.HOME, { replace: true });
+  } else if (response.onboarding?.step === 0) {
+    navigate(ROUTES.ONBOARDING_BASIC, { replace: true });
+  } else if (response.onboarding?.step === 1) {
+    navigate('/onboarding/q/2', { replace: true });
+  } else if (response.onboarding?.step === 2) {
+    navigate('/onboarding/q/3', { replace: true });
+  } else {
+    navigate(ROUTES.HOME, { replace: true });
+  }
+}
+  } catch (err) {
+    console.error('[OAuth] Error:', err);
+    setError('Authentication failed. Please try again.');
+  }
+};
     handle();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [navigate, refreshUser]);
 
   if (error) {
     return (

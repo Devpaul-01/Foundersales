@@ -1,48 +1,42 @@
 // src/lib/auth.ts
-const ACCESS_TOKEN_KEY  = 'fs_access_token';
-const REFRESH_TOKEN_KEY = 'fs_refresh_token'; // KEPT FOR BACKWARDS COMPATIBILITY BUT NOT USED
-const EXPIRES_AT_KEY    = 'fs_token_expires_at';
+// Access token stored in memory ONLY — not in localStorage
+// Refresh token is stored in HttpOnly cookie (not managed here)
+
+let _inMemoryAccessToken: string | null = null;
+let _tokenExpiresAt: number | null = null;
 
 export interface StoredTokens {
-  accessToken:  string | null;
-  refreshToken: string | null; // Will always be null now (stored in HTTP-only cookie)
-  expiresAt:    number | null; // unix ms
+  accessToken: string | null;
+  refreshToken: null; // Always null — stored in HttpOnly cookie
+  expiresAt: number | null;
 }
 
 export function getTokens(): StoredTokens {
   return {
-    accessToken:  localStorage.getItem(ACCESS_TOKEN_KEY),
-    refreshToken: null, // ❌ No longer stored in localStorage
-    expiresAt:    Number(localStorage.getItem(EXPIRES_AT_KEY)) || null,
+    accessToken: _inMemoryAccessToken,
+    refreshToken: null,
+    expiresAt: _tokenExpiresAt,
   };
 }
 
 export function setTokens(
-  accessToken:  string,
-  refreshToken: string, // Kept for API compatibility but not stored
-  expiresIn:    number, // seconds
+  accessToken: string,
+  _refreshToken: string, // Kept for API compatibility, not stored
+  expiresIn: number,
 ): void {
-  const expiresAt = Date.now() + expiresIn * 1000;
-  localStorage.setItem(ACCESS_TOKEN_KEY,  accessToken);
-  // ❌ DO NOT store refresh token in localStorage anymore
-  // localStorage.setItem(REFRESH_TOKEN_KEY, refreshToken);
-  localStorage.setItem(EXPIRES_AT_KEY,    String(expiresAt));
-  
-  // Optional: Clear old refresh token if exists
-  localStorage.removeItem(REFRESH_TOKEN_KEY);
+  _inMemoryAccessToken = accessToken;
+  _tokenExpiresAt = Date.now() + expiresIn * 1000;
 }
 
 export function clearTokens(): void {
-  localStorage.removeItem(ACCESS_TOKEN_KEY);
-  localStorage.removeItem(REFRESH_TOKEN_KEY);
-  localStorage.removeItem(EXPIRES_AT_KEY);
+  _inMemoryAccessToken = null;
+  _tokenExpiresAt = null;
 }
 
 /** Returns remaining TTL in seconds (can be negative if expired) */
 export function getRemainingTTL(): number {
-  const { expiresAt } = getTokens();
-  if (!expiresAt) return 0;
-  return Math.floor((expiresAt - Date.now()) / 1000);
+  if (!_tokenExpiresAt) return 0;
+  return Math.floor((_tokenExpiresAt - Date.now()) / 1000);
 }
 
 export function isTokenExpired(): boolean {
@@ -97,4 +91,13 @@ export function setupVisibilityRefreshGuard(
   };
   document.addEventListener('visibilitychange', handler);
   return () => document.removeEventListener('visibilitychange', handler);
+}
+
+// ✅ For debugging (remove in production)
+if (import.meta.env.DEV) {
+  (window as any).__debugAuth = () => ({
+    hasToken: !!_inMemoryAccessToken,
+    expiresAt: _tokenExpiresAt ? new Date(_tokenExpiresAt).toISOString() : null,
+    remainingSeconds: getRemainingTTL(),
+  });
 }

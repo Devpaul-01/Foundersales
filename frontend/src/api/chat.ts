@@ -16,6 +16,20 @@ export const chatApi = {
   }) =>
     apiClient.post<{ chat: Chat }>('/api/chat', body),
 
+  // NEW: Create chat with initial message in one request
+  createWithMessage: (body: {
+    message:        string;
+    chat_type?:     'general' | 'opportunity' | 'practice';
+    chat_mode?:     'general' | 'meeting_notes' | 'prep' | 'followup_coach';
+    opportunity_id?: string | null;
+    prospect_id?:   string | null;
+    event_id?:      string | null;
+    title?:         string;
+    force_search?:  boolean;
+    attachments?:   Array<{ name: string; type: string; url?: string }>;
+  }) =>
+    apiClient.post<{ chat: Chat; message: ChatMessage }>('/api/chat/with-message', body),
+
   getById: (chatId: string, params?: { limit?: number; before?: string }) =>
     apiClient.get<{
       chat:         Chat;
@@ -23,7 +37,6 @@ export const chatApi = {
       linked_event: import('./types').CalendarEvent | null;
     }>(`/api/chat/${chatId}`, { params }),
 
-  /** Non-streaming send — only used as fallback */
   sendMessage: (
     chatId: string,
     body: {

@@ -20,6 +20,33 @@ export const authApi = {
     apiClient.post<{ success: boolean; needsVerification: boolean; email: string; message: string }>(
       '/api/auth/register', body,
     ),
+    // Add to authApi object
+setPassword: (accessToken: string, newPassword: string) =>
+  apiClient.post<{ success: boolean; message: string }>(
+    '/api/auth/set-password',
+    { access_token: accessToken, new_password: newPassword }
+  ),
+  // src/api/auth.ts - Add this method
+  googleCallback: async (data: { access_token: string; refresh_token?: string; expires_in?: number }) => {
+  const response = await apiClient.post<{
+    access_token: string;
+    refresh_token?: string;
+    expires_in: number;
+    token_type: string;
+    user: {
+      id: string;
+      email: string;
+      name: string;
+      has_password: boolean;
+    };
+    isNewUser: boolean;
+    onboarding: {
+      step: number;
+      completed: boolean;
+    };
+  }>('/api/auth/google/callback', data);
+  return response;
+},
 
   login: (body: { email: string; password: string }) =>
     apiClient.post<LoginResponse>('/api/auth/login', body),

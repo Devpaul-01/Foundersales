@@ -1,6 +1,6 @@
 // src/pages/auth/ResetPasswordPage.tsx
 import React, { useState, useEffect } from 'react';
-import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -25,23 +25,28 @@ type ResetPasswordSchema = z.infer<typeof resetPasswordSchema>;
 
 export default function ResetPasswordPage() {
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
   const [serverError, setServerError] = useState('');
   const [isSuccess, setIsSuccess] = useState(false);
   const [isTokenValid, setIsTokenValid] = useState(true);
   const [isVerifying, setIsVerifying] = useState(true);
-
-  const accessToken = searchParams.get('token');
+  const [accessToken, setAccessToken] = useState<string | null>(null);
 
   useEffect(() => {
-    // Verify token is present
-    if (!accessToken) {
+    // ✅ Read from URL hash fragment (not query params)
+    const hashParams = new URLSearchParams(window.location.hash.slice(1));
+    const token = hashParams.get('access_token');
+    const type = hashParams.get('type');
+    
+    console.log('[ResetPassword] Hash params:', { token: token?.slice(0, 20), type });
+    
+    if (!token || type !== 'recovery') {
       setIsTokenValid(false);
       setIsVerifying(false);
     } else {
+      setAccessToken(token);
       setIsVerifying(false);
     }
-  }, [accessToken]);
+  }, []);
 
   const {
     register,

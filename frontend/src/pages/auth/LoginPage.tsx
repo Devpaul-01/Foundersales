@@ -95,7 +95,7 @@ const onSubmit = async (data: LoginSchema) => {
         <Button type="submit" fullWidth isLoading={isSubmitting} size="md">
           Sign in
         </Button>
-        // Inside the form, after the Password Input
+
 <div className="text-right">
   <Link to="/forgot-password" className="text-xs text-brand hover:underline">
     Forgot password?

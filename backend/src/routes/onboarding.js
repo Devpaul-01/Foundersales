@@ -146,6 +146,120 @@ const getSavedQuestionsForBurst = async (workspaceId, userId, burstNumber) => {
   }
   return savedQuestions || null;
 };
+// ============================================================
+// VOICE PROFILE EDITING ENDPOINTS
+// Add these to your existing onboarding.js
+// ============================================================
+
+// GET /api/onboarding/voice-profile
+router.get('/voice-profile', asyncHandler(async (req, res) => {
+  const userId = req.user.id;
+  const workspaceId = req.workspace.id;
+
+  const { data: profile, error } = await supabaseAdmin
+    .from('workspace_profiles')
+    .select('voice_profile, onboarding_completed')
+    .eq('workspace_id', workspaceId).eq('user_id', userId)
+    .single();
+
+  if (error) throw error;
+
+  if (!profile?.voice_profile) {
+    return res.status(404).json({ 
+      error: 'NOT_FOUND', 
+      message: 'Complete onboarding first to generate a voice profile' 
+    });
+  }
+
+  res.json({
+    voice_profile: profile.voice_profile,
+    onboarding_completed: profile.onboarding_completed
+  });
+}));
+
+// PUT /api/onboarding/voice-profile
+const voiceProfileEditSchema = z.object({
+  unique_value_prop: z.string().max(200).optional(),
+  icp_trigger: z.string().max(300).optional(),
+  target_customer_description: z.string().max(500).optional(),
+  main_objection: z.string().max(300).optional(),
+  objection_reframe: z.string().max(300).optional(),
+  best_proof_point: z.string().max(400).optional(),
+  opening_hooks: z.array(z.string().max(150)).max(5).optional(),
+  channel_tone_map: z.object({
+    cold_email: z.string().max(60).optional(),
+    linkedin: z.string().max(60).optional(),
+    reddit: z.string().max(60).optional(),
+    x_twitter: z.string().max(60).optional(),
+  }).optional(),
+  cta_style: z.string().max(100).optional(),
+  voice_style: z.string().max(40).optional(),
+  outreach_persona: z.string().max(100).optional(),
+  avoid_phrases: z.array(z.string().max(50)).max(15).optional(),
+  story_vault: z.array(z.object({
+    title: z.string().max(100),
+    quote: z.string().max(400),
+    outcome: z.string().max(200),
+    channel_use: z.array(z.string())
+  })).max(5).optional(),
+  follow_up_sequence: z.array(z.string().max(200)).max(5).optional(),
+});
+
+router.put('/voice-profile', validate(voiceProfileEditSchema), asyncHandler(async (req, res) => {
+  const userId = req.user.id;
+  const workspaceId = req.workspace.id;
+  const updates = req.body;
+
+  // Get existing profile
+  const { data: existing } = await supabaseAdmin
+    .from('workspace_profiles')
+    .select('voice_profile')
+    .eq('workspace_id', workspaceId).eq('user_id', userId)
+    .single();
+
+  if (!existing?.voice_profile) {
+    return res.status(404).json({ 
+      error: 'NOT_FOUND', 
+      message: 'No voice profile found. Complete onboarding first.' 
+    });
+  }
+
+  // Deep merge
+  const mergedProfile = {
+    ...existing.voice_profile,
+    ...updates,
+    // Handle nested objects
+    channel_tone_map: {
+      ...(existing.voice_profile.channel_tone_map || {}),
+      ...(updates.channel_tone_map || {})
+    },
+    // Handle arrays (replace, not merge)
+    opening_hooks: updates.opening_hooks ?? existing.voice_profile.opening_hooks,
+    avoid_phrases: updates.avoid_phrases ?? existing.voice_profile.avoid_phrases,
+    story_vault: updates.story_vault ?? existing.voice_profile.story_vault,
+    follow_up_sequence: updates.follow_up_sequence ?? existing.voice_profile.follow_up_sequence,
+  };
+
+  const { error } = await supabaseAdmin
+    .from('workspace_profiles')
+    .update({ 
+      voice_profile: mergedProfile, 
+      updated_at: new Date().toISOString() 
+    })
+    .eq('workspace_id', workspaceId).eq('user_id', userId);
+
+  if (error) throw error;
+
+  await clearWorkspaceCache(userId, workspaceId);
+
+  res.json({ 
+    success: true, 
+    voice_profile: mergedProfile,
+    message: 'Voice profile updated successfully'
+  });
+}));
+
+// POST /api/onboarding/voice-profile/regenerate
 
 // GET /api/onboarding/questions
 router.get('/questions', asyncHandler(async (req, res) => {

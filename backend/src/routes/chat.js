@@ -36,7 +36,7 @@ import { streamAndSave, initSSE, sendSSE, endSSE } from '../services/streaming.j
 
 import { needsChatSearch, searchForChat, checkWorkspacePerplexityUsage, incrementWorkspaceUsage } from '../services/perplexity.js';
 import { preprocessAttachmentsForGrok, buildGrokAttachmentPrompt } from '../utils/attachmentProcessor.js';
-import { recordTokenUsage } from '../services/tokenTracker.js';
+
 import { generateMeetingNotesResponse } from '../services/groqCalendarIntelligence.js';
 import supabaseAdmin from '../config/supabase.js';
 import { z } from 'zod';
@@ -308,13 +308,12 @@ router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, re
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'message or attachments required' });
   }
 
-  // FIX HIGH-01: include workspace_id in chat ownership check
   const { data: chat, error: chatError } = await supabaseAdmin
     .from('chats')
     .select('*')
     .eq('id', chatId)
     .eq('user_id', userId)
-    .eq('workspace_id', workspaceId)   // FIX HIGH-01
+    .eq('workspace_id', workspaceId)
     .single();
 
   if (chatError || !chat) {
@@ -324,7 +323,6 @@ router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, re
   const effectiveChatMode = reqChatMode || chat.chat_mode || CHAT_MODES.GENERAL;
   const userCtx = buildUserContext(req);
 
-  // Fetch last 8 messages for context window
   const { data: history } = await supabaseAdmin
     .from('chat_messages')
     .select('role, content')
@@ -337,17 +335,13 @@ router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, re
     content: m.content,
   }));
 
-  // ── Memory facts ─────────────────────────────────────────────────────────
-  // FIX HIGH-05 (read-side): user_memory query was missing workspace_id
-  // filter, meaning facts from other workspaces could surface in chat
-  // responses. Now scoped to workspaceId to match the write side.
   let memoryContext = '';
   if (req.user.memory_enabled !== false) {
     const { data: memFacts } = await supabaseAdmin
       .from('user_memory')
       .select('fact')
       .eq('user_id', userId)
-      .eq('workspace_id', workspaceId)   // FIX HIGH-05 (read-side)
+      .eq('workspace_id', workspaceId)
       .eq('is_active', true)
       .order('reinforcement_count', { ascending: false })
       .limit(5);
@@ -357,7 +351,6 @@ router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, re
     }
   }
 
-  // Active goals for context
   const { data: goals } = await supabaseAdmin
     .from('user_goals')
     .select('goal_text, current_value, target_value, target_unit')
@@ -366,7 +359,6 @@ router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, re
     .eq('status', 'active')
     .limit(3);
 
-  // Latest check-in mood
   const { data: latestCheckIn } = await supabaseAdmin
     .from('daily_check_ins')
     .select('mood_score, answers')
@@ -376,17 +368,12 @@ router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, re
     .limit(1)
     .maybeSingle();
 
-  // ── Build system prompt ─────────────────────────────────────────────────
-  // FIX LOW-08: buildChatSystemPrompt now exists on groqService —
-  // the optional-chaining guard is removed so the rich mode-aware prompt
-  // is always used instead of silently falling back to a generic string.
   const systemPrompt = groqService.buildChatSystemPrompt(userCtx, effectiveChatMode, {
     memoryContext,
-    goals:       goals || [],
-    latestMood:  latestCheckIn?.mood_score || null,
+    goals: goals || [],
+    latestMood: latestCheckIn?.mood_score || null,
   });
 
-  // Attachment processing
   let attachmentPrompt = '';
   let processedAttachments = null;
   if (attachments?.length) {
@@ -400,10 +387,8 @@ router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, re
 
   const userMessageContent = [message?.trim(), attachmentPrompt].filter(Boolean).join('\n\n');
 
-  // ── Perplexity / Exa web search ──────────────────────────────────────────
-  // FIX HIGH-11: Use workspace-level quota functions instead of per-user.
   let searchContext = '';
-  if (force_search || (!attachments?.length && await needsChatSearch(message))) {
+  if (force_search) {
     try {
       const perplexityCheck = await checkWorkspacePerplexityUsage(workspaceId, userCtx.tier);
       if (perplexityCheck.allowed) {
@@ -411,8 +396,6 @@ router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, re
         if (searchResult?.trim()) {
           searchContext = `\n\nWeb search results:\n${searchResult}`;
           await incrementWorkspaceUsage(workspaceId).catch(() => {});
-          const searchTokens = Math.ceil(searchResult.length / 4);
-          await recordTokenUsage(workspaceId, 'perplexity', 0, searchTokens);
         }
       }
     } catch (err) {
@@ -420,21 +403,18 @@ router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, re
     }
   }
 
-  // Save user message
-  logDB('INSERT', 'chat_messages', { chatId, role: 'user' });
-  const { data: userMsg } = await supabaseAdmin
+  await supabaseAdmin
     .from('chat_messages')
     .insert({
       chat_id:      chatId,
       user_id:      userId,
-      workspace_id: workspaceId,   // FIX HIGH-01
+      workspace_id: workspaceId,
       role:         'user',
       content:      userMessageContent || '[attachment]',
     })
     .select('id')
     .single();
 
-  // Atomic message count increment for user message
   await supabaseAdmin.rpc('increment_chat_stats', { p_chat_id: chatId, p_increment: 1 }).catch(() => {});
 
   const messagesForAI = [
@@ -442,7 +422,6 @@ router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, re
     { role: 'user', content: userMessageContent + searchContext },
   ];
 
-  // Meeting notes mode — special handler
   if (effectiveChatMode === CHAT_MODES.MEETING_NOTES) {
     try {
       const { response, event_id } = await generateMeetingNotesResponse(
@@ -470,7 +449,6 @@ router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, re
     }
   }
 
-  // Standard AI response — streaming
   if (stream) {
     initSSE(res);
 
@@ -508,7 +486,6 @@ router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, re
     return;
   }
 
-  // Standard AI response — non-streaming
   try {
     const { content: aiContent, tokens_in, tokens_out } = await callWithFallback({
       systemPrompt,
@@ -516,9 +493,6 @@ router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, re
       temperature: 0.7,
       maxTokens:   800,
     });
-
-    // Token usage tracked at workspace level
-    await recordTokenUsage(workspaceId, 'groq', tokens_in, tokens_out);
 
     const { data: aiMsg } = await supabaseAdmin
       .from('chat_messages')
@@ -531,8 +505,13 @@ router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, re
       })
       .select()
       .single();
+      try {
+  await supabaseAdmin.rpc('increment_chat_stats', { p_chat_id: chat.id, p_increment: 1 });
+} catch (err) {
+  // ignore error
+}
 
-    await supabaseAdmin.rpc('increment_chat_stats', { p_chat_id: chatId, p_increment: 1 }).catch(() => {});
+    
     await supabaseAdmin.from('chats').update({ last_message_at: new Date().toISOString() }).eq('id', chatId);
 
     log('SEND_MESSAGE_OK', { userId, chatId, messageId: aiMsg?.id });
@@ -543,4 +522,205 @@ router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, re
   }
 }));
 
+router.post('/with-message', validateChatMessage, asyncHandler(async (req, res) => {
+  const {
+    message,
+    chat_mode = CHAT_MODES.GENERAL,
+    chat_type = CHAT_TYPES.GENERAL,
+    opportunity_id,
+    prospect_id,
+    event_id,
+    title,
+    force_search,
+    attachments,
+  } = req.body;
+  
+  const userId = req.user.id;
+  const workspaceId = req.workspace.id;
+  
+  log('CREATE_CHAT_WITH_MESSAGE', { userId, workspaceId, chat_mode, chat_type, messageLength: message?.length });
+  
+  if (!message?.trim()) {
+    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'message is required' });
+  }
+  
+  let chatTitle = title;
+  if (!chatTitle) {
+    if (opportunity_id) {
+      const { data: opp } = await supabaseAdmin
+        .from('opportunities')
+        .select('target_name, target_context, platform')
+        .eq('id', opportunity_id)
+        .eq('user_id', userId)
+        .eq('workspace_id', workspaceId)
+        .single();
+      chatTitle = opp ? `Outreach: ${opp.target_name || opp.platform}` : 'New conversation';
+    } else {
+      chatTitle = message.slice(0, 50) + (message.length > 50 ? '...' : '');
+    }
+  }
+  
+  const { data: chat, error: chatError } = await supabaseAdmin
+    .from('chats')
+    .insert({
+      user_id: userId,
+      workspace_id: workspaceId,
+      title: chatTitle,
+      chat_type: chat_type,
+      chat_mode: chat_mode,
+      opportunity_id: opportunity_id || null,
+      prospect_id: prospect_id || null,
+      event_id: event_id || null,
+    })
+    .select()
+    .single();
+  
+  if (chatError) {
+    logError('CREATE_CHAT_WITH_MESSAGE_INSERT', chatError, { userId });
+    throw chatError;
+  }
+  
+  logDB('INSERT', 'chats', { userId, workspaceId, chatId: chat.id, chat_mode });
+  
+  if (opportunity_id) {
+    const { data: opp } = await supabaseAdmin
+      .from('opportunities')
+      .select('target_context, prepared_message, platform, source_url')
+      .eq('id', opportunity_id)
+      .eq('workspace_id', workspaceId)
+      .single();
+    
+    if (opp) {
+      await supabaseAdmin.from('chat_messages').insert({
+        chat_id: chat.id,
+        user_id: userId,
+        workspace_id: workspaceId,
+        role: 'system',
+        content: `Context: You're helping with outreach for someone on ${opp.platform}.\n\nTheir situation: ${opp.target_context}\n\nDraft message: ${opp.prepared_message}`,
+      });
+    }
+  }
+  
+  let attachmentPrompt = '';
+  let processedAttachments = null;
+  if (attachments?.length) {
+    try {
+      const { preprocessAttachmentsForGrok, buildGrokAttachmentPrompt } = await import('../utils/attachmentProcessor.js');
+      processedAttachments = await preprocessAttachmentsForGrok(attachments, userId);
+      attachmentPrompt = buildGrokAttachmentPrompt(processedAttachments);
+    } catch (err) {
+      logError('preprocessAttachments', err, { userId });
+    }
+  }
+  
+  const userMessageContent = [message.trim(), attachmentPrompt].filter(Boolean).join('\n\n');
+  
+  await supabaseAdmin
+    .from('chat_messages')
+    .insert({
+      chat_id: chat.id,
+      user_id: userId,
+      workspace_id: workspaceId,
+      role: 'user',
+      content: userMessageContent,
+    })
+    .select('id')
+    .single();
+  
+  const userCtx = buildUserContext(req);
+  
+  let memoryContext = '';
+  if (req.user.memory_enabled !== false) {
+    const { data: memFacts } = await supabaseAdmin
+      .from('user_memory')
+      .select('fact')
+      .eq('user_id', userId)
+      .eq('workspace_id', workspaceId)
+      .eq('is_active', true)
+      .order('reinforcement_count', { ascending: false })
+      .limit(5);
+    
+    if (memFacts?.length) {
+      memoryContext = `\nContext about this user:\n${memFacts.map(f => `- ${f.fact}`).join('\n')}`;
+    }
+  }
+  
+  const { data: goals } = await supabaseAdmin
+    .from('user_goals')
+    .select('goal_text, current_value, target_value, target_unit')
+    .eq('workspace_id', workspaceId)
+    .eq('user_id', userId)
+    .eq('status', 'active')
+    .limit(3);
+  
+  const { data: latestCheckIn } = await supabaseAdmin
+    .from('daily_check_ins')
+    .select('mood_score, answers')
+    .eq('user_id', userId)
+    .not('processed_at', 'is', null)
+    .order('date', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  
+  const systemPrompt = groqService.buildChatSystemPrompt(userCtx, chat_mode, {
+    memoryContext,
+    goals: goals || [],
+    latestMood: latestCheckIn?.mood_score || null,
+  });
+  
+  let searchContext = '';
+  if (force_search) {
+    try {
+      const { checkWorkspacePerplexityUsage, searchForChat, incrementWorkspaceUsage } = await import('../services/perplexity.js');
+      const perplexityCheck = await checkWorkspacePerplexityUsage(workspaceId, userCtx.tier);
+      if (perplexityCheck.allowed) {
+        const { content: searchResult } = await searchForChat(message, systemPrompt);
+        if (searchResult?.trim()) {
+          searchContext = `\n\nWeb search results:\n${searchResult}`;
+          await incrementWorkspaceUsage(workspaceId).catch(() => {});
+        }
+      }
+    } catch (err) {
+      logError('perplexitySearch', err, { userId });
+    }
+  }
+  
+  const messagesForAI = [
+    { role: 'user', content: userMessageContent + searchContext },
+  ];
+  
+  const { content: aiContent } = await callWithFallback({
+    systemPrompt,
+    messages: messagesForAI,
+    temperature: 0.7,
+    maxTokens: 800,
+  });
+  
+  const { data: aiMsg } = await supabaseAdmin
+    .from('chat_messages')
+    .insert({
+      chat_id: chat.id,
+      user_id: userId,
+      workspace_id: workspaceId,
+      role: 'assistant',
+      content: aiContent || 'I encountered an error. Please try again.',
+    })
+    .select()
+    .single();
+  
+  
+  try {
+  await supabaseAdmin.rpc('increment_chat_stats', { p_chat_id: chat.id, p_increment: 2 });
+} catch (err) {
+  // ignore error
+}
+  await supabaseAdmin.from('chats').update({ last_message_at: new Date().toISOString() }).eq('id', chat.id);
+  
+  log('CREATE_CHAT_WITH_MESSAGE_OK', { userId, workspaceId, chatId: chat.id, messageId: aiMsg?.id });
+  
+  res.status(201).json({
+    chat: chat,
+    message: aiMsg,
+  });
+}));
 export default router;

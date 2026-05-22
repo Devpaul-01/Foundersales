@@ -1,9 +1,9 @@
-// src/lib/client.ts
+// src/api/client.ts
 import axios, { type AxiosInstance, type AxiosResponse, type InternalAxiosRequestConfig } from 'axios';
 import { getTokens, setTokens, clearTokens, scheduleRefresh } from '@/lib/auth';
 import { AppError } from '@/api/types';
 
-const BASE_URL = 'http://localhost:5173';
+const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 
 // ── Error message map ─────────────────────────────────────────
 const ERROR_MESSAGES: Record<string, string> = {
@@ -28,15 +28,15 @@ const ERROR_MESSAGES: Record<string, string> = {
   VALIDATION_ERROR:        'Please check your input and try again.',
 };
 
-// ✅ STEP 1: Create the axios instance FIRST
+// ✅ Create the axios instance
 export const apiClient: AxiosInstance = axios.create({
   baseURL: BASE_URL,
   timeout: 30_000,
   headers: { 'Content-Type': 'application/json' },
-  withCredentials: true, // Send cookies with requests
+  withCredentials: true, // ✅ Send cookies (refresh token) with requests
 });
 
-// ✅ STEP 2: Then add the request interceptor
+// ✅ Request interceptor — adds access token from memory
 apiClient.interceptors.request.use(
   (config: InternalAxiosRequestConfig) => {
     const { accessToken } = getTokens();
@@ -48,17 +48,35 @@ apiClient.interceptors.request.use(
   (error) => Promise.reject(error),
 );
 
-// ✅ STEP 3: Then add the response interceptor
+// ✅ Response interceptor — handles token refresh
 let isRefreshing = false;
 let refreshQueue: Array<(token: string) => void> = [];
+
+// src/api/client.ts — Complete response interceptor
 
 apiClient.interceptors.response.use(
   (response: AxiosResponse) => response,
   async (error) => {
     const originalRequest = error.config as InternalAxiosRequestConfig & { _retry?: boolean };
 
+    // ✅ Skip refresh for public routes (no token needed)
+    const isPublicRequest = originalRequest.url?.includes('/login') ||
+                           originalRequest.url?.includes('/register') ||
+                           originalRequest.url?.includes('/forgot-password') ||
+                           originalRequest.url?.includes('/reset-password') ||
+                           originalRequest.url?.includes('/google/url') ||
+                           originalRequest.url?.includes('/google/callback') ||
+                           originalRequest.url?.includes('/health') ||
+                           originalRequest.url?.includes('/refresh');
+
+    if (isPublicRequest) {
+      return Promise.reject(error);
+    }
+
+    // Only attempt refresh on 401 and not already retried
     if (error.response?.status === 401 && !originalRequest._retry) {
       if (isRefreshing) {
+        // Queue this request to retry after refresh completes
         return new Promise<AxiosResponse>((resolve) => {
           refreshQueue.push((token: string) => {
             if (originalRequest.headers) {
@@ -73,29 +91,33 @@ apiClient.interceptors.response.use(
       isRefreshing = true;
 
       try {
-        // No body needed - cookie is sent automatically with withCredentials: true
+        // Refresh token — cookie is sent automatically with withCredentials: true
         const res = await axios.post(`${BASE_URL}/api/auth/refresh`, {}, {
           withCredentials: true,
         });
 
         const { access_token, expires_in } = res.data;
         
-        // Update stored tokens (only access token)
+        // Update stored tokens (memory only)
         setTokens(access_token, '', expires_in);
         scheduleRefresh(expires_in);
 
-        // Flush queued requests
+        // Retry all queued requests
         refreshQueue.forEach((cb) => cb(access_token));
         refreshQueue = [];
 
+        // Retry the original request
         if (originalRequest.headers) {
           originalRequest.headers['Authorization'] = `Bearer ${access_token}`;
         }
         return apiClient(originalRequest);
       } catch (refreshError) {
+        // Refresh failed — clear session
         clearTokens();
         refreshQueue = [];
-        if (typeof window !== 'undefined') {
+        
+        // Only redirect if not already on login page
+        if (typeof window !== 'undefined' && !window.location.pathname.includes('/login')) {
           window.location.href = '/login';
         }
         return Promise.reject(refreshError);

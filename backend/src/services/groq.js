@@ -124,26 +124,33 @@ export {
 export default {
   // Core
   callGroq, streamGroq, PRIMARY_MODEL, PRO_MODEL, FLASH_MODEL,
-  // Prompts
-  getUserLabel, getContactLabel,
+  
+  // Prompts (ALL)
+  getUserLabel, getContactLabel, archetypeFocus, buildChatSystemPrompt,
+  SYSTEM_PROMPTS, PRESSURE_MODIFIER_BLOCKS, getRoleAwareCoachPrompt, getGrowthStrategistPrompt,
+  
   // Onboarding
   buildVoiceProfile, generateNextBurst, generateBurst1Questions,
   seedMemoryFromOnboarding, generateSampleOutreachMessage, detectUserArchetype,
-  // Outreach
+  
+  // Outreach (ALL - was completely missing)
   generateOutreachMessage, scoreOpportunities, evaluateMessageStrength,
   summarizePerformancePatterns, generateEventPrep, generateCompetitorContext,
-  // Practice
+  
+  // Practice (ALL)
   parseV3Reply, splitIntoChunks, computeThinkingDelay,
   generatePracticeScenarioPrompt, generatePracticeScenarioFromOpportunity,
   generateBuyerProfile, generatePracticeProspectReply, evaluateBuyerStateChange,
   evaluateMessageQualityForGhost, generatePracticeProspectReplyV2,
   generatePracticeProspectReplyV3, generatePracticeInterruption,
+  
   // Coaching
   getCoachResponse, generateCoachingTip, generateReflectionContext,
   generateDailyTips, generateDailyTip, generateCheckInQuestions,
   generateCheckInResponse, generateWeeklyPlan,
+  
   // Session
   generateSessionDebrief, generateSessionDebriefV3, generateCoachingAnnotations,
   generateMultiAxisScores, generateMultiAxisScoresV3, generateAdaptiveCurriculum,
   generatePlaybook, generateRetryComparison,
-};
+}

@@ -12,20 +12,19 @@ import { motion } from 'framer-motion';
 import { SLIDE_UP } from '@/lib/animations';
 
 export default function OnboardingQuestionsPage() {
-  const { burst }    = useParams<{ burst: string }>();
-  const burstNum     = parseInt(burst ?? '1', 10);
-  const navigate     = useNavigate();
+  const { burst } = useParams<{ burst: string }>();
+  const burstNum = parseInt(burst ?? '1', 10);
+  const navigate = useNavigate();
   const { refreshUser } = useAuth();
-  const [answers, setAnswers]         = useState<Record<string, string>>({});
+  const [answers, setAnswers] = useState<Record<string, string>>({});
   const [serverError, setServerError] = useState('');
   const [showCelebration, setShowCelebration] = useState(false);
 
   const { data, isLoading } = useQuery({
     queryKey: ['onboarding', 'questions', burstNum],
-    queryFn:  () => onboardingApi.getQuestions().then((r) => r.data),
+    queryFn: () => onboardingApi.getQuestions().then((r) => r.data),
   });
 
-  // Clear answers whenever the user moves to a new burst
   useEffect(() => {
     setAnswers({});
   }, [burstNum]);
@@ -36,19 +35,21 @@ export default function OnboardingQuestionsPage() {
 
     onSuccess: async (result) => {
       if ('voice_profile' in result && result.voice_profile) {
-        // ── Final burst complete ──────────────────────────────────
-        // Navigate FIRST, then refresh. Refreshing before navigating
-        // lets the route guard see onboarding_completed=true and
-        // redirect home before we ever reach /onboarding/preview.
+        // FINAL BURST COMPLETE
         setShowCelebration(true);
-        setTimeout(async () => {
+        
+        // Refresh user state BEFORE navigation
+        // This ensures the route guard sees onboarding_completed=true
+        await refreshUser();
+        
+        // Small delay for celebration animation, then navigate
+        setTimeout(() => {
           navigate('/onboarding/preview', { replace: true });
-          await refreshUser();
-        }, 2200);
+        }, 2000);
+        
       } else if ('step' in result) {
-        // ── Partial burst complete ────────────────────────────────
-        // result.step is the *completed* step (1 or 2).
-        // The next burst to answer is always step + 1.
+        // PARTIAL BURST COMPLETE
+        // Navigate to next burst (step is the completed one, so +1)
         navigate(`/onboarding/q/${result.step + 1}`);
       }
     },
@@ -61,6 +62,7 @@ export default function OnboardingQuestionsPage() {
   const questions = data?.questions ?? [];
   const allAnswered = questions.every((q) => (answers[q.id] ?? '').trim().length > 0);
 
+  // Celebration screen
   if (showCelebration) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[400px] text-center">
@@ -72,7 +74,7 @@ export default function OnboardingQuestionsPage() {
           ✨
         </motion.div>
         <h2 className="text-xl font-bold text-text-primary mb-2">Your AI sales voice is ready!</h2>
-        <p className="text-sm text-text-muted">Building your profile…</p>
+        <p className="text-sm text-text-muted">Taking you to your profile...</p>
       </div>
     );
   }

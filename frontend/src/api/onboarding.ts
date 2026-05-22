@@ -3,39 +3,60 @@ import type { VoiceProfile } from './types';
 
 export const onboardingApi = {
   getStatus: (params?: { _t?: number }) =>
-  apiClient.get<{
-    completed:         boolean;
-    step:              number;
-    has_voice_profile: boolean;
-    has_primary_goal:  boolean;
-    name:              string | null;
-    business_name:     string | null;
-  }>('/api/onboarding/status', { params }),
+    apiClient.get<{
+      completed: boolean;
+      step: number;
+      has_voice_profile: boolean;
+      has_primary_goal: boolean;
+      name: string | null;
+      business_name: string | null;
+    }>('/api/onboarding/status', { params }),
 
   submitBasic: (body: {
-    name?:                string;
-    business_name?:       string;
+    name?: string;
+    business_name?: string;
     product_description?: string;
-    target_audience?:     string;
-    role?:                string;
-    industry?:            string;
-    experience_level?:    string;
-    business_stage?:      string;
+    target_audience?: string;
+    role?: string;
+    industry?: string;
+    experience_level?: string;
+    business_stage?: string;
     preferred_platforms?: string[];
-    primary_goal?:        string;
-    country?:             string;
-    state?:               string;
-    website?:             string;
-    bio?:                 string;
-  }) =>
-    apiClient.post<{ success: boolean }>('/api/onboarding/basic', body),
+    primary_goal?: string;
+    country?: string;
+    state?: string;
+    website?: string;
+    bio?: string;
+  }) => apiClient.post<{ success: boolean }>('/api/onboarding/basic', body),
 
   getQuestions: () =>
     apiClient.get<{
       questions: Array<{ id: string; question: string }>;
-      burst:     number;
-      step:      number;
+      burst: number;
+      step: number;
     }>('/api/onboarding/questions'),
+
+  getVoiceProfile: () =>
+    apiClient.get<{
+      voice_profile: VoiceProfile;
+      onboarding_completed: boolean;
+    }>('/api/onboarding/voice-profile'),
+
+  // ✅ Main update method (partial updates)
+  updateVoiceProfile: (updates: Partial<VoiceProfile>) =>
+    apiClient.put<{
+      success: boolean;
+      voice_profile: VoiceProfile;
+      message: string;
+    }>('/api/onboarding/voice-profile', updates),
+
+  // ✅ Regenerate from answers
+  rebuildVoiceProfile: () =>
+    apiClient.post<{
+      success: boolean;
+      voice_profile: VoiceProfile;
+      message: string;
+    }>('/api/onboarding/rebuild-voice-profile'),
 
   submitAnswers: (body: { answers: Record<string, string>; burst: number }) =>
     apiClient.post<
@@ -48,20 +69,13 @@ export const onboardingApi = {
 
   generateSampleMessage: () =>
     apiClient.post<{
-      success:              boolean;
-      sample_message:       string;
+      success: boolean;
+      sample_message: string;
       based_on_opportunity: boolean;
-      opportunity_context:  string | null;
-      message:              string;
+      opportunity_context: string | null;
+      message: string;
     }>('/api/onboarding/sample-message'),
 
-  updateVoiceProfile: (voiceProfile: VoiceProfile) =>
-    apiClient.put<{ success: boolean }>('/api/onboarding/profile', {
-      voice_profile: voiceProfile,
-    }),
-
-  rebuildVoiceProfile: () =>
-    apiClient.post<{ success: boolean; voice_profile: VoiceProfile }>(
-      '/api/onboarding/rebuild-voice-profile',
-    ),
+  // ❌ REMOVE this duplicate — use updateVoiceProfile above instead
+  // updateVoiceProfileLegacy: (voiceProfile: VoiceProfile) => ...
 };

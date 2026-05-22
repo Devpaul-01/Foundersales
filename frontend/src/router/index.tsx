@@ -76,6 +76,11 @@ const CoachingQueuePage   = lazy(() => import('@/pages/team/CoachingQueuePage'))
 const ActivityFeedPage    = lazy(() => import('@/pages/team/ActivityFeedPage'));
 
 const NotFoundPage = lazy(() => import('@/pages/NotFoundPage'));
+// In your router/index.tsx
+import SetPasswordPage from '@/pages/auth/SetPasswordPage';
+
+// Add to public routes
+
 
 // ── Suspense wrapper ─────────────────────────────────────────
 function Page({ children }: { children: React.ReactNode }) {
@@ -96,7 +101,8 @@ export const router = createBrowserRouter([
     { path: '/login',          element: <Page><LoginPage /></Page> },
     { path: '/register',       element: <Page><RegisterPage /></Page> },
     { path: '/forgot-password',element: <Page><ForgotPasswordPage /></Page> },  // ✅ ADD
-    { path: '/reset-password', element: <Page><ResetPasswordPage /></Page> },   // ✅ ADD
+    { path: '/reset-password', element: <Page><ResetPasswordPage /></Page> },
+    { path: '/set-password', element: <Page><SetPasswordPage /></Page> }// ✅ ADD
   ],
 },
       { path: '/auth/callback',  element: <Page><OAuthCallbackPage /></Page> },

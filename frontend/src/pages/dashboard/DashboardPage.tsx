@@ -212,15 +212,19 @@ export default function DashboardPage() {
     onSettled: () => queryClient.invalidateQueries({ queryKey: queryKeys.growthFeed() }),
   });
 
-  const newChatMutation = useMutation({
-    mutationFn: (message: string) =>
-      chatApi.create({ chat_type: 'general', chat_mode: 'general' }).then(async (r) => {
-        // Navigate to chat with pre-seeded message
-        return r.data.chat;
-      }),
-    onSuccess: (chat) => navigate(`/chat/${chat.id}`),
-    onError: () => showToast('Could not start chat.', 'error'),
-  });
+  // Replace lines 178-188 with:
+const newChatMutation = useMutation({
+  mutationFn: (message: string) =>
+    chatApi.createWithMessage({ 
+      message: message,
+      chat_type: 'general', 
+      chat_mode: 'general' 
+    }),
+  onSuccess: (response) => {
+    navigate(`/chat/${response.data.chat.id}`);
+  },
+  onError: () => showToast('Could not start chat.', 'error'),
+});
 
   const db    = dashData?.dashboard;
   const cards = feedData?.pages.flatMap((p) => p.cards) ?? [];

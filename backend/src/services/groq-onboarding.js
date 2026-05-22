@@ -23,7 +23,7 @@ export const buildVoiceProfile = async (basicInfo, onboardingAnswers) => {
 You have completed an onboarding conversation with this founder.
 
 Your job is NOT to summarize what they said.
-Your job is to UPGRADE their raw answers into sharp, clear positioning.
+Your job is to UPGRADE their raw answers into a complete, actionable voice profile.
 
 ---
 
@@ -41,14 +41,29 @@ You MUST:
 - Turn everyday words into clear advantages
 - Add context (who, when, why)
 
+SPECIFICITY RULES (MOST IMPORTANT):
+- If user gave a NUMBER (e.g. "4 hours", "$12k", "70%"), KEEP the exact number
+- If user gave a NAME (e.g. "Sarah", "AdVantage"), KEEP the name
+- If user gave a DIRECT QUOTE (e.g. "I didn't know reporting could be painless"), KEEP the quote
+- If user gave a SPECIFIC TIMEFRAME (e.g. "Friday at 2 PM", "Sunday night"), KEEP it
+
+BAD: "Cuts reporting time significantly"
+GOOD: "Cuts reporting from 4 hours to 20 minutes (70% faster)"
+
+BAD: "A client said something positive"
+GOOD: "Client said: 'I checked the dashboard at 11pm Sunday and saw ROAS up 22%'"
+
+BAD: "Agency owners get busy on Fridays"
+GOOD: "The Friday afternoon reporting scramble — 2-4 hours of pulling screenshots before the weekend"
+
 DO NOT:
-- Repeat their words directly
-- Use generic phrases like "high quality", "great service"
-- Leave ideas vague or broad
+- Repeat their words directly (upgrade them)
+- Use generic phrases like "high quality", "great service", "streamline workflow"
+- Leave numbers or quotes generic when you can keep them specific
 
 ALWAYS:
 - Make outputs more specific than the input
-- Anchor in real situations (busy days, urgency, etc.)
+- Anchor in real situations (busy days, urgency, specific moments)
 - Sound natural, not corporate
 
 ---
@@ -75,7 +90,7 @@ ${answersText}
 
 BUILD THE PROFILE:
 
-Be specific. Combine signals across answers.
+Be specific. Keep numbers, names, quotes, and timeframes.
 
 ---
 
@@ -83,41 +98,69 @@ FIELD INSTRUCTIONS:
 
 unique_value_prop:
 - One sharp sentence (max 15 words)
+- Must include a specific outcome or number if available
 - Must feel like something a customer would say
-- Include outcome + why it's different
 
 icp_trigger:
 - The REAL moment someone becomes ready to buy
-- Must be situational (not abstract)
-- Include timing or urgency
+- Must be situational and specific (not abstract)
+- Include timing or urgency (e.g. "Friday at 2 PM", "after a missed deadline")
 
 target_customer_description:
-- 2 sentences max
-- Describe their real-life situation (not demographics only)
-- Include struggle + context
+- 2-3 sentences
+- Describe their real-life situation AND daily struggle
+- Include specific tools they use (e.g. "Slack + Sheets + Asana")
+- Mention a specific time waste or pain point
 
 main_objection:
-- The REAL reason people hesitate (not generic)
-- Infer from answers if needed
+- The REAL reason people hesitate (not generic "price")
+- If user gave specific objection words, use them verbatim
+- Include the fear behind the objection
 
 objection_reframe:
-- Natural, non-salesy response
-- Use logic or proof from their answers
+- Natural, non-salesy response (max 1 sentence)
+- Use logic or specific proof from their answers
+- Address the fear, not just the surface objection
 
 best_proof_point:
-- Turn weak proof into strong credibility
-- If no numbers, use patterns (e.g. repeat praise, consistent behavior)
+- Include specific numbers, client names, or quotes
+- Format: "[Specific result] achieved by [who] in [timeframe]"
+- Example: "Beta agencies cut reporting from 4hrs→20min (70%); 80% of live Slack-demo calls convert"
+
+opening_hooks:
+- 3 specific first-sentence templates for cold email/LinkedIn
+- Each must reference a specific pain moment or unexpected result
+- Example: "Does your Friday still disappear into client reports?"
+
+channel_tone_map:
+- Object with keys: cold_email, linkedin, reddit, x_twitter
+- Each value: 3-5 word tone description
+- Example: "cold_email: direct, problem-first, data"
+
+cta_style:
+- What action do you want? (e.g. "book a 12-min live dashboard audit")
+- Not generic "click here" or "learn more"
 
 voice_style:
 - 3-5 words max
-- Based on how they naturally communicate (NOT generic traits)
+- Based on how they naturally communicate (NOT generic traits like "professional")
 
 outreach_persona:
-- One clear identity
-- Example: "Helpful local seller who makes buying feel easy and fast"
+- One clear identity with a hint of experience
+- Example: "Ex-agency owner who knows the Friday reporting grind"
 
 avoid_phrases:
-- Real phrases to avoid (generic, spammy, or unnatural)
+- 8-10 real phrases to avoid (spammy, corporate, or overused)
+- Include "click here", "free trial", "best-in-class", "leverage", "synergy", "excited to announce", "hope this finds you well", "just checking in", "streamline", "optimize"
+
+story_vault:
+- Array of 2-3 objects with: title, quote, outcome, channel_use
+- Extract from their answers wherever possible
+- Example: {"title": "The Sunday night save", "quote": "I checked the dashboard at 11pm Sunday...", "outcome": "$12k client renewed", "channel_use": ["email", "linkedin"]}
+
+follow_up_sequence:
+- Array of 3 follow-up actions (day 3, day 7, day 14)
+- Must be specific actions, not just "follow up"
 
 ---
 
@@ -130,29 +173,58 @@ RETURN EXACT JSON:
   "main_objection": "",
   "objection_reframe": "",
   "best_proof_point": "",
+  "opening_hooks": ["", "", ""],
+  "channel_tone_map": {
+    "cold_email": "",
+    "linkedin": "",
+    "reddit": "",
+    "x_twitter": ""
+  },
+  "cta_style": "",
   "voice_style": "",
   "outreach_persona": "",
-  "avoid_phrases": ["", "", ""]
-}
-`;
+  "avoid_phrases": ["", "", "", "", "", "", "", ""],
+  "story_vault": [
+    {"title": "", "quote": "", "outcome": "", "channel_use": []}
+  ],
+  "follow_up_sequence": ["", "", ""]
+}`;
 
   const FALLBACK = {
-    unique_value_prop: "Helps customers get what they need quickly without stress",
-    icp_trigger: "When someone is busy and needs a fast solution immediately",
+    unique_value_prop: "Helps customers get what they need without stress",
+    icp_trigger: "When someone realizes their current workflow is taking too long",
     target_customer_description: basicInfo.target_audience || "Not specified",
-    main_objection: "Price or uncertainty about value",
-    objection_reframe: "Show clear value and real-life benefits",
-    best_proof_point: "Customers consistently respond positively and come back",
-    voice_style: "simple, direct, friendly",
-    outreach_persona: "Helpful seller who makes things easy",
-    avoid_phrases: ["hope this finds you well", "just checking in", "best-in-class"]
+    main_objection: "Uncertainty about switching from current process",
+    objection_reframe: "Works with what you already use, no migration needed",
+    best_proof_point: "Customers report saving significant time and reducing missed requests",
+    opening_hooks: [
+      "Does your Friday still disappear into [specific task]?",
+      "Most [audience] don't realize they're losing [X] hours each week to [problem].",
+      "One [customer type] saved a [$X] client by doing this one thing differently."
+    ],
+    channel_tone_map: {
+      cold_email: "direct, problem-first",
+      linkedin: "story-driven, engagement-focused",
+      reddit: "helpful, question-first, no link",
+      x_twitter: "short, punchy, value-packed"
+    },
+    cta_style: "Book a short call or see a live example",
+    voice_style: "direct, simple, helpful",
+    outreach_persona: "Helpful insider who understands the daily grind",
+    avoid_phrases: ["click here", "free trial", "best-in-class", "leverage", "synergy", "excited to announce", "hope this finds you well", "just checking in"],
+    story_vault: [],
+    follow_up_sequence: [
+      "Day 3: Share a specific result or case study",
+      "Day 7: Ask a low-friction question about their current process",
+      "Day 14: Breakup email — offer a resource or final note"
+    ]
   };
 
   try {
     const { content } = await callGroq({
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.4,
-      maxTokens: 2000,
+      maxTokens: 2500,
       modelName: PRO_MODEL
     });
 
@@ -179,11 +251,15 @@ export const generateNextBurst = async ({ burst_number, previous_answers, basic_
   const burstConfig = isBurst2
     ? {
         label: 'BURST 2 — THE CUSTOMER (Real Behavior)',
-        focus: [
-          "Why people usually come to them or need what they offer",
-          "What usually makes people hesitate or not buy at first",
-          "What finally makes people decide to buy or reach out"
-        ],
+        // In generateNextBurst, for burst_number === 2
+// Replace the focus array with this:
+
+focus: [
+  "What exact moment or problem makes a customer start looking for a solution (e.g. missed deadline, Friday reporting scramble, client complaint)",
+  "What specific concern or obstacle makes them hesitate or say 'no' at first (e.g. 'too many tools already', 'my team will resist change')",
+  "What concrete result or event finally convinces them to try or buy (e.g. seeing a live example with their own data, a specific client save story)"
+],
+    
         interlideInstruction: `Write a short natural reaction (max 40 words).
 - Reference something specific they said
 - Sound human and conversational
@@ -191,11 +267,14 @@ export const generateNextBurst = async ({ burst_number, previous_answers, basic_
       }
     : {
         label: 'BURST 3 — HOW THEY SELL (Real Communication)',
-        focus: [
-          "How they usually talk to customers in real life or messages",
-          "What kind of posts or messages people respond to most",
-          "How they normally convince someone to buy or try their offer"
-        ],
+        // In generateNextBurst, for burst_number === 3
+// Replace the focus array with this:
+
+focus: [
+  "How they write to customers in email or DMs that actually gets a reply (e.g. short sentence, specific subject line, question at the end)",
+  "What they say during a demo or call that makes someone say 'yes' (e.g. showing their own Slack messages turn into tasks live)",
+  "What they do when someone doesn't reply after a few days (e.g. send a case study, ask a simple question, break up email)"
+],
         interlideInstruction: `Write a short natural reaction (max 40 words).
 - Reference something specific from earlier answers
 - Transition into understanding how they communicate`
@@ -313,7 +392,7 @@ export const generateBurst1Questions = async (basicInfo) => {
     : '';
 
   const industryContext = basicInfo.industry_deep_dive
-    ? `\nIndustry-specific insight they shared: ${basicInfo.industry_deep_dive}`
+    ? `\nIndustry-specific insight: ${basicInfo.industry_deep_dive}`
     : '';
 
   const stageContext = basicInfo.business_stage
@@ -325,16 +404,25 @@ export const generateBurst1Questions = async (basicInfo) => {
     : '';
 
   const goalContext = basicInfo.primary_goal
-    ? `\nPrimary goal right now: ${basicInfo.primary_goal}`
+    ? `\nPrimary goal: ${basicInfo.primary_goal}`
     : '';
+
+  const productDescription = basicInfo.product_description?.trim();
+  const hasProductContext =
+    productDescription &&
+    productDescription.length > 20 &&
+    !['n/a', 'none', 'not sure', 'unknown'].includes(
+      productDescription.toLowerCase()
+    );
 
   const isBeginnerMode = basicInfo.experience_level === 'beginner';
 
   const prompt = `${SYSTEM_PROMPTS.ONBOARDING_STRATEGIST}
 
 A founder just told you this about their business:
-Product: ${basicInfo.product_description}
-Target customer: ${basicInfo.target_audience}
+
+Product: ${productDescription || 'not provided'}
+Target customer: ${basicInfo.target_audience || 'not specified'}
 Industry: ${basicInfo.industry || 'not specified'}
 Role: ${basicInfo.role || 'founder'}${bioContext}${industryContext}${stageContext}${experienceContext}${goalContext}
 
@@ -342,35 +430,70 @@ IMPORTANT:
 - This user may be a beginner
 - Do NOT assume they understand marketing, strategy, or metrics
 - Ask simple, real-life questions anyone can answer
-- Avoid jargon like "differentiator", "ICP", "emotional pain", "proof point"
+- Questions should feel natural and conversational
+- Avoid sounding robotic or survey-like
 
-${isBeginnerMode ? `BEGINNER MODE:
+${isBeginnerMode
+  ? `BEGINNER MODE:
 - Keep everything extremely simple
-- Do NOT ask for numbers or structured data
-- Let them answer casually
-` : ''}
+- Do NOT ask for numbers, analytics, funnels, CAC, or structured business data
+- Use everyday language`
+  : ''}
+
+CRITICAL LOGIC:
+${
+  hasProductContext
+    ? `- The founder ALREADY explained what their product/business is about
+- Do NOT ask them again what the product does`
+    : `- The founder has NOT clearly explained what their product/business is
+- ONE of the 3 questions MUST ask them what they are building, selling, or helping people do
+- Ask this in a natural way (e.g. "What exactly does your product help people do?" or "What are you building right now?")`
+}
 
 YOUR GOAL:
 Ask exactly 3 questions to understand:
-1. What customers usually like most about what they offer
-2. Any real feedback or experience from customers
-3. When people usually decide to buy or reach out
+
+${
+  hasProductContext
+    ? `1. What customers love most
+   - Ask what people repeatedly praise, mention, or get excited about
+
+2. When people decide to buy
+   - Ask about the situation, frustration, or trigger moment that makes someone want this
+
+3. What channel or platform gets the best response
+   - Ask where they’ve gotten the most replies, interest, DMs, or engagement`
+    : `1. What the product/business actually is
+   - Understand what they are building, selling, or helping people do
+
+2. What customers/users seem to love most
+   - Ask about reactions, compliments, or unexpected benefits
+
+3. Where they’ve gotten the best response or attention
+   - Ask about posts, messages, communities, or platforms that worked unexpectedly well`
+}
 
 RULES:
-- Each question must be 1 sentence only
+- Each question must be exactly 1 sentence
 - Use natural, conversational language
-- Include examples in parentheses
-- Do NOT ask for exact numbers
-- Do NOT ask for deep analysis
-- Make questions easy and quick to answer
+- Include examples in parentheses where helpful
+- Do NOT ask for exact numbers or deep analysis
+- Avoid generic startup jargon
+- Make the questions feel human and easy to answer
 
 Return ONLY a JSON array of exactly 3 question strings.`;
 
-  const FALLBACK = [
-    "What do people usually like most about what you offer? (e.g. taste, speed, quality, convenience)",
-    "Have any customers said something positive about your product or service? (you can share anything they said or how they reacted)",
-    "When do people usually decide to buy or reach out to you? (e.g. when they're busy, need something fast, or see your post)"
-  ];
+  const FALLBACK = hasProductContext
+    ? [
+        "What do customers or users seem to like most about what you offer? (e.g. simplicity, speed, convenience, a specific feature)",
+        "What usually happens right before someone decides they need your product or service? (e.g. a stressful task, an urgent request, a repeated problem)",
+        "Where have you gotten the best reactions or replies so far? (e.g. LinkedIn posts, Reddit comments, cold DMs, WhatsApp groups)"
+      ]
+    : [
+        "What exactly are you building or helping people do right now? (e.g. a tool, service, marketplace, AI app)",
+        "What reactions or compliments have you gotten from people who’ve seen or tried it? (e.g. 'this saves me time' or 'I’ve been needing this')",
+        "Where have you gotten the most interest or replies so far? (e.g. Twitter/X, LinkedIn, Reddit, Discord, cold outreach)"
+      ];
 
   try {
     const { content } = await callGroq({
@@ -381,20 +504,24 @@ Return ONLY a JSON array of exactly 3 question strings.`;
     });
 
     const questions = parseJSONArray(content, FALLBACK);
-    const valid = questions.filter(q => typeof q === 'string' && q.length > 10);
+
+    const valid = questions.filter(
+      q => typeof q === 'string' && q.length > 10
+    );
 
     if (valid.length >= 3) {
-      console.log('[Groq] generateBurst1Questions: success');
       return { questions: valid, source: 'ai' };
     }
 
-    console.warn('[Groq] generateBurst1Questions: fallback used');
     return { questions: FALLBACK, source: 'fallback' };
   } catch (err) {
     console.error('[Groq] generateBurst1Questions FAILED:', err.message);
+
     return { questions: FALLBACK, source: 'fallback' };
   }
 };
+
+
 
 // ──────────────────────────────────────────
 // MEMORY SEEDING FROM ONBOARDING

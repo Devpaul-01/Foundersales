@@ -40,7 +40,9 @@ router.get('/feed', validate(feedQuerySchema, 'query'), asyncHandler(async (req,
       .range(offset, offset + limit - 1),
     supabaseAdmin.from('opportunities')
       .select('id, target_name, target_context, platform, prepared_message, composite_score, created_at')
-      .eq('workspace_id', workspaceId).eq('user_id', userId).eq('stage', 'new')
+      .eq('workspace_id', workspaceId)
+      .or(`user_id.eq.${userId},assigned_to.eq.${userId}`)
+      .eq('stage', 'new')
       .order('composite_score', { ascending: false }).limit(5),
   ]);
 
@@ -161,7 +163,8 @@ router.post('/checkin', requirePermission('member'), validate(checkInSubmitSchem
   const [lastSentResult, lastAnalysisResult] = await Promise.allSettled([
     supabaseAdmin.from('opportunities')
       .select('platform, target_context, prepared_message, marked_sent_at')
-      .eq('workspace_id', workspaceId).eq('user_id', userId)
+      .eq('workspace_id', workspaceId)
+      .or(`user_id.eq.${userId},assigned_to.eq.${userId}`)
       .not('marked_sent_at', 'is', null)
       .order('marked_sent_at', { ascending: false }).limit(1).maybeSingle(),
     supabaseAdmin.from('conversation_analyses')

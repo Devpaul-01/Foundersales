@@ -73,24 +73,30 @@ export const checkWorkspacePerplexityUsage = async (workspaceId, plan = 'free') 
 // ──────────────────────────────────────────────────────────────
 export const incrementWorkspaceUsage = async (workspaceId) => {
   const today = new Date().toISOString().split('T')[0];
-  await supabaseAdmin
-    .rpc('increment_workspace_perplexity_usage', {
-      p_workspace_id: workspaceId,
-      p_date:         today,
-    })
-    .catch(async (rpcErr) => {
-      console.warn('[Exa] increment_workspace_perplexity_usage RPC not found, using fallback:', rpcErr.message);
+
+  try {
+    await supabaseAdmin
+      .rpc('increment_workspace_perplexity_usage', {
+        p_workspace_id: workspaceId,
+        p_date:         today,
+      });
+  } catch (rpcErr) {
+    console.warn('[Exa] increment_workspace_perplexity_usage RPC not found, using fallback:', rpcErr.message);
+    try {
       const { data: existing } = await supabaseAdmin
         .from('workspace_perplexity_usage')
         .select('call_count').eq('workspace_id', workspaceId).eq('date', today).maybeSingle();
       await supabaseAdmin.from('workspace_perplexity_usage').upsert(
         { workspace_id: workspaceId, date: today, call_count: (existing?.call_count || 0) + 1 },
         { onConflict: 'workspace_id,date', ignoreDuplicates: false }
-      ).catch(() => {});
-    });
+      );
+    } catch (_) {}
+  }
 
   // Also increment global counter
-  await supabaseAdmin.rpc('increment_perplexity_global_usage', { p_date: today }).catch(() => {});
+  try {
+    await supabaseAdmin.rpc('increment_perplexity_global_usage', { p_date: today });
+  } catch (_) {}
 };
 
 // ──────────────────────────────────────────────────────────────
@@ -99,27 +105,34 @@ export const incrementWorkspaceUsage = async (workspaceId) => {
 export const incrementUsage = async (userId) => {
   const today = new Date().toISOString().split('T')[0];
 
-  await supabaseAdmin
-    .rpc('increment_perplexity_user_usage', { p_user_id: userId, p_date: today })
-    .catch(async (rpcErr) => {
-      console.warn('[Exa] increment_perplexity_user_usage RPC not found, using upsert fallback:', rpcErr.message);
+  try {
+    await supabaseAdmin
+      .rpc('increment_perplexity_user_usage', { p_user_id: userId, p_date: today });
+  } catch (rpcErr) {
+    console.warn('[Exa] increment_perplexity_user_usage RPC not found, using upsert fallback:', rpcErr.message);
+    try {
       const { data: existing } = await supabaseAdmin
         .from('perplexity_usage').select('call_count').eq('user_id', userId).eq('date', today).maybeSingle();
       await supabaseAdmin.from('perplexity_usage').upsert(
         { user_id: userId, date: today, call_count: (existing?.call_count || 0) + 1 },
         { onConflict: 'user_id,date', ignoreDuplicates: false }
-      ).catch(() => {});
-    });
+      );
+    } catch (_) {}
+  }
 
-  await supabaseAdmin.rpc('increment_perplexity_global_usage', { p_date: today }).catch(async (rpcErr) => {
+  try {
+    await supabaseAdmin.rpc('increment_perplexity_global_usage', { p_date: today });
+  } catch (rpcErr) {
     console.warn('[Exa] increment_perplexity_global_usage RPC not found, using upsert fallback:', rpcErr.message);
-    const { data: existingGlobal } = await supabaseAdmin
-      .from('global_usage').select('perplexity_calls').eq('date', today).maybeSingle();
-    await supabaseAdmin.from('global_usage').upsert(
-      { date: today, perplexity_calls: (existingGlobal?.perplexity_calls || 0) + 1 },
-      { onConflict: 'date', ignoreDuplicates: false }
-    ).catch(() => {});
-  });
+    try {
+      const { data: existingGlobal } = await supabaseAdmin
+        .from('global_usage').select('perplexity_calls').eq('date', today).maybeSingle();
+      await supabaseAdmin.from('global_usage').upsert(
+        { date: today, perplexity_calls: (existingGlobal?.perplexity_calls || 0) + 1 },
+        { onConflict: 'date', ignoreDuplicates: false }
+      );
+    } catch (_) {}
+  }
 };
 
 // ──────────────────────────────────────────────────────────────
@@ -173,7 +186,7 @@ OR
 {"needed": false, "reason": "one short sentence why not"}`;
 
   try {
-    const { content } = await callGroq({ messages: [{ role: 'user', content: prompt }], temperature: 0.1, maxTokens: 80 });
+    const { content } = await callGroq({ messages: [{ role: 'user', content: prompt }], temperature: 0.1, maxTokens: 500 });
     const clean  = content.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
     if (typeof parsed.needed === 'boolean') return parsed;
@@ -410,9 +423,9 @@ export const searchForChat = async (message, systemContext = '') => {
 
   // FIX MED-09: Enhance search query with systemContext if provided
   let searchQuery = message;
-  if (systemContext && systemContext.trim()) {
+  if (systemContext) {
     // Extract key context from system prompt (first 200 chars)
-    const contextHint = systemContext.slice(0, 200).replace(/\n/g, ' ');
+    const contextHint = systemContext;
     searchQuery = `${message} Context: ${contextHint}`;
   }
 

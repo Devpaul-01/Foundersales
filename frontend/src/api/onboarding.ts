@@ -26,6 +26,7 @@ export const onboardingApi = {
     country?: string;
     state?: string;
     website?: string;
+    websites?: string[];
     bio?: string;
   }) => apiClient.post<{ success: boolean }>('/api/onboarding/basic', body),
 
@@ -64,8 +65,19 @@ export const onboardingApi = {
       | { success: boolean; voice_profile: VoiceProfile }
     >('/api/onboarding/answers', body),
 
-  submitAbbreviated: (body: { role?: string; primary_goal?: string }) =>
-    apiClient.post<{ success: boolean }>('/api/onboarding/abbreviated', body),
+  /**
+   * Abbreviated onboarding — called when an invited user skips the full flow.
+   * Saves whichever fields are provided; all are optional except primary_goal
+   * is strongly recommended (the UI enforces it).
+   */
+  submitAbbreviated: (body: {
+    name?: string;
+    role?: string;
+    primary_goal?: string;
+    experience_level?: string;
+    bio?: string;
+    websites?: string[];
+  }) => apiClient.post<{ success: boolean }>('/api/onboarding/abbreviated', body),
 
   generateSampleMessage: () =>
     apiClient.post<{
@@ -75,7 +87,4 @@ export const onboardingApi = {
       opportunity_context: string | null;
       message: string;
     }>('/api/onboarding/sample-message'),
-
-  // ❌ REMOVE this duplicate — use updateVoiceProfile above instead
-  // updateVoiceProfileLegacy: (voiceProfile: VoiceProfile) => ...
 };

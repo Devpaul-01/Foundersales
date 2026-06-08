@@ -55,10 +55,18 @@ export interface PaginationMeta {
 }
 
 // ── Auth ──────────────────────────────────────────────────────
+export type OpportunityOutreach = {
+  opening_line: string;
+  message_suggestion: string;
+  follow_up_hook: string;
+  tone: string;
+  personalization_angle: string;
+};
+
 export interface SessionTokens {
-  access_token:  string;
+  access_token: string;
   refresh_token: string;
-  expires_in:    number;
+  expires_in: number;
 }
 
 export interface LoginResponse extends SessionTokens {
@@ -244,6 +252,7 @@ export interface Opportunity {
   lost_reason:           string | null;
   created_at:            string;
   updated_at?:           string;
+  feedback?:             Feedback[]; // always an array when present, may be empty
 }
 
 export interface OpportunityIntel {
@@ -265,6 +274,30 @@ export interface PipelineMetrics {
   closed_lost_count:  number;
 }
 
+// ── Pipeline board / deal response shapes ─────────────────────
+/** Board-view shape — flattened feedback fields kept for backwards compat */
+export interface PipelineBoardOpportunity extends Opportunity {
+  deal_value_usd?:      number | null;
+  scheduled_call_date?: string | null;
+}
+
+export interface PipelineBoardResponse {
+  pipeline: {
+    contacted:   Opportunity[];
+    replied:     Opportunity[];
+    call_demo:   Opportunity[];
+    closed_won:  Opportunity[];
+    closed_lost: Opportunity[];
+  };
+  view:    'individual' | 'team';
+  metrics: PipelineMetrics;
+}
+
+/** Single-deal detail response — Opportunity already includes feedback[] */
+export interface DealDetailResponse {
+  deal: Opportunity;
+}
+
 export interface CalendarPrompt {
   show:              boolean;
   suggested_title:   string;
@@ -275,18 +308,19 @@ export interface CalendarPrompt {
 
 // ── Feedback ──────────────────────────────────────────────────
 export interface Feedback {
-  id:                    string;
-  user_id:               string;
-  workspace_id:          string;
-  opportunity_id:        string;
-  outcome:               FeedbackOutcome;
-  outcome_note:          string | null;
-  is_final:              boolean;
-  deal_value_usd:        number | null;
-  scheduled_call:        boolean;
-  scheduled_call_date:   string | null;
-  scheduled_call_notes:  string | null;
-  created_at:            string;
+  id:                     string;
+  user_id?:               string;        // optional — not always present in nested responses
+  workspace_id?:          string;        // optional — not always present in nested responses
+  opportunity_id?:        string;        // optional — not always present in nested responses
+  outcome:                FeedbackOutcome;
+  outcome_note:           string | null;
+  is_final?:              boolean;       // optional — defaults to false
+  deal_value_usd:         number | null;
+  scheduled_call:         boolean;
+  scheduled_call_date:    string | null;
+  scheduled_call_notes?:  string | null; // optional
+  created_at:             string;
+  updated_at?:            string;        // present on PATCH responses
 }
 
 // ── Chat ──────────────────────────────────────────────────────

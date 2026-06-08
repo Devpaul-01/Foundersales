@@ -34,17 +34,13 @@ export const PIPELINE_STAGE_VALUES = [
 export const OPPORTUNITY_STATUS = {
   PENDING: 'pending',
   VIEWED:  'viewed',
-  ACTED:   'acted',
   SENT:    'sent',
-  DONE:    'done',
 } as const;
 
 export const STATUS_LABELS: Record<string, string> = {
   pending: 'Pending',
   viewed:  'Viewed',
-  acted:   'Acted',
   sent:    'Sent',
-  done:    'Done',
 };
 
 // ── Practice ──────────────────────────────────────────────────

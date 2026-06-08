@@ -93,14 +93,14 @@ router.post('/:goalId/notes', requirePermission('member'), asyncHandler(async (r
   const delta    = explicit_delta != null ? (parseFloat(explicit_delta) || 0) : (parseFloat(parsed.progress_delta) || 0);
   const newValue = Math.max(0, (goal.current_value ?? 0) + delta);
 
-  if (delta !== 0) await supabaseAdmin.rpc('increment_goal_progress', { p_goal_id: goalId, p_delta: delta }).catch(() => {});
+  if (delta !== 0) { try { await supabaseAdmin.rpc('increment_goal_progress', { p_goal_id: goalId, p_delta: delta }); } catch {} }
 
   let goalCompleted = false;
   if (goal.target_value && newValue >= goal.target_value && goal.status === 'active') {
     await supabaseAdmin.from('user_goals').update({ status: 'completed', completed_at: new Date().toISOString() }).eq('id', goalId);
     goalCompleted = true;
     // Gap 3: activity event
-    await supabaseAdmin.from('workspace_activity').insert({ workspace_id: workspaceId, user_id: userId, event_type: ACTIVITY_EVENTS.GOAL_REACHED, metadata: { goal_text: goal.goal_text } }).catch(() => {});
+    try { await supabaseAdmin.from('workspace_activity').insert({ workspace_id: workspaceId, user_id: userId, event_type: ACTIVITY_EVENTS.GOAL_REACHED, metadata: { goal_text: goal.goal_text } }); } catch {}
   }
 
   const { data: note, error: noteError } = await supabaseAdmin.from('goal_notes').insert({ goal_id: goalId, user_id: userId, note_text: note_text.trim(), ai_response: parsed.coaching_response, progress_delta: delta, sentiment: parsed.needs_tip_card ? 'negative' : delta > 0 ? 'positive' : 'neutral' }).select().single();

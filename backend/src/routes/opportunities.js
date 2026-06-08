@@ -24,6 +24,7 @@ import {
   updateStatusSchema,
   assignOpportunitySchema,
 } from '../validators/opportunities.js';
+import { sendDealAssignedEmail } from '../services/email.js';
 import {
   PIPELINE_STAGES,
   OPPORTUNITY_STATUS,
@@ -38,7 +39,7 @@ import {
   incrementUsage,
   searchForChat,
 } from '../services/perplexity.js';
-import { recordTokenUsage } from '../services/tokenTracker.js';
+import { incrementWorkspaceUsage } from '../services/perplexity.js';
 import { callWithFallback } from '../services/multiProvider.js';
 import { notifyUser }       from '../services/notifications.js';
 import supabaseAdmin        from '../config/supabase.js';
@@ -73,15 +74,24 @@ router.get('/', validate(listOpportunitiesQuerySchema, 'query'), asyncHandler(as
   const { status, limit, offset } = req.query;
   log('LIST', { userId, workspaceId, status, limit, offset });
 
+  const userFilter = `user_id.eq.${userId},assigned_to.eq.${userId}`;
   let query = supabaseAdmin
     .from('opportunities')
     .select('*')
     .eq('workspace_id', workspaceId)
-    .eq('user_id', userId)
+    .or(userFilter)
     .order('composite_score', { ascending: false })
     .range(offset, offset + limit - 1);
 
-  if (status !== 'all') query = query.eq('stage', PIPELINE_STAGES.NEW).eq('status', status);
+  // Opportunities list only shows actionable cards:
+  //   - stage = new  (once stage advances via feedback the deal lives in pipeline)
+  //   - status != sent  (sent = feedback logged = completed, nothing left to action)
+  // The 'all' tab shows everything pending + viewed; specific tabs narrow further.
+  query = query
+    .eq('stage', PIPELINE_STAGES.NEW)
+    .neq('status', OPPORTUNITY_STATUS.SENT);
+
+  if (status !== 'all') query = query.eq('status', status);
 
   const { data: opps, error } = await query;
   if (error) { logError('GET /', error, { userId }); throw error; }
@@ -152,12 +162,14 @@ router.post('/refresh', requirePermission('member'), refreshRateLimiter, asyncHa
   await incrementUsage(userId);
 
   if ((inserted?.length || 0) > 0) {
-    await supabaseAdmin.from('workspace_activity').insert({
-      workspace_id: workspaceId,
-      user_id:      userId,
-      event_type:   ACTIVITY_EVENTS.OPPORTUNITY_CREATED,
-      metadata:     { count: inserted.length },
-    }).catch(() => {});
+    try {
+      await supabaseAdmin.from('workspace_activity').insert({
+        workspace_id: workspaceId,
+        user_id:      userId,
+        event_type:   ACTIVITY_EVENTS.OPPORTUNITY_CREATED,
+        metadata:     { count: inserted.length },
+      });
+    } catch (_) {}
   }
 
   logDB('INSERT', 'opportunities', { userId, workspaceId, count: inserted?.length || 0 });
@@ -169,37 +181,54 @@ router.post('/refresh', requirePermission('member'), refreshRateLimiter, asyncHa
   });
 }));
 
-// Issue 5: /:id/assign registered BEFORE /:id — correct order maintained.
-// PUT /api/opportunities/:id/assign  (Gap 4: manager+, Gap 6: push notification)
 router.put('/:id/assign', requirePermission('manager'), validate(assignOpportunitySchema), asyncHandler(async (req, res) => {
   const { id } = req.params;
   const { user_id: assigneeId } = req.body;
   const workspaceId = req.workspace.id;
 
+  // Verify assignee is an active member
   const { data: member } = await supabaseAdmin
     .from('workspace_members').select('id')
     .eq('workspace_id', workspaceId).eq('user_id', assigneeId).eq('status', 'active').single();
   if (!member) return res.status(404).json({ error: 'NOT_FOUND', message: 'Assignee is not an active member.' });
 
-  const { data: opp } = await supabaseAdmin
-    .from('opportunities').select('id, target_name')
-    .eq('id', id).eq('workspace_id', workspaceId).single();
+  // Fetch deal, assignee, and assigner in parallel
+  const [{ data: opp }, { data: assignee }, { data: assigner }] = await Promise.all([
+    supabaseAdmin.from('opportunities').select('id, target_name, target_context')
+      .eq('id', id).eq('workspace_id', workspaceId).single(),
+    supabaseAdmin.from('users').select('email, name').eq('id', assigneeId).single(),
+    supabaseAdmin.from('users').select('name').eq('id', req.user.id).single(),
+  ]);
   if (!opp) return res.status(404).json({ error: 'NOT_FOUND', message: 'Opportunity not found.' });
 
+  const dealName = opp.target_name || extractName(opp.target_context) || 'Unnamed prospect';
+
+  // Core update
   await supabaseAdmin.from('opportunities').update({ assigned_to: assigneeId }).eq('id', id);
 
-  await notifyUser(assigneeId, {
+  // Side effects — all fire-and-forget so they never fail the request
+  notifyUser(assigneeId, {
     title: "You've been assigned a new opportunity",
-    body:  `New opportunity: ${opp.target_name || 'Unnamed prospect'}`,
+    body:  `New opportunity: ${dealName}`,
     data:  { type: 'opportunity_assigned', opportunity_id: id, workspace_id: workspaceId },
-  }).catch(() => {});
+  }).catch(err => logError('ASSIGN_NOTIFY_FAILED', err, { opportunityId: id, assigneeId }));
 
-  await supabaseAdmin.from('workspace_activity').insert({
+  if (assignee?.email) {
+    sendDealAssignedEmail({
+      assigneeEmail: assignee.email,
+      assigneeName:  assignee.name,
+      assignerName:  assigner?.name,
+      dealName,
+      opportunityId: id,
+    }).catch(err => logError('ASSIGN_EMAIL_FAILED', err, { opportunityId: id, assigneeId }));
+  }
+
+  Promise.resolve(supabaseAdmin.from('workspace_activity').insert({
     workspace_id: workspaceId,
     user_id:      req.user.id,
     event_type:   ACTIVITY_EVENTS.OPPORTUNITY_ASSIGNED,
-    metadata:     { opportunity_id: id, assigned_to: assigneeId, target_name: opp.target_name },
-  }).catch(() => {});
+    metadata:     { opportunity_id: id, assigned_to: assigneeId, target_name: dealName },
+  })).catch(err => logError('ASSIGN_ACTIVITY_FAILED', err, { opportunityId: id, assigneeId }));
 
   log('ASSIGN', { workspaceId, opportunityId: id, assigneeId, byUserId: req.user.id });
   res.json({ success: true, assigned_to: assigneeId });
@@ -211,7 +240,8 @@ router.get('/:id', asyncHandler(async (req, res) => {
   const userId = req.user.id, workspaceId = req.workspace.id;
   const { data: opp, error } = await supabaseAdmin
     .from('opportunities').select('*')
-    .eq('id', id).eq('workspace_id', workspaceId).eq('user_id', userId).single();
+    .eq('id', id).eq('workspace_id', workspaceId)
+    .or(`user_id.eq.${userId},assigned_to.eq.${userId}`).single();
   if (error || !opp) return res.status(404).json({ error: 'NOT_FOUND' });
   if (opp.status === OPPORTUNITY_STATUS.PENDING) {
     await supabaseAdmin.from('opportunities').update({ status: OPPORTUNITY_STATUS.VIEWED }).eq('id', id);
@@ -232,7 +262,8 @@ router.put('/:id/status', requirePermission('member'), validate(updateStatusSche
 
   const { data: opp } = await supabaseAdmin
     .from('opportunities').select('id')
-    .eq('id', id).eq('workspace_id', workspaceId).eq('user_id', userId).single();
+    .eq('id', id).eq('workspace_id', workspaceId)
+    .or(`user_id.eq.${userId},assigned_to.eq.${userId}`).single();
   if (!opp) return res.status(404).json({ error: 'NOT_FOUND' });
 
   const updates = { status };
@@ -247,45 +278,149 @@ router.put('/:id/status', requirePermission('member'), validate(updateStatusSche
 }));
 
 // GET /api/opportunities/:id/intel
+//
+// CHANGES:
+//  - Cache check: returns intel_snapshot from DB if fresh (< INTEL_CACHE_TTL_MS),
+//    skipping both AI calls entirely on repeat requests.
+//  - Dual parallel AI calls via Promise.all:
+//      Call 1 (research)  — Groq analyses Exa search results into pain_points,
+//                           talking_points, risks, and confidence.
+//      Call 2 (outreach)  — Groq generates personalised outreach details
+//                           (opening_line, message_suggestion, follow_up_hook,
+//                           tone, personalization_angle) using the same Exa
+//                           context + the user's voice profile.
+//  - Combined snapshot { intel, outreach, research: { citations } } is written
+//    to intel_snapshot + intel_generated_at so the next request hits the cache.
+//  - intel_fetch_failed is set on any hard error so callers can surface a retry CTA.
+//  - Token usage for both calls is recorded together under workspaceId.
+const INTEL_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
 router.get('/:id/intel', asyncHandler(async (req, res) => {
   const { id } = req.params;
   const userId = req.user.id, workspaceId = req.workspace.id;
+
   const { data: opp } = await supabaseAdmin
     .from('opportunities').select('*')
-    .eq('id', id).eq('workspace_id', workspaceId).eq('user_id', userId).single();
+    .eq('id', id).eq('workspace_id', workspaceId)
+    .or(`user_id.eq.${userId},assigned_to.eq.${userId}`).single();
   if (!opp) return res.status(404).json({ error: 'NOT_FOUND' });
+
   if (!computeIntelNeeded(opp.target_context, opp.target_name)) {
-    return res.json({ intel: null, reason: 'no_named_entity' });
+    return res.json({ intel: null, outreach: null, reason: 'no_named_entity' });
+  }
+
+  // ── Cache hit — skip both AI calls ───────────────────────────────────────
+  if (opp.intel_snapshot && opp.intel_generated_at && !opp.intel_fetch_failed) {
+    const cacheAge = Date.now() - new Date(opp.intel_generated_at).getTime();
+    if (cacheAge < INTEL_CACHE_TTL_MS) {
+      logAI('INTEL_CACHE_HIT', { id, workspaceId, ageMs: cacheAge });
+      return res.json({ ...opp.intel_snapshot, cached: true });
+    }
   }
 
   const userCtx = buildUserContext(req);
+  // Normalise string fields that downstream services call .trim() on.
+  // product_description can be stored as a JSON object in Supabase; coerce to string.
+  userCtx.product_description = String(userCtx.product_description ?? '');
+
   try {
-    const searchQuery = opp.target_name || opp.target_context?.slice(0, 100) || '';
-    const results     = await searchForChat(searchQuery, userId);
-    const intelText   = results?.map(r => r.text || r.snippet || '').join('\n').slice(0, 2000) || '';
-    if (!intelText) return res.json({ intel: null, reason: 'no_results' });
+    // ── Exa search — shared context for both Groq calls ──────────────────
+    
+    
+    const searchQuery = `${opp.target_name || ''} ${opp.target_context?.slice(0, 300) || ''}`.trim();
+    const searchResult = await searchForChat(searchQuery, userCtx);
 
-    const { content, tokens_in, tokens_out } = await callWithFallback({
-      model: PRO_MODEL,
-      systemPrompt: 'You generate prospect intelligence for sales outreach. Return only JSON.',
-      messages: [{
-        role: 'user',
-        content: `Generate intel for outreach to: ${opp.target_name || opp.target_context?.slice(0, 200)}. Context: ${intelText}. Product: ${userCtx.product_description}. Return ONLY JSON: {"pain_points":["..."],"talking_points":["..."],"risks":["..."],"confidence":"low|medium|high"}`,
-      }],
-      temperature: 0.3, maxTokens: 400,
-    });
+    // searchForChat returns { content, citations } — see perplexity.js
+    const intelText = searchResult?.content?.slice(0, 2000) || '';
+    const citations = searchResult?.citations               || [];
 
-    // Issue 15: was recordTokenUsage(userId, ...) — fixed to workspaceId.
-    // Token usage is scoped to workspace for billing/quota aggregation.
-    // Using userId here meant intel calls were attributed to the wrong dimension
-    // and would not appear in workspace-level usage reports.
-    await recordTokenUsage(workspaceId, 'groq', tokens_in, tokens_out);
+    if (!intelText) {
+      try {
+        await supabaseAdmin
+          .from('opportunities')
+          .update({ intel_fetch_failed: true })
+          .eq('id', id);
+      } catch (_) {}
+      return res.json({ intel: null, outreach: null, reason: 'no_results' });
+    }
 
-    const intel = JSON.parse(content.replace(/```json|```/g, '').trim());
-    res.json({ intel });
+    const prospectLabel  = opp.target_name || 'Unknown prospect';
+    const targetContext  = opp.target_context?.slice(0, 500) || '';
+    const voiceProfile   = JSON.stringify(userCtx.voice_profile || {});
+
+    // ── Dual Groq calls — run in parallel ────────────────────────────────
+    const [researchResult, outreachResult] = await Promise.all([
+
+      // Call 1 — Research: pain points, talking points, risks, confidence
+      callWithFallback({
+        model:        PRO_MODEL,
+        systemPrompt: 'You generate prospect intelligence for sales outreach. Return only JSON.',
+        messages: [{
+          role:    'user',
+          content: `Generate intel for outreach to: ${prospectLabel}.
+Opportunity context: ${targetContext}.
+Research context: ${intelText}.
+Product: ${userCtx.product_description}.
+Return ONLY JSON: {"pain_points":["..."],"talking_points":["..."],"risks":["..."],"confidence":"low|medium|high"}`,
+        }],
+        temperature: 0.3,
+        maxTokens:   400,
+      }),
+
+      // Call 2 — Outreach: personalised message details using voice profile
+      callWithFallback({
+        model:        PRO_MODEL,
+        systemPrompt: 'You craft hyper-personalised outreach details for sales founders. Return only JSON.',
+        messages: [{
+          role:    'user',
+          content: `Generate outreach details for prospect: ${prospectLabel}.
+Opportunity context: ${targetContext}.
+Research context: ${intelText}.
+Product: ${userCtx.product_description}.
+Voice/tone profile: ${voiceProfile}.
+Return ONLY JSON: {"opening_line":"...","message_suggestion":"...","follow_up_hook":"...","tone":"...","personalization_angle":"..."}`,
+        }],
+        temperature: 0.5,
+        maxTokens:   450,
+      }),
+    ]);
+
+    // Record combined token usage for both calls at workspace level
+    await incrementWorkspaceUsage(
+      workspaceId
+    );
+
+    const intel    = JSON.parse(researchResult.content.replace(/```json|```/g, '').trim());
+    const outreach = JSON.parse(outreachResult.content.replace(/```json|```/g, '').trim());
+
+    const snapshot = { intel, outreach, research: { citations } };
+
+    // ── Persist to cache ─────────────────────────────────────────────────
+    try {
+      await supabaseAdmin
+        .from('opportunities')
+        .update({
+          intel_snapshot:     snapshot,
+          intel_generated_at: new Date().toISOString(),
+          intel_fetch_failed: false,
+        })
+        .eq('id', id);
+    } catch (dbErr) {
+      logError('INTEL cache write', dbErr, { id, workspaceId });
+    }
+
+    logAI('INTEL_GENERATED', { id, workspaceId, citations: citations.length });
+    res.json({ ...snapshot, cached: false });
+
   } catch (err) {
     logError('GET /:id/intel', err, { userId, id });
-    res.json({ intel: null, reason: 'error' });
+    try {
+      await supabaseAdmin
+        .from('opportunities')
+        .update({ intel_fetch_failed: true })
+        .eq('id', id);
+    } catch (_) {}
+    res.json({ intel: null, outreach: null, reason: 'error' });
   }
 }));
 

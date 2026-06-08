@@ -144,8 +144,8 @@ router.post('/', asyncHandler(async (req, res) => {
         .from('opportunities')
         .select('target_name, target_context, platform')
         .eq('id', opportunity_id)
-        .eq('user_id', userId)
         .eq('workspace_id', workspaceId)   // FIX MED-07
+        .or(`user_id.eq.${userId},assigned_to.eq.${userId}`)
         .single();
       chatTitle = opp ? `Outreach: ${opp.target_name || opp.platform}` : 'New conversation';
     } else {
@@ -415,7 +415,7 @@ router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, re
     .select('id')
     .single();
 
-  await supabaseAdmin.rpc('increment_chat_stats', { p_chat_id: chatId, p_increment: 1 }).catch(() => {});
+  try { await supabaseAdmin.rpc('increment_chat_stats', { p_chat_id: chatId, p_increment: 1 }); } catch {}
 
   const messagesForAI = [
     ...historyMessages,
@@ -440,7 +440,7 @@ router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, re
         .select()
         .single();
 
-      await supabaseAdmin.rpc('increment_chat_stats', { p_chat_id: chatId, p_increment: 1 }).catch(() => {});
+      try { await supabaseAdmin.rpc('increment_chat_stats', { p_chat_id: chatId, p_increment: 1 }); } catch {}
       await supabaseAdmin.from('chats').update({ last_message_at: new Date().toISOString() }).eq('id', chatId);
 
       return res.json({ message: aiMsg, event_id });
@@ -473,7 +473,7 @@ router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, re
         .select()
         .single();
 
-      await supabaseAdmin.rpc('increment_chat_stats', { p_chat_id: chatId, p_increment: 1 }).catch(() => {});
+      try { await supabaseAdmin.rpc('increment_chat_stats', { p_chat_id: chatId, p_increment: 1 }); } catch {}
       await supabaseAdmin.from('chats').update({ last_message_at: new Date().toISOString() }).eq('id', chatId);
 
       sendSSE(res, { type: 'done', message_id: aiMsg?.id });
@@ -551,8 +551,8 @@ router.post('/with-message', validateChatMessage, asyncHandler(async (req, res) 
         .from('opportunities')
         .select('target_name, target_context, platform')
         .eq('id', opportunity_id)
-        .eq('user_id', userId)
         .eq('workspace_id', workspaceId)
+        .or(`user_id.eq.${userId},assigned_to.eq.${userId}`)
         .single();
       chatTitle = opp ? `Outreach: ${opp.target_name || opp.platform}` : 'New conversation';
     } else {

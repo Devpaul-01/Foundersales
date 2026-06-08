@@ -172,17 +172,62 @@ router.post('/accept-invite/:token', asyncHandler(async (req, res) => {
   log('ACCEPT INVITE', { userId });
   const tokenHash = createHash('sha256').update(plaintextToken).digest('hex');
 
+  console.log('\n========== ACCEPT INVITE DEBUG ==========');
+  console.log('User ID:         ', userId);
+  console.log('Plaintext token: ', plaintextToken);
+  console.log('Token hash:      ', tokenHash);
+
+  // ── Verify the row exists before calling RPC (diagnostic) ──
+  const { data: pendingRow, error: lookupErr } = await supabaseAdmin
+    .from('workspace_members')
+    .select('id, status, invite_token, invite_expires_at, user_id, workspace_id')
+    .eq('invite_token', tokenHash)
+    .maybeSingle();
+
+  console.log('\n--- Pre-RPC row lookup ---');
+  if (lookupErr) {
+    console.log('❌ Lookup error:', lookupErr.message, lookupErr.code);
+  } else if (!pendingRow) {
+    console.log('❌ No row found matching token hash — hash mismatch or row does not exist');
+  } else {
+    console.log('✅ Row found:', {
+      id:               pendingRow.id,
+      status:           pendingRow.status,
+      invite_expires_at: pendingRow.invite_expires_at,
+      user_id:          pendingRow.user_id,
+      workspace_id:     pendingRow.workspace_id,
+      token_matches:    pendingRow.invite_token === tokenHash,
+      is_expired:       pendingRow.invite_expires_at
+                          ? new Date(pendingRow.invite_expires_at) < new Date()
+                          : false,
+    });
+    if (pendingRow.status !== 'pending_invite') {
+      console.log(`⚠️  Status is "${pendingRow.status}" — RPC will return INVALID_OR_EXPIRED_TOKEN`);
+    }
+  }
+
+  // ── Call RPC ──────────────────────────────────────────────
+  console.log('\n--- Calling RPC accept_workspace_invite ---');
   const { data: result, error } = await supabaseAdmin.rpc('accept_workspace_invite', {
     p_user_id:    userId,
     p_token_hash: tokenHash,
   });
 
+  console.log('RPC raw response:', JSON.stringify({ result, error }, null, 2));
+
   if (error) {
+    console.log('❌ RPC threw an error:');
+    console.log('  message:', error.message);
+    console.log('  code:   ', error.code);
+    console.log('  details:', error.details);
+    console.log('  hint:   ', error.hint);
     logError('accept_workspace_invite RPC', error, { userId });
     return res.status(500).json({ error: 'INVITE_FAILED', message: 'Failed to process invite' });
   }
 
   if (result?.error) {
+    console.log(`⚠️  RPC returned business error: "${result.error}"`);
+    console.log('=========================================\n');
     const statusMap = { INVALID_OR_EXPIRED_TOKEN: 410, ALREADY_A_MEMBER: 409 };
     return res.status(statusMap[result.error] || 400).json({
       error:   result.error,
@@ -195,18 +240,23 @@ router.post('/accept-invite/:token', asyncHandler(async (req, res) => {
   const workspaceId = result?.workspace_id;
   const role        = result?.role || 'member';
 
+  console.log('✅ RPC succeeded:', { workspaceId, role });
+  console.log('=========================================\n');
+
   await supabaseAdmin.from('users').update({ active_workspace_id: workspaceId }).eq('id', userId);
 
-  // Unified invalidation — clears profile + workspace context in one call
   await clearUserContext(userId, req.user.active_workspace_id);
   await clearUserContext(userId, workspaceId);
 
-  await supabaseAdmin.from('workspace_activity').insert({
-    workspace_id: workspaceId,
-    user_id:      userId,
-    event_type:   ACTIVITY_EVENTS.MEMBER_JOINED,
-    metadata:     { name: req.user.name || req.user.email },
-  }).catch(() => {});
+  try {
+    await supabaseAdmin.from('workspace_activity').insert({
+      workspace_id: workspaceId,
+      user_id:      userId,
+      event_type:   ACTIVITY_EVENTS.MEMBER_JOINED,
+    });
+  } catch (activityErr) {
+    console.log('⚠️  Activity log failed (non-fatal):', activityErr.message);
+  }
 
   const { data: workspace } = await supabaseAdmin
     .from('workspaces').select('id, name, slug, plan').eq('id', workspaceId).single();
@@ -219,6 +269,254 @@ router.post('/accept-invite/:token', asyncHandler(async (req, res) => {
     message:             `Welcome to ${workspace?.name || 'the workspace'}!`,
     needs_profile_setup: true,
   });
+}));
+
+router.post('/accept-invite-test/:token', asyncHandler(async (req, res) => {
+  const userId = req.user.id;
+  const plaintextToken = req.params.token;
+  
+  console.log('[ACCEPT-INVITE] ========== START ==========');
+  console.log(`[ACCEPT-INVITE] userId: ${userId}`);
+  console.log(`[ACCEPT-INVITE] token provided: ${plaintextToken ? 'YES (length: ' + plaintextToken.length + ')' : 'NO'}`);
+
+  if (!plaintextToken) {
+    console.log('[ACCEPT-INVITE] ERROR: No token provided');
+    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Invite token is required' });
+  }
+
+  const tokenHash = createHash('sha256').update(plaintextToken).digest('hex');
+  console.log(`[ACCEPT-INVITE] token hash: ${tokenHash.substring(0, 16)}...`);
+
+  try {
+    // ── 1. Find the pending invite ────────────────────────────
+    console.log('[ACCEPT-INVITE] Step 1: Looking up invite by token hash');
+    const { data: invite, error: inviteErr } = await supabaseAdmin
+      .from('workspace_members')
+      .select('id, workspace_id, role, invite_expires_at, user_id')
+      .eq('invite_token', tokenHash)
+      .eq('status', 'pending_invite')
+      .maybeSingle();
+
+    if (inviteErr) {
+      console.error('[ACCEPT-INVITE] DB Error finding invite:', inviteErr);
+      logError('accept-invite lookup', inviteErr, { userId });
+      return res.status(500).json({ error: 'DB_ERROR', message: inviteErr.message });
+    }
+
+    if (!invite) {
+      console.log('[ACCEPT-INVITE] No pending invite found for this token');
+      return res.status(410).json({ error: 'INVALID_OR_EXPIRED_TOKEN', message: 'This invite link is invalid or has expired.' });
+    }
+
+    console.log(`[ACCEPT-INVITE] Found invite: id=${invite.id}, workspace_id=${invite.workspace_id}, role=${invite.role}, expires_at=${invite.invite_expires_at}`);
+
+    if (invite.invite_expires_at && new Date(invite.invite_expires_at) < new Date()) {
+      console.log(`[ACCEPT-INVITE] Invite expired: ${invite.invite_expires_at} < ${new Date().toISOString()}`);
+      return res.status(410).json({ error: 'INVALID_OR_EXPIRED_TOKEN', message: 'This invite link has expired.' });
+    }
+
+    const { workspace_id: workspaceId, role } = invite;
+    console.log(`[ACCEPT-INVITE] Step 1 complete: workspaceId=${workspaceId}, role=${role}`);
+
+    // ── 1b. Ownership guard ───────────────────────────────────
+    // If the invite row has a user_id set, only that specific user may accept it.
+    // This prevents a different authenticated user who intercepts the token from
+    // joining under the invited user's role.
+    if (invite.user_id && invite.user_id !== userId) {
+      console.log(`[ACCEPT-INVITE] Token ownership mismatch: invite.user_id=${invite.user_id}, requesting userId=${userId}`);
+      return res.status(403).json({ error: 'FORBIDDEN', message: 'This invite link is not intended for your account.' });
+    }
+
+    // ── 2. Check not already a member ────────────────────────
+    console.log('[ACCEPT-INVITE] Step 2: Checking if user is already a member');
+    const { data: existing, error: existingErr } = await supabaseAdmin
+      .from('workspace_members')
+      .select('id')
+      .eq('workspace_id', workspaceId)
+      .eq('user_id', userId)
+      .eq('status', 'active')
+      .maybeSingle();
+
+    if (existingErr) {
+      console.error('[ACCEPT-INVITE] Error checking existing membership:', existingErr);
+    }
+
+    if (existing) {
+      console.log(`[ACCEPT-INVITE] User ${userId} is already an active member of workspace ${workspaceId}`);
+      return res.status(409).json({ error: 'ALREADY_A_MEMBER', message: 'You are already a member of this workspace.' });
+    }
+    console.log('[ACCEPT-INVITE] User is not an existing member, proceeding');
+
+    // ── 3. Activate the membership row ───────────────────────
+    console.log(`[ACCEPT-INVITE] Step 3: Activating membership (invite.id=${invite.id})`);
+    const { error: updateErr } = await supabaseAdmin
+      .from('workspace_members')
+      .update({
+        user_id:      userId,
+        status:       'active',
+        joined_at:    new Date().toISOString(),
+        invite_token: null,
+      })
+      .eq('id', invite.id);
+
+    if (updateErr) {
+      console.error('[ACCEPT-INVITE] Error activating membership:', updateErr);
+      logError('accept-invite activate membership', updateErr, { userId });
+      return res.status(500).json({ error: 'DB_ERROR', message: updateErr.message });
+    }
+    console.log('[ACCEPT-INVITE] Membership activated successfully');
+
+    // ── 4. Fetch workspace owner's profile to use as a template for the new member ──
+    // Dynamically resolve owner_user_id from the workspaces table rather than
+    // relying on a hardcoded email, so this works for any workspace.
+    console.log('[ACCEPT-INVITE] Step 4: Fetching owner profile for workspace template');
+
+    const { data: wsData, error: wsOwnerErr } = await supabaseAdmin
+      .from('workspaces')
+      .select('owner_user_id')
+      .eq('id', workspaceId)
+      .single();
+
+    if (wsOwnerErr) {
+      console.error('[ACCEPT-INVITE] Error resolving workspace owner:', wsOwnerErr);
+      logError('accept-invite workspace owner lookup', wsOwnerErr, { userId });
+    }
+
+    const ownerUserId = wsData?.owner_user_id || null;
+    console.log(`[ACCEPT-INVITE] Resolved owner_user_id: ${ownerUserId}`);
+
+    let ownerProfile = null;
+    if (ownerUserId) {
+      console.log(`[ACCEPT-INVITE] Fetching owner workspace profile: user_id=${ownerUserId}`);
+      const { data: profile, error: profileErr } = await supabaseAdmin
+        .from('workspace_profiles')
+        .select(
+          'onboarding_questions, preferred_platforms, product_description, target_audience, voice_profile, onboarding_answers, primary_goal, archetype, industry, business_stage'
+        )
+        .eq('workspace_id', workspaceId)
+        .eq('user_id', ownerUserId)
+        .maybeSingle();
+      
+      if (profileErr) {
+        console.error('[ACCEPT-INVITE] Error fetching owner profile (non-fatal):', profileErr);
+        logError('accept-invite owner profile lookup (non-fatal)', profileErr, { userId });
+      } else {
+        ownerProfile = profile;
+        console.log(`[ACCEPT-INVITE] Owner profile fetched successfully: ${ownerProfile ? 'YES' : 'NO'}`);
+      }
+    } else {
+      console.log('[ACCEPT-INVITE] Could not resolve workspace owner, will use default values');
+    }
+
+    // ── 5. Create workspace profile for new member ────────────
+    console.log(`[ACCEPT-INVITE] Step 5: Creating workspace profile for user ${userId}`);
+    const profileData = {
+      workspace_id:         workspaceId,
+      user_id:              userId,
+      onboarding_completed: true,
+      onboarding_step:      3,
+      onboarding_questions: ownerProfile?.onboarding_questions ?? {},
+      preferred_platforms:  ownerProfile?.preferred_platforms  ?? [],
+      product_description:  ownerProfile?.product_description  ?? null,
+      target_audience:      ownerProfile?.target_audience      ?? null,
+      voice_profile:        ownerProfile?.voice_profile        ?? {},
+      onboarding_answers:   ownerProfile?.onboarding_answers   ?? {},
+      primary_goal:         ownerProfile?.primary_goal         ?? null,
+      archetype:            ownerProfile?.archetype            ?? null,
+      industry:             ownerProfile?.industry             ?? null,
+      business_stage:       ownerProfile?.business_stage       ?? null,
+    };
+    console.log('[ACCEPT-INVITE] Profile data prepared:', JSON.stringify(profileData, null, 2).substring(0, 500));
+
+    const { error: profileErr } = await supabaseAdmin
+      .from('workspace_profiles')
+      .upsert(profileData, { onConflict: 'workspace_id,user_id', ignoreDuplicates: false });
+
+    if (profileErr) {
+      console.error('[ACCEPT-INVITE] Error creating profile (non-fatal):', profileErr);
+      logError('accept-invite create profile (non-fatal)', profileErr, { userId });
+    } else {
+      console.log('[ACCEPT-INVITE] Workspace profile created successfully');
+    }
+
+    // ── 6. Set active workspace on user ──────────────────────
+    console.log(`[ACCEPT-INVITE] Step 6: Setting active_workspace_id to ${workspaceId} for user ${userId}`);
+    const { error: updateUserErr } = await supabaseAdmin
+      .from('users')
+      .update({ active_workspace_id: workspaceId })
+      .eq('id', userId);
+
+    if (updateUserErr) {
+      console.error('[ACCEPT-INVITE] Error updating user active workspace (non-fatal):', updateUserErr);
+      logError('accept-invite update user workspace (non-fatal)', updateUserErr, { userId });
+    } else {
+      console.log('[ACCEPT-INVITE] User active workspace updated');
+    }
+
+    console.log(`[ACCEPT-INVITE] Step 6b: Clearing user context for workspace IDs`);
+    await clearUserContext(userId, req.user.active_workspace_id);
+    await clearUserContext(userId, workspaceId);
+    console.log('[ACCEPT-INVITE] User context cleared');
+
+    // ── 7. Activity log (non-fatal) ───────────────────────────
+    console.log('[ACCEPT-INVITE] Step 7: Logging workspace activity');
+    try {
+      const { error: activityErr } = await supabaseAdmin
+        .from('workspace_activity')
+        .insert({
+          workspace_id: workspaceId,
+          user_id:      userId,
+          event_type:   ACTIVITY_EVENTS.MEMBER_JOINED,
+        });
+
+      if (activityErr) {
+        console.error('[ACCEPT-INVITE] Activity log failed:', activityErr.message);
+      } else {
+        console.log('[ACCEPT-INVITE] Activity logged successfully');
+      }
+    } catch (activityEx) {
+      console.error('[ACCEPT-INVITE] Activity log exception:', activityEx.message);
+    }
+
+    // ── 8. Return workspace info ──────────────────────────────
+    console.log(`[ACCEPT-INVITE] Step 8: Fetching workspace details for ${workspaceId}`);
+    const { data: workspace, error: workspaceErr } = await supabaseAdmin
+      .from('workspaces')
+      .select('id, name, slug, plan')
+      .eq('id', workspaceId)
+      .single();
+
+    if (workspaceErr) {
+      console.error('[ACCEPT-INVITE] Error fetching workspace (non-fatal):', workspaceErr);
+      logError('accept-invite fetch workspace', workspaceErr, { userId });
+    } else {
+      console.log(`[ACCEPT-INVITE] Workspace fetched: name=${workspace?.name}, slug=${workspace?.slug}, plan=${workspace?.plan}`);
+    }
+
+    const responseData = {
+      success:             true,
+      workspace: workspace || { id: workspaceId, name: 'Workspace', slug: '', plan: 'free' },
+      role,
+      message:             `Welcome to ${workspace?.name || 'the workspace'}!`,
+      needs_profile_setup: true,
+    };
+
+    console.log('[ACCEPT-INVITE] ========== SUCCESS ==========');
+    console.log(`[ACCEPT-INVITE] Response: userId=${userId}, workspaceId=${workspaceId}, role=${role}`);
+    log('ACCEPT INVITE OK', { userId, workspaceId, role });
+
+    return res.json(responseData);
+
+  } catch (err) {
+    console.error('[ACCEPT-INVITE] ========== UNEXPECTED ERROR ==========');
+    console.error('[ACCEPT-INVITE] Error details:', {
+      message: err.message,
+      stack: err.stack,
+      userId: userId
+    });
+    logError('accept-invite unexpected error', err, { userId });
+    return res.status(500).json({ error: 'INTERNAL_ERROR', message: 'An unexpected error occurred. Please try again.' });
+  }
 }));
 
 // GET /api/user/notifications

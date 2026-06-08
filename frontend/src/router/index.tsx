@@ -106,7 +106,7 @@ export const router = createBrowserRouter([
   ],
 },
       { path: '/auth/callback',  element: <Page><OAuthCallbackPage /></Page> },
-      { path: '/invite/:token',  element: <Page><AcceptInvitePage /></Page> },
+      { path: '/accept-invite', element: <Page><AcceptInvitePage /></Page> },
 
       // ── ONBOARDING (auth required, onboarding_completed=false) ──
       {

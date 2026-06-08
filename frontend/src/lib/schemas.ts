@@ -111,21 +111,62 @@ export const goalNoteSchema = z.object({
 export type GoalNoteSchema = z.infer<typeof goalNoteSchema>;
 
 // ── Feedback ─────────────────────────────────────────────────
+
 export const feedbackSchema = z.object({
-  outcome:               z.enum(['positive','negative','pending'], {
+
+  outcome: z.enum(['positive', 'negative', 'pending'], {
     errorMap: () => ({ message: 'Select an outcome' }),
   }),
-  outcome_note:          z.string().max(500).optional().nullable(),
-  is_final:              z.boolean().default(true),
-  deal_value_usd:        z.number().min(0).optional().nullable(),
-  scheduled_call:        z.boolean().default(false),
-  scheduled_call_date:   z.string().optional().nullable(),
-  scheduled_call_notes:  z.string().max(500).optional().nullable(),
+
+  outcome_note: z
+    .string()
+    .max(500, 'Note must be 500 characters or fewer')
+    .transform((s) => s?.trim() || null)
+    .optional()
+    .nullable(),
+
+  is_final: z.boolean().default(true),
+
+  // valueAsNumber returns NaN for empty inputs — preprocess coerces that to null
+  // so Zod sees null instead of an invalid number type error.
+  deal_value_usd: z.preprocess(
+    (v) => (v === '' || v == null || Number.isNaN(Number(v)) ? null : Number(v)),
+    z
+      .number()
+      .int('Enter a whole number')
+      .min(0, 'Must be 0 or more')
+      .nullable()
+      .optional(),
+  ),
+
+  scheduled_call: z.boolean().default(false),
+
+  // datetime-local inputs produce "YYYY-MM-DDTHH:mm" (no seconds, no timezone).
+  // Zod's .datetime() requires full ISO 8601, so we validate the shape with a
+  // regex instead and let the backend store it as-is.
+  scheduled_call_date: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/, 'Enter a valid date and time')
+    .optional()
+    .nullable(),
+
+  scheduled_call_notes: z
+    .string()
+    .max(500, 'Notes must be 500 characters or fewer')
+    .transform((s) => s?.trim() || null)
+    .optional()
+    .nullable(),
+
 }).refine(
   (d) => !d.scheduled_call || !!d.scheduled_call_date,
-  { message:'Scheduled date required when call is scheduled', path:['scheduled_call_date'] },
+  { message: 'Select a date and time for the call', path: ['scheduled_call_date'] },
 );
+
 export type FeedbackSchema = z.infer<typeof feedbackSchema>;
+
+
+
+
 
 // ── Calendar ─────────────────────────────────────────────────
 export const createCalendarEventSchema = z.object({

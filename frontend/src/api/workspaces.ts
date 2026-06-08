@@ -7,6 +7,16 @@ export const workspacesApi = {
 
   create: (body: { name: string }) =>
     apiClient.post<{ workspace: Workspace }>('/api/workspaces', body),
+    // In src/api/workspaces.ts, add this method
+inviteTest: (id: string, body: { email: string; role: 'admin' | 'manager' | 'member' }) =>
+  apiClient.post<{ 
+    success: boolean; 
+    invite_url: string; 
+    token: string; 
+    expires_at: string; 
+    email: string; 
+    workspace_name: string;
+  }>(`/api/workspaces/${id}/invite-test`, body),
 
   /** Canonical switch endpoint (POST /api/workspaces/switch) */
   switch: (workspaceId: string) =>

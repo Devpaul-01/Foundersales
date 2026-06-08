@@ -38,7 +38,7 @@ router.get('/dashboard', asyncHandler(async (req, res) => {
     supabaseAdmin.from('daily_metrics').select('*').eq('user_id', userId).gte('date', thirtyDaysAgo).order('date', { ascending: true }),
     supabaseAdmin.from('user_performance_profiles').select('*').eq('user_id', userId).maybeSingle(),
     supabaseAdmin.from('pipeline_metrics').select('*').eq('workspace_id', workspaceId).eq('user_id', userId).maybeSingle(),
-    supabaseAdmin.from('opportunities').select('status, marked_sent_at, created_at, platform').eq('workspace_id', workspaceId).eq('user_id', userId).gte('created_at', `${thirtyDaysAgo}T00:00:00`),
+    supabaseAdmin.from('opportunities').select('status, marked_sent_at, created_at, platform').eq('workspace_id', workspaceId).or(`user_id.eq.${userId},assigned_to.eq.${userId}`).gte('created_at', `${thirtyDaysAgo}T00:00:00`),
     supabaseAdmin.from('user_goals').select('*').eq('workspace_id', workspaceId).eq('user_id', userId).eq('status', 'active'),
     supabaseAdmin.from('practice_sessions').select('id, scenario_type, message_strength_score, rating, completed, created_at').eq('user_id', userId).gte('created_at', `${thirtyDaysAgo}T00:00:00`).eq('completed', true),
     supabaseAdmin.from('daily_check_ins').select('mood_score, date').eq('user_id', userId).eq('workspace_id', workspaceId).gte('date', thirtyDaysAgo).order('date', { ascending: false }),

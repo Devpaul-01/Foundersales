@@ -8,6 +8,8 @@ export const queryKeys = {
   me:               ['auth', 'me']              as const,
   onboardingStatus: ['onboarding', 'status']    as const,
   onboardingQuestions: ['onboarding', 'questions'] as const,
+  members:          (workspaceId: string) => ['workspace', workspaceId, 'members'] as const,
+  invites:          (workspaceId: string) => ['workspace', workspaceId, 'invites'] as const,
 
   // ── User ────────────────────────────────────────────────────
   memoryFacts:      ['user', 'memory']          as const,

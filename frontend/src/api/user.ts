@@ -42,7 +42,7 @@ export const userApi = {
       role:                string;
       message:             string;
       needs_profile_setup: boolean;
-    }>(`/api/user/accept-invite/${token}`),
+    }>(`/api/user/accept-invite-test/${token}`),
 
   listNotifications: (params: { limit?: number; offset?: number }) =>
     apiClient.get<{ notifications: UserNotification[]; unread_count: number }>(

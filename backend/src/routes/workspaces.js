@@ -26,30 +26,168 @@ const getActiveMemberIds = async (workspaceId) => {
   return (data || []).map(m => m.user_id);
 };
 
-// GET /api/workspaces — list all workspaces the current user belongs to.
-// Required by the workspace switcher UI. Without this, /switch has no data
-// source and the switcher button renders an empty list.
-router.get('/', asyncHandler(async (req, res) => {
-  const userId = req.user.id;
+// GET /api/workspaces/:id/members
+router.get('/:id/members', asyncHandler(async (req, res) => {
+  const workspaceId        = req.params.id;
+  const requestWorkspaceId = req.workspace?.id;
+  const TAG = '[GET-MEMBERS]';
+  const { data, error } = await supabaseAdmin
+  .from('users')
+  .select('id, email');
+  console.log(data?.length);
+  console.log(data);
+  console.log(error);
 
-  const { data: memberships, error } = await supabaseAdmin
+  console.log(`\n${'='.repeat(60)}`);
+  console.log(`${TAG} ========== REQUEST START ==========`);
+  console.log(`${TAG} timestamp      :`, new Date().toISOString());
+  console.log(`${TAG} param id       :`, workspaceId,        '| type:', typeof workspaceId);
+  console.log(`${TAG} req.workspace.id:`, requestWorkspaceId, '| type:', typeof requestWorkspaceId);
+  console.log(`${TAG} match          :`, workspaceId === requestWorkspaceId);
+  console.log(`${TAG} caller user_id :`, req.user?.id);
+  console.log(`${TAG} caller email   :`, req.user?.email);
+
+  if (workspaceId !== requestWorkspaceId) {
+    console.log(`${TAG} ❌ PERMISSION_DENIED — workspace id mismatch`);
+    return res.status(403).json({ error: 'PERMISSION_DENIED' });
+  }
+
+  // ── STEP 1: workspace_members ────────────────────────────────────────────
+  console.log(`\n${TAG} ── STEP 1: fetching workspace_members ──`);
+  const { data: memberRows, error: memberError } = await supabaseAdmin
     .from('workspace_members')
-    .select(`role, status, joined_at, workspaces!inner(id, name, slug, plan, owner_user_id, created_at)`)
-    .eq('user_id', userId)
-    .eq('status', 'active')
-    .eq('workspaces.is_deleted', false)
-    .order('joined_at', { ascending: true });
+    .select('id, user_id, role, status, invite_email, invited_by, joined_at, created_at')
+    .eq('workspace_id', workspaceId)
+    .in('status', ['active', 'pending_invite', 'suspended'])
+    .order('created_at', { ascending: true });
 
-  if (error) throw error;
+  if (memberError) {
+    console.log(`${TAG} ❌ workspace_members query error:`, memberError);
+    throw memberError;
+  }
 
-  const workspaces = (memberships || []).map(m => ({
-    ...m.workspaces,
-    role:      m.role,
-    joined_at: m.joined_at,
-    is_active: m.workspaces.id === req.user.active_workspace_id,
-  }));
+  console.log(`${TAG} ✅ workspace_members rows returned:`, memberRows?.length ?? 0);
+  (memberRows || []).forEach((m, i) => {
+    console.log(`${TAG}   [${i}] id=${m.id} | user_id=${m.user_id ?? 'NULL'} | status=${m.status} | role=${m.role} | invite_email=${m.invite_email ?? '-'}`);
+  });
 
-  res.json({ workspaces });
+  // ── STEP 2: collect user_ids ─────────────────────────────────────────────
+  console.log(`\n${TAG} ── STEP 2: collecting user_ids ──`);
+  const allUserIds     = (memberRows || []).map(m => m.user_id);
+  const userIds        = allUserIds.filter(Boolean);
+  const nullCount      = allUserIds.length - userIds.length;
+
+  console.log(`${TAG} all user_id values (raw):`, JSON.stringify(allUserIds));
+  console.log(`${TAG} after filter(Boolean)   :`, JSON.stringify(userIds));
+  console.log(`${TAG} null/undefined user_ids :`, nullCount);
+  console.log(`${TAG} ids to look up          :`, userIds.length);
+  userIds.forEach((id, i) => {
+    console.log(`${TAG}   [${i}] "${id}" | length=${id.length} | type=${typeof id}`);
+  });
+
+  // ── STEP 3: users table lookup ───────────────────────────────────────────
+  console.log(`\n${TAG} ── STEP 3: querying users table ──`);
+  let userMap = {};
+
+  if (userIds.length > 0) {
+    console.log(`${TAG} running: .from('users').select('id, name, email').in('id', [...${userIds.length}])`);
+
+    const { data: users, error: usersError, status: usersStatus, statusText } = await supabaseAdmin
+      .from('users')
+      .select('id, name, email')
+      .in('id', userIds);
+
+    console.log(`${TAG} response HTTP status  :`, usersStatus, statusText ?? '');
+    console.log(`${TAG} usersError            :`, usersError ?? 'null');
+    console.log(`${TAG} users rows returned   :`, users?.length ?? 0);
+
+    if (usersError) {
+      console.log(`${TAG} ❌ users lookup error:`, JSON.stringify(usersError, null, 2));
+    } else {
+      console.log(`${TAG} ✅ users found:`);
+      (users || []).forEach((u, i) => {
+        console.log(`${TAG}   [${i}] id="${u.id}" | name="${u.name}" | email="${u.email}"`);
+      });
+
+      // Exact match check — compare each requested id against what came back
+      console.log(`\n${TAG} ── per-id match check ──`);
+      const returnedIds = new Set((users || []).map(u => u.id));
+      userIds.forEach(id => {
+        const found = returnedIds.has(id);
+        console.log(`${TAG}   ${found ? '✅' : '❌ MISSING'} "${id}"`);
+      });
+
+      userMap = Object.fromEntries((users || []).map(u => [u.id, u]));
+    }
+
+    // ── STEP 3b: individual fallback for any missing ids ──────────────────
+    // If .in() returned fewer rows than expected, probe each missing id individually
+    // to rule out a query-level issue vs a data issue.
+    const missingIds = userIds.filter(id => !userMap[id]);
+    if (missingIds.length > 0) {
+      console.log(`\n${TAG} ── STEP 3b: individual fallback queries for ${missingIds.length} missing id(s) ──`);
+      for (const id of missingIds) {
+        // .eq() single-row probe
+        const { data: single, error: singleErr } = await supabaseAdmin
+          .from('users')
+          .select('id, name, email')
+          .eq('id', id)
+          .maybeSingle();
+
+        console.log(`${TAG}   .eq('id','${id}') →`, singleErr
+          ? `ERROR: ${singleErr.message}`
+          : single
+            ? `FOUND: name="${single.name}" email="${single.email}"`
+            : `NOT FOUND (null)`
+        );
+
+        // Also probe auth.users via admin API to see if the gap is auth vs public
+        try {
+          const { data: authUser, error: authErr } = await supabaseAdmin.auth.admin.getUserById(id);
+          console.log(`${TAG}   auth.admin.getUserById('${id}') →`, authErr
+            ? `ERROR: ${authErr.message}`
+            : authUser?.user
+              ? `FOUND in auth: email="${authUser.user.email}" created="${authUser.user.created_at}"`
+              : `NOT FOUND in auth`
+          );
+        } catch (e) {
+          console.log(`${TAG}   auth.admin.getUserById('${id}') → THREW: ${e.message}`);
+        }
+      }
+    }
+  } else {
+    console.log(`${TAG} ⚠️  no user_ids to look up — skipping users query`);
+  }
+
+  // ── STEP 4: merge ────────────────────────────────────────────────────────
+  console.log(`\n${TAG} ── STEP 4: merging rows ──`);
+  const members = (memberRows || []).map((m, i) => {
+    const user = m.user_id ? userMap[m.user_id] : null;
+    const merged = {
+      id:           m.id,
+      user_id:      m.user_id   || null,
+      name:         user?.name  || null,
+      email:        user?.email || null,
+      role:         m.role,
+      status:       m.status,
+      joined_at:    m.joined_at,
+      invited_by:   m.invited_by,
+      invite_email: m.invite_email,
+      created_at:   m.created_at,
+    };
+    const resolved = user ? '✅' : m.user_id ? '❌ no user found' : '— pending (no user_id)';
+    console.log(`${TAG}   [${i}] user_id=${m.user_id ?? 'NULL'} → ${resolved} | name="${merged.name}" email="${merged.email}"`);
+    return merged;
+  });
+
+  console.log(`\n${TAG} ── SUMMARY ──`);
+  console.log(`${TAG} total members    :`, members.length);
+  console.log(`${TAG} with profile     :`, members.filter(m => m.name || m.email).length);
+  console.log(`${TAG} missing profile  :`, members.filter(m => m.user_id && !m.name && !m.email).length);
+  console.log(`${TAG} pending (no uid) :`, members.filter(m => !m.user_id).length);
+  console.log(`${TAG} ========== REQUEST END ==========\n`);
+
+  res.json({ members });
 }));
 
 // POST /api/workspaces
@@ -234,17 +372,39 @@ router.delete('/:id/invites/:inviteId', requirePermission('admin'), asyncHandler
   res.json({ success: true });
 }));
 
+/*
 // GET /api/workspaces/:id/members
 router.get('/:id/members', asyncHandler(async (req, res) => {
   const workspaceId = req.params.id;
   if (workspaceId !== req.workspace.id) return res.status(403).json({ error: 'PERMISSION_DENIED' });
-  const { data: members, error } = await supabaseAdmin.from('workspace_members')
-    .select('id, role, status, joined_at, invited_by, invite_email, created_at, users(id, name, email)')
-    .eq('workspace_id', workspaceId).in('status', ['active', 'pending_invite', 'suspended'])
+  
+  const { data: members, error } = await supabaseAdmin
+    .from('workspace_members')
+    .select(`
+      id, 
+      role, 
+      status, 
+      joined_at, 
+      invited_by, 
+      invite_email, 
+      created_at,
+      users!workspace_members_user_id_fkey(id, name, email)
+    `)  // ← Explicitly specify the foreign key
+    .eq('workspace_id', workspaceId)
+    .in('status', ['active', 'pending_invite', 'suspended'])
     .order('created_at', { ascending: true });
+  
   if (error) throw error;
-  res.json({ members: members || [] });
+  
+  // Transform the response to match what frontend expects
+  const transformed = (members || []).map(m => ({
+    ...m,
+    users: m.users || null
+  }));
+  
+  res.json({ members: transformed });
 }));
+*/
 
 // PUT /api/workspaces/:id/members/:uid/role
 router.put('/:id/members/:uid/role', requirePermission('admin'), validate(updateRoleSchema), asyncHandler(async (req, res) => {
@@ -377,5 +537,213 @@ router.get('/:id/analytics', requirePermission('manager'), asyncHandler(async (r
     members: memberStats, patterns: patterns || [],
   });
 }));
-
+// TEMPORARY TEST ENDPOINT - Returns invite URL directly (no email)
+// POST /api/workspaces/:id/invite-test
+router.post('/:id/invite-test', requirePermission('admin'), validate(inviteSchema), asyncHandler(async (req, res) => {
+  const startTime = Date.now();
+  const workspaceId = req.params.id;
+  const { email, role = 'member' } = req.body;
+  const userId = req.user.id;
+  
+  // Log request start
+  console.log('\n========== INVITE TEST REQUEST START ==========');
+  console.log('Timestamp:', new Date().toISOString());
+  console.log('Workspace ID:', workspaceId);
+  console.log('Email:', email);
+  console.log('Role:', role);
+  console.log('Requested by User ID:', userId);
+  console.log('Requested by User Email:', req.user.email);
+  console.log('Workspace Name:', req.workspace?.name);
+  console.log('===============================================\n');
+  
+  // Permission check
+  if (workspaceId !== req.workspace.id) {
+    console.log('❌ Permission denied: workspace mismatch');
+    console.log('  Expected:', req.workspace.id);
+    console.log('  Got:', workspaceId);
+    return res.status(403).json({ error: 'PERMISSION_DENIED' });
+  }
+  
+  const normalizedEmail = email.trim().toLowerCase();
+  console.log('📧 Normalized email:', normalizedEmail);
+  
+  // Check if already a member or invite pending
+  console.log('\n--- Checking existing member status ---');
+  const { data: existingMember, error: memberCheckError } = await supabaseAdmin
+    .from('workspace_members')
+    .select('id, status, role, user_id')
+    .eq('workspace_id', workspaceId)
+    .eq('invite_email', normalizedEmail)
+    .maybeSingle();
+    
+  if (memberCheckError) {
+    console.log('⚠️ Error checking existing member:', memberCheckError.message);
+  }
+  
+  if (existingMember) {
+    console.log('📋 Found existing record:', {
+      id: existingMember.id,
+      status: existingMember.status,
+      role: existingMember.role,
+      user_id: existingMember.user_id
+    });
+    
+    if (existingMember?.status === 'active') {
+      console.log('❌ User is already an active member');
+      return res.status(409).json({ 
+        error: 'ALREADY_A_MEMBER',
+        message: `User ${normalizedEmail} is already an active member of this workspace.`,
+        status: existingMember.status
+      });
+    }
+    
+    if (existingMember?.status === 'pending_invite') {
+      console.log('⚠️ Invite already pending for this email');
+      return res.status(409).json({ 
+        error: 'INVITE_ALREADY_PENDING',
+        message: `An invite has already been sent to ${normalizedEmail}. Please wait or revoke the existing invite.`,
+        status: existingMember.status
+      });
+    }
+  } else {
+    console.log('✅ No existing member record found');
+  }
+  
+  // Check if user exists in the system
+  console.log('\n--- Checking if user exists in system ---');
+  const { data: existingUser, error: userCheckError } = await supabaseAdmin
+    .from('users')
+    .select('id, name, email, tier')
+    .eq('email', normalizedEmail)
+    .single();
+    
+  if (userCheckError && userCheckError.code !== 'PGRST116') {
+    console.log('⚠️ Error checking existing user:', userCheckError.message);
+  }
+  
+  if (existingUser) {
+    console.log('✅ User exists in system:', {
+      id: existingUser.id,
+      name: existingUser.name,
+      email: existingUser.email,
+      tier: existingUser.tier
+    });
+    
+    // Check if user is already a member (by user_id)
+    console.log('\n--- Checking if user is already a member (by user_id) ---');
+    const { data: memberByUserId, error: memberByUserIdError } = await supabaseAdmin
+      .from('workspace_members')
+      .select('id, status, role')
+      .eq('workspace_id', workspaceId)
+      .eq('user_id', existingUser.id)
+      .eq('status', 'active')
+      .maybeSingle();
+      
+    if (memberByUserIdError) {
+      console.log('⚠️ Error checking membership by user_id:', memberByUserIdError.message);
+    }
+    
+    if (memberByUserId) {
+      console.log('❌ User is already an active member (by user_id):', {
+        id: memberByUserId.id,
+        status: memberByUserId.status,
+        role: memberByUserId.role
+      });
+      return res.status(409).json({ 
+        error: 'ALREADY_A_MEMBER',
+        message: `User ${normalizedEmail} is already an active member of this workspace.`,
+        user_id: existingUser.id
+      });
+    }
+  } else {
+    console.log('📝 User does not exist in system yet - will create invite for new user');
+  }
+  
+  // Create invite
+  console.log('\n--- Creating invite ---');
+  const plaintextToken = randomBytes(32).toString('hex');
+  const tokenHash = createHash('sha256').update(plaintextToken).digest('hex');
+  const expiresAt = new Date(Date.now() + 7 * 86400000).toISOString();
+  
+  console.log('Invite details:', {
+    token_hash_preview: tokenHash.substring(0, 16) + '...',
+    expires_at: expiresAt,
+    role: role
+  });
+  
+  const { data: insertData, error: insertErr } = await supabaseAdmin
+    .from('workspace_members')
+    .insert({
+      workspace_id: workspaceId,
+      user_id: null,  // always null on creation — consistent with production /invite
+      role: role,
+      status: 'pending_invite',
+      invited_by: req.user.id,
+      invite_token: tokenHash,
+      invite_email: normalizedEmail,
+      invite_expires_at: expiresAt,
+    })
+    .select();
+    
+  if (insertErr) {
+    console.log('❌ Failed to create invite:', {
+      error: insertErr.message,
+      code: insertErr.code,
+      details: insertErr.details
+    });
+    throw insertErr;
+  }
+  
+  console.log('✅ Invite created successfully:', {
+    id: insertData?.[0]?.id,
+    status: 'pending_invite',
+    expires_at: expiresAt
+  });
+  
+  // Generate invite URL
+  const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
+  const inviteUrl = `${FRONTEND_URL}/accept-invite?token=${plaintextToken}`;
+  
+  const duration = Date.now() - startTime;
+  
+  // Log success
+  console.log('\n--- INVITE TEST COMPLETED SUCCESSFULLY ---');
+  console.log('✅ Invite URL generated:', inviteUrl);
+  console.log('📧 Email:', normalizedEmail);
+  console.log('🔑 Token (plaintext):', plaintextToken);
+  console.log('⏰ Expires at:', expiresAt);
+  console.log('🏢 Workspace:', req.workspace.name);
+  console.log('👤 Invited by:', req.user.email);
+  console.log('⏱️ Duration:', duration, 'ms');
+  console.log('==========================================\n');
+  
+  // Log to your logger as well
+  log('INVITE_TEST', { 
+    workspaceId, 
+    inviteEmail: normalizedEmail, 
+    role, 
+    invitedBy: req.user.id,
+    userExists: !!existingUser,
+    existingUserId: existingUser?.id,
+    tokenPreview: plaintextToken.substring(0, 8),
+    duration
+  });
+  
+  res.status(201).json({
+    success: true,
+    invite_url: inviteUrl,
+    token: plaintextToken,
+    expires_at: expiresAt,
+    email: normalizedEmail,
+    workspace_name: req.workspace.name,
+    workspace_id: workspaceId,
+    role: role,
+    user_exists: !!existingUser,
+    debug: process.env.NODE_ENV !== 'production' ? {
+      token_hash: tokenHash,
+      invite_id: insertData?.[0]?.id,
+      expires_at: expiresAt
+    } : undefined
+  });
+}));
 export default router;

@@ -91,56 +91,58 @@ const doTokenRefresh = useCallback(async () => {
 
   // ── Initialize on mount ──────────────────────────────────────
   // src/contexts/AuthContext.tsx — Update the init useEffect
-
-useEffect(() => {
+  
+  useEffect(() => {
   let isMounted = true;
-  let refreshAttempted = false; // ✅ Prevent multiple refresh attempts
 
   const init = async () => {
-    const { accessToken } = getTokens();
-
-    // ✅ If we're on a public page, don't try to refresh at all
+    // Public routes — skip auth entirely
     if (isPublicRoute()) {
       console.log('[Auth] Public route, skipping token refresh');
       setIsLoading(false);
       return;
     }
 
-    // ✅ If no access token, don't try to refresh — let ProtectedRoute handle redirect
+    const { accessToken } = getTokens();
+
     if (!accessToken) {
-      console.log('[Auth] No access token on protected route');
-      setIsLoading(false);
-      return;
-    }
-
-    // ✅ Only try refresh once
-    if (refreshAttempted) {
-      console.log('[Auth] Refresh already attempted, skipping');
-      return;
-    }
-    refreshAttempted = true;
-
-    try {
-      await refreshUser();
-      scheduleRefresh(getRemainingTTL());
-    } catch (err) {
-      const status = (err as { status?: number })?.status;
-      if (status === 401) {
-        try {
-          await doTokenRefresh();
-          await refreshUser();
-          scheduleRefresh(getRemainingTTL());
-        } catch {
+      // Page was reloaded — access token is gone from memory but the
+      // HTTP-only refresh cookie may still be valid. Attempt a silent refresh.
+      console.log('[Auth] No access token (likely page reload) — attempting silent refresh');
+      try {
+        await doTokenRefresh();         // hits /api/auth/refresh with the cookie
+        await refreshUser();            // hydrates user state
+        scheduleRefresh(getRemainingTTL());
+      } catch {
+        // Cookie is expired or missing — user is genuinely logged out.
+        // ProtectedRoute will handle the redirect.
+        console.log('[Auth] Silent refresh failed — user is logged out');
+      }
+    } else {
+      // Access token still in memory (same tab session, no reload).
+      // Just hydrate the user; only refresh token if /me returns 401.
+      console.log('[Auth] Access token found — hydrating user');
+      try {
+        await refreshUser();
+        scheduleRefresh(getRemainingTTL());
+      } catch (err) {
+        const status = (err as { status?: number })?.status;
+        if (status === 401) {
+          try {
+            await doTokenRefresh();
+            await refreshUser();
+            scheduleRefresh(getRemainingTTL());
+          } catch {
+            clearTokens();
+          }
+        } else {
           clearTokens();
-          // Don't redirect here — let ProtectedRoute handle it
         }
-      } else {
-        clearTokens();
       }
-    } finally {
-      if (isMounted) {
-        setIsLoading(false);
-      }
+    }
+
+    if (isMounted) {
+      setIsLoading(false);
     }
   };
 

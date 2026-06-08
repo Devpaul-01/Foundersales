@@ -422,33 +422,37 @@ async function extractAndSaveCommitmentsSignals(userId, workspaceId, event, rawN
   ]);
 
   if (commitments?.length) {
-    await supabaseAdmin.from('conversation_commitments').insert(
-      commitments.map(c => ({
-        workspace_id:    workspaceId,
-        user_id:         userId,
-        prospect_id:     event.prospect_id || null,
-        event_id:        event.id,
-        commitment_text: c.commitment_text,
-        owner:           c.owner           || 'founder',
-        status:          'pending',
-        due_date:        c.due_date        || null,
-        implicit_timing: c.implicit_timing || null,
-      }))
-    ).catch(() => {});
+    try {
+      await supabaseAdmin.from('conversation_commitments').insert(
+        commitments.map(c => ({
+          workspace_id:    workspaceId,
+          user_id:         userId,
+          prospect_id:     event.prospect_id || null,
+          event_id:        event.id,
+          commitment_text: c.commitment_text,
+          owner:           c.owner           || 'founder',
+          status:          'pending',
+          due_date:        c.due_date        || null,
+          implicit_timing: c.implicit_timing || null,
+        }))
+      );
+    } catch {}
   }
 
   if (signals?.length) {
-    await supabaseAdmin.from('conversation_signals').insert(
-      signals.map(s => ({
-        workspace_id: workspaceId,
-        user_id:      userId,
-        prospect_id:  event.prospect_id || null,
-        event_id:     event.id,
-        signal_type:  s.signal_type,
-        signal_text:  s.signal_text,
-        confidence:   s.confidence || null,
-      }))
-    ).catch(() => {});
+    try {
+      await supabaseAdmin.from('conversation_signals').insert(
+        signals.map(s => ({
+          workspace_id: workspaceId,
+          user_id:      userId,
+          prospect_id:  event.prospect_id || null,
+          event_id:     event.id,
+          signal_type:  s.signal_type,
+          signal_text:  s.signal_text,
+          confidence:   s.confidence || null,
+        }))
+      );
+    } catch {}
   }
 }
 

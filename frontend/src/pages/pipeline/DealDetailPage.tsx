@@ -69,41 +69,19 @@ export default function DealDetailPage() {
       </button>
 
       <div className="bg-white border border-surface-border rounded-lg p-5 space-y-4">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <h1 className="text-lg font-semibold text-text-primary">
-              {data.target_name ?? 'Unnamed deal'}
-            </h1>
-            <div className="flex items-center gap-2 mt-1">
-              <span
-                className="inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full"
-                style={{ backgroundColor: `${stageColor}18`, color: stageColor, border: `1px solid ${stageColor}40` }}
-              >
-                <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: stageColor }} />
-                {STAGE_LABELS[data.stage]}
-              </span>
-              <span className="text-xs text-text-muted">{data.platform}</span>
-            </div>
-          </div>
-          <div className="flex gap-2">
-            <Button
-              size="xs"
-              variant="secondary"
-              leftIcon={<DollarSign size={12} />}
-              onClick={() => { setDealValueInput(String(data.feedback?.[0]?.deal_value_usd ?? '')); setDealValueOpen(true); }}
+        <div>
+          <h1 className="text-lg font-semibold text-text-primary">
+            {data.target_name ?? 'Unnamed deal'}
+          </h1>
+          <div className="flex items-center gap-2 mt-1">
+            <span
+              className="inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full"
+              style={{ backgroundColor: `${stageColor}18`, color: stageColor, border: `1px solid ${stageColor}40` }}
             >
-              {data.feedback?.[0]?.deal_value_usd
-                ? formatCurrency(data.feedback[0].deal_value_usd)
-                : 'Set value'}
-            </Button>
-            <Button
-              size="xs"
-              variant="destructive"
-              leftIcon={<Trash2 size={12} />}
-              onClick={() => setDeleteOpen(true)}
-            >
-              Remove
-            </Button>
+              <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: stageColor }} />
+              {STAGE_LABELS[data.stage]}
+            </span>
+            <span className="text-xs text-text-muted">{data.platform}</span>
           </div>
         </div>
 
@@ -112,7 +90,7 @@ export default function DealDetailPage() {
         <div className="grid grid-cols-2 gap-3 text-sm">
           <div>
             <p className="text-xs text-text-muted">Score</p>
-            <p className="font-mono font-bold text-text-primary">{Math.round(data.composite_score)}/100</p>
+            <p className="font-mono font-bold text-text-primary">{Math.round(data.composite_score)}/10</p>
           </div>
           <div>
             <p className="text-xs text-text-muted">Last activity</p>
@@ -124,6 +102,27 @@ export default function DealDetailPage() {
               <p className="text-text-primary">{formatRelativeDate(data.feedback[0].scheduled_call_date)}</p>
             </div>
           )}
+        </div>
+
+        <div className="flex items-center justify-between pt-3 border-t border-surface-border">
+          <Button
+            size="sm"
+            variant="secondary"
+            leftIcon={<DollarSign size={14} />}
+            onClick={() => { setDealValueInput(String(data.feedback?.[0]?.deal_value_usd ?? '')); setDealValueOpen(true); }}
+          >
+            {data.feedback?.[0]?.deal_value_usd
+              ? formatCurrency(data.feedback[0].deal_value_usd)
+              : 'Set value'}
+          </Button>
+          <Button
+            size="sm"
+            variant="destructive"
+            leftIcon={<Trash2 size={14} />}
+            onClick={() => setDeleteOpen(true)}
+          >
+            Remove deal
+          </Button>
         </div>
       </div>
 

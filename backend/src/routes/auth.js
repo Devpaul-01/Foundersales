@@ -386,8 +386,7 @@ router.post('/logout', asyncHandler(async (req, res) => {
   if (refresh_token) {
     try {
       // Attempt to sign out with refresh token
-      await supabaseAdmin.auth.refreshSession({ refresh_token })
-        .catch(() => {});
+      await supabaseAdmin.auth.refreshSession({ refresh_token });
     } catch (err) {
       // Ignore errors here
     }

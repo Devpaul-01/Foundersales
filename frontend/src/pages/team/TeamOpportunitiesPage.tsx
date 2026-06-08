@@ -1,6 +1,10 @@
 // FILE: src/pages/team/TeamOpportunitiesPage.tsx
 // GET /api/opportunities/team (manager+)
 // Assign to member via PUT /api/opportunities/:id/assign
+//
+// Fix: The backend's team query only joins users!user_id (the creator),
+// so opp.assigned_to_name never exists. Instead we resolve the assignee's
+// name client-side from the already-fetched members list using opp.assigned_to.
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery, useMutation } from '@tanstack/react-query';
@@ -42,6 +46,17 @@ export default function TeamOpportunitiesPage() {
     staleTime: 60_000,
   });
 
+  // Build a quick lookup map: user_id → display name
+  // Used to resolve opp.assigned_to (a UUID) to a readable name without
+  // needing a DB join on the backend.
+  const memberNameById = React.useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const m of members ?? []) {
+      map[m.user_id] = m.name ?? m.email ?? m.user_id;
+    }
+    return map;
+  }, [members]);
+
   const assignMutation = useMutation({
     mutationFn: ({ id, userId }: { id: string; userId: string }) =>
       opportunitiesApi.assign(id, userId),
@@ -68,40 +83,45 @@ export default function TeamOpportunitiesPage() {
         ) : opportunities.length === 0 ? (
           <EmptyState icon={<Zap size={28} />} headline="No team opportunities" subline="Team opportunities will appear here." />
         ) : (
-          opportunities.map((opp) => (
-            <div
-              key={opp.id}
-              className="flex items-center gap-3 px-4 py-3 border-b border-surface-border last:border-0"
-            >
-              <div className="flex-1 min-w-0 cursor-pointer" onClick={() => navigate(`/opportunities/${opp.id}`)}>
-                <p className="text-sm font-medium text-text-primary truncate">
-                  {opp.target_name || 'Prospect'}
-                </p>
-                <div className="flex items-center gap-2 mt-0.5">
-                  {opp.platform && <PlatformBadge platform={opp.platform} />}
-                  <span className="text-xs text-text-muted">{formatRelativeDate(opp.created_at)}</span>
+          opportunities.map((opp) => {
+            // Resolve the assignee name from the members map using the UUID
+            const assigneeName = opp.assigned_to ? memberNameById[opp.assigned_to] : null;
+
+            return (
+              <div
+                key={opp.id}
+                className="flex items-center gap-3 px-4 py-3 border-b border-surface-border last:border-0"
+              >
+                <div className="flex-1 min-w-0 cursor-pointer" onClick={() => navigate(`/opportunities/${opp.id}`)}>
+                  <p className="text-sm font-medium text-text-primary truncate">
+                    {opp.target_name || 'Prospect'}
+                  </p>
+                  <div className="flex items-center gap-2 mt-0.5">
+                    {opp.platform && <PlatformBadge platform={opp.platform} />}
+                    <span className="text-xs text-text-muted">{formatRelativeDate(opp.created_at)}</span>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {assigneeName ? (
+                    <div className="flex items-center gap-1.5">
+                      <Avatar name={assigneeName} size="xs" />
+                      <span className="text-xs text-text-secondary font-medium">{assigneeName}</span>
+                    </div>
+                  ) : (
+                    <span className="text-xs text-text-muted">Unassigned</span>
+                  )}
+                  <Button
+                    size="xs"
+                    variant="ghost"
+                    leftIcon={<UserPlus size={11} />}
+                    onClick={() => { setAssignTarget(opp); setAssignee(opp.assigned_to ?? ''); }}
+                  >
+                    {assigneeName ? 'Reassign' : 'Assign'}
+                  </Button>
                 </div>
               </div>
-              <div className="flex items-center gap-2 shrink-0">
-                {opp.assigned_to_name ? (
-                  <div className="flex items-center gap-1.5">
-                    <Avatar name={opp.assigned_to_name} size="xs" />
-                    <span className="text-xs text-text-muted">{opp.assigned_to_name}</span>
-                  </div>
-                ) : (
-                  <span className="text-xs text-text-muted">Unassigned</span>
-                )}
-                <Button
-                  size="xs"
-                  variant="ghost"
-                  leftIcon={<UserPlus size={11} />}
-                  onClick={() => { setAssignTarget(opp); setAssignee(opp.assigned_to ?? ''); }}
-                >
-                  Assign
-                </Button>
-              </div>
-            </div>
-          ))
+            );
+          })
         )}
       </div>
 

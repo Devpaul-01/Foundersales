@@ -1,50 +1,79 @@
 // src/services/multiProvider.js
 // ============================================================
-// MULTI-PROVIDER AI FALLBACK — Multi-Account Key Rotation
+// MULTI-PROVIDER AI FALLBACK — Cerebras + Groq + Mistral
 //
-// Reads GROQ_API_KEY_1 through GROQ_API_KEY_10 from env.
-// Falls back to GROQ_API_KEY for single-key setups.
+// Provider priority (highest free TPM first):
+//   1. Cerebras  (~60K TPM free)  — llama3.1-8b / llama3.3-70b
+//   2. Groq      (~30K TPM free)  — llama-3.1-8b-instant / llama-3.3-70b-versatile
+//   3. Mistral   (500K TPM free*) — open-mistral-7b / open-mixtral-8x7b
+//      *Mistral free tier may use your prompts for training.
 //
-// Provider chain per healthy key:
-//   1. llama-3.1-8b-instant  (primary — free, fast)
-//   2. llama-3.3-70b-versatile (fallback — smarter)
-//   3. llama-3.1-8b-instant   (last resort retry)
+// Multi-key support per provider (add real keys from separate accounts):
+//   CEREBRAS_API_KEY_1 … CEREBRAS_API_KEY_5
+//   GROQ_API_KEY_1     … GROQ_API_KEY_10
+//   MISTRAL_API_KEY_1  … MISTRAL_API_KEY_5
+//   (single-key fallback: CEREBRAS_API_KEY, GROQ_API_KEY, MISTRAL_API_KEY)
 //
-// Failed keys are cooled down for 1 hour (in-memory).
-// Cool-down state is tracked per key index so we never
-// immediately retry a key that just rate-limited us.
+// All three use OpenAI-compatible APIs — no separate SDKs needed.
+// Failed keys cool down for 1 hour (in-memory).
 //
-// FIX PERF-1: Removed the probe call in streamWithFallback.
-// Previously, every streaming chat request made an extra
-// callGroq({ maxTokens: 1, content: 'ping' }) before the real
-// stream — adding ~300-500ms latency to EVERY message. This was
-// redundant because the cooldown system already tracks failed keys.
-// The probe is now gone: we attempt the real stream directly and
-// fall through to the next key if it fails.
+// NOTE: groq.js is no longer imported. This file handles all
+// provider calls directly via fetch against each provider's
+// OpenAI-compatible endpoint.
 // ============================================================
 
-import { callGroq, streamGroq, PRIMARY_MODEL, PRO_MODEL, FLASH_MODEL } from './groq.js';
+// ──────────────────────────────────────────
+// PROVIDER REGISTRY
+// ──────────────────────────────────────────
+const PROVIDER_REGISTRY = {
+  cerebras: {
+    name:      'cerebras',
+    baseURL:   'https://api.cerebras.ai/v1',
+    models:    ['llama-3.1-8b', 'llama-3.3-70b'],  // fixed: hyphens not dots
+    envPrefix: 'CEREBRAS_API_KEY',
+    maxKeys:   5,
+  },
+  groq: {
+    name:      'groq',
+    baseURL:   'https://api.groq.com/openai/v1',
+    // Updated to llama-3.1-8b-instant as primary — highest free TPM on Groq
+    models:    ['llama-3.1-8b-instant', 'llama-3.3-70b-versatile'],
+    envPrefix: 'GROQ_API_KEY',
+    maxKeys:   10,
+  },
+  mistral: {
+    name:      'mistral',
+    baseURL:   'https://api.mistral.ai/v1',
+    models:    ['mistral-small-2506', 'ministral-8b-2410'],
+    envPrefix: 'MISTRAL_API_KEY',
+    maxKeys:   5,
+  },
+};
+
+// Attempt order: highest free TPM first
+const PROVIDER_ORDER = ['cerebras', 'groq', 'mistral'];
 
 // ──────────────────────────────────────────
 // KEY POOL BUILDER
+// Reads PROVIDER_API_KEY_1 … _N from env.
+// Falls back to PROVIDER_API_KEY (no suffix).
 // ──────────────────────────────────────────
-const buildKeyPool = () => {
+const buildKeyPool = (providerDef) => {
+  const { name, envPrefix, maxKeys } = providerDef;
   const keys = [];
 
-  for (let i = 1; i <= 10; i++) {
-    const key = process.env[`GROQ_API_KEY_${i}`];
-    if (key?.trim()) keys.push({ key: key.trim(), index: i });
+  for (let i = 1; i <= maxKeys; i++) {
+    const key = process.env[`${envPrefix}_${i}`];
+    if (key?.trim()) keys.push({ key: key.trim(), index: i, provider: name });
   }
 
-  // Single-key fallback
-  if (keys.length === 0 && process.env.GROQ_API_KEY?.trim()) {
-    keys.push({ key: process.env.GROQ_API_KEY.trim(), index: 0 });
+  // Single-key fallback (no suffix)
+  if (keys.length === 0 && process.env[envPrefix]?.trim()) {
+    keys.push({ key: process.env[envPrefix].trim(), index: 0, provider: name });
   }
 
-  if (keys.length === 0) {
-    console.error('[MultiProvider] CRITICAL: No Groq API keys found in environment!');
-  } else {
-    console.log(`[MultiProvider] Key pool initialized: ${keys.length} key(s) available`);
+  if (keys.length > 0) {
+    console.log(`[MultiProvider] ${name}: ${keys.length} key(s) loaded`);
   }
 
   return keys;
@@ -52,77 +81,219 @@ const buildKeyPool = () => {
 
 // ──────────────────────────────────────────
 // COOLDOWN STATE (in-memory)
-// Map<keyIndex, { failedAt: timestamp, failCount: number }>
+// Keyed by `providerName-keyIndex`
 // ──────────────────────────────────────────
 const KEY_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
 const keyCooldowns    = new Map();
 
-const markKeyFailed = (keyIndex) => {
-  const existing = keyCooldowns.get(keyIndex) || { failCount: 0 };
-  const next = { failedAt: Date.now(), failCount: existing.failCount + 1 };
-  keyCooldowns.set(keyIndex, next);
-  console.warn(`[MultiProvider] Key #${keyIndex} cooling down (fail #${next.failCount}) — retrying in 1h`);
+const cooldownId = (provider, keyIndex) => `${provider}-${keyIndex}`;
+
+const markKeyFailed = (provider, keyIndex) => {
+  const id       = cooldownId(provider, keyIndex);
+  const existing = keyCooldowns.get(id) || { failCount: 0 };
+  const next     = { failedAt: Date.now(), failCount: existing.failCount + 1 };
+  keyCooldowns.set(id, next);
+  console.warn(`[MultiProvider] ${provider} key #${keyIndex} cooling down (fail #${next.failCount}) — retrying in 1h`);
 };
 
-const isKeyCooling = (keyIndex) => {
-  const cd = keyCooldowns.get(keyIndex);
+const isKeyCooling = (provider, keyIndex) => {
+  const id = cooldownId(provider, keyIndex);
+  const cd = keyCooldowns.get(id);
   if (!cd) return false;
   if (Date.now() - cd.failedAt >= KEY_COOLDOWN_MS) {
-    keyCooldowns.delete(keyIndex);
-    console.log(`[MultiProvider] Key #${keyIndex} cooldown expired — back in rotation`);
+    keyCooldowns.delete(id);
+    console.log(`[MultiProvider] ${provider} key #${keyIndex} cooldown expired — back in rotation`);
     return false;
   }
   return true;
 };
 
-const getHealthyKeys = (pool) => pool.filter(k => !isKeyCooling(k.index));
-
 // ──────────────────────────────────────────
 // ERROR CLASSIFICATION
+// Provider-agnostic — matches HTTP status codes
+// and common error strings from all three APIs.
 // ──────────────────────────────────────────
-const RETRYABLE_ERRORS = [
-  'GROQ_RATE_LIMIT', 'GROQ_UNAVAILABLE', 'GROQ_AUTH_ERROR',
-  'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'socket hang up',
-];
+const RATE_LIMIT_SIGNALS = ['rate_limit', 'rate limit', '429', 'too many requests', 'quota exceeded'];
+const AUTH_ERROR_SIGNALS = ['401', 'unauthorized', 'invalid api key', 'invalid_api_key', 'authentication'];
+const UNAVAIL_SIGNALS    = ['503', '502', '500', 'unavailable', 'overloaded', 'server error'];
+const NETWORK_SIGNALS    = ['econnrefused', 'etimedout', 'enotfound', 'socket hang up', 'fetch failed'];
+
+const matchesAny = (msg, signals) =>
+  signals.some(s => msg?.toLowerCase().includes(s.toLowerCase()));
 
 const isRetryableError = (err) =>
-  RETRYABLE_ERRORS.some(code => err?.message?.includes(code));
+  matchesAny(err?.message, [
+    ...RATE_LIMIT_SIGNALS, ...AUTH_ERROR_SIGNALS,
+    ...UNAVAIL_SIGNALS,    ...NETWORK_SIGNALS,
+  ]);
 
 const shouldCoolKey = (err) =>
-  err?.message?.includes('GROQ_RATE_LIMIT') ||
-  err?.message?.includes('GROQ_AUTH_ERROR') ||
-  err?.message?.includes('GROQ_UNAVAILABLE');
+  matchesAny(err?.message, [...RATE_LIMIT_SIGNALS, ...AUTH_ERROR_SIGNALS, ...UNAVAIL_SIGNALS]);
 
 // ──────────────────────────────────────────
-// LAZY KEY POOL
+// LAZY KEY POOLS (initialized on first use)
 // ──────────────────────────────────────────
-let _keyPool = null;
-const getKeyPool = () => {
-  if (!_keyPool) _keyPool = buildKeyPool();
-  return _keyPool;
+let _pools = null;
+
+const getPools = () => {
+  if (!_pools) {
+    _pools = {};
+    let total = 0;
+
+    for (const id of PROVIDER_ORDER) {
+      _pools[id] = buildKeyPool(PROVIDER_REGISTRY[id]);
+      total += _pools[id].length;
+    }
+
+    if (total === 0) {
+      console.error('[MultiProvider] CRITICAL: No API keys found for any provider!');
+    } else {
+      console.log(`[MultiProvider] Ready — ${total} total key(s) across ${PROVIDER_ORDER.length} providers`);
+    }
+  }
+  return _pools;
+};
+
+// ──────────────────────────────────────────
+// GENERIC OpenAI-COMPATIBLE CALLER (non-streaming)
+// Works with Cerebras, Groq, and Mistral — all
+// expose the same /chat/completions endpoint shape.
+// ──────────────────────────────────────────
+const callProvider = async ({
+  baseURL, apiKey, model,
+  messages, systemPrompt, temperature, maxTokens,
+}) => {
+  const body = {
+    model,
+    max_tokens:  maxTokens   ?? 1024,
+    temperature: temperature ?? 0.7,
+    messages: [
+      ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
+      ...messages,
+    ],
+  };
+
+  const res = await fetch(`${baseURL}/chat/completions`, {
+    method:  'POST',
+    headers: {
+      'Content-Type':  'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => res.statusText);
+    throw new Error(`HTTP ${res.status}: ${errText}`);
+  }
+
+  const data    = await res.json();
+  const content = data.choices?.[0]?.message?.content ?? '';
+  const usage   = data.usage ?? {};
+  return { content, usage };
+};
+
+// ──────────────────────────────────────────
+// GENERIC OpenAI-COMPATIBLE STREAMER
+// Reads SSE chunks and calls onToken per delta.
+// ──────────────────────────────────────────
+const streamProvider = async ({
+  baseURL, apiKey, model,
+  messages, systemPrompt, temperature, maxTokens,
+  onToken, onComplete,
+}) => {
+  const body = {
+    model,
+    max_tokens:  maxTokens   ?? 1024,
+    temperature: temperature ?? 0.7,
+    stream:      true,
+    messages: [
+      ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
+      ...messages,
+    ],
+  };
+
+  const res = await fetch(`${baseURL}/chat/completions`, {
+    method:  'POST',
+    headers: {
+      'Content-Type':  'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => res.statusText);
+    throw new Error(`HTTP ${res.status}: ${errText}`);
+  }
+
+  const reader      = res.body.getReader();
+  const decoder     = new TextDecoder();
+  let   fullContent = '';
+  let   buffer      = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop(); // hold incomplete line for next chunk
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || !trimmed.startsWith('data: ')) continue;
+
+      const payload = trimmed.slice(6);
+      if (payload === '[DONE]') continue;
+
+      try {
+        const parsed = JSON.parse(payload);
+        const token  = parsed.choices?.[0]?.delta?.content;
+        if (token) {
+          fullContent += token;
+          onToken?.(token);
+        }
+      } catch {
+        // Malformed SSE chunk — skip silently
+      }
+    }
+  }
+
+  onComplete?.(fullContent, {});
 };
 
 // ──────────────────────────────────────────
 // PROVIDER QUEUE BUILDER
-// Primary model across all healthy keys first,
-// then fallback model, then last resort.
+//
+// Order: Cerebras → Groq → Mistral
+// Within each provider: primary model first, then fallback.
+// Only healthy (non-cooling) keys are included.
 // ──────────────────────────────────────────
-const CHAT_MODELS = [PRIMARY_MODEL, PRO_MODEL, FLASH_MODEL];
-
-const buildProviderQueue = (pool) => {
-  const healthy = getHealthyKeys(pool);
-  if (healthy.length === 0) return [];
-
+const buildProviderQueue = () => {
+  const pools = getPools();
   const queue = [];
-  for (const model of CHAT_MODELS) {
-    for (const keyEntry of healthy) {
-      queue.push({
-        model,
-        keyEntry,
-        name: `groq-${model}-key${keyEntry.index}`,
-      });
+
+  for (const providerId of PROVIDER_ORDER) {
+    const def     = PROVIDER_REGISTRY[providerId];
+    const keyPool = pools[providerId];
+    const healthy = keyPool.filter(k => !isKeyCooling(k.provider, k.index));
+
+    if (healthy.length === 0) continue;
+
+    for (const model of def.models) {
+      for (const keyEntry of healthy) {
+        queue.push({
+          providerId,
+          model,
+          keyEntry,
+          baseURL: def.baseURL,
+          name:    `${providerId}-${model}-key${keyEntry.index}`,
+        });
+      }
     }
   }
+
   return queue;
 };
 
@@ -130,11 +301,10 @@ const buildProviderQueue = (pool) => {
 // NON-STREAMING: callWithFallback
 // ──────────────────────────────────────────
 export const callWithFallback = async (opts) => {
-  const keyPool = getKeyPool();
-  const queue   = buildProviderQueue(keyPool);
+  const queue = buildProviderQueue();
 
   if (queue.length === 0) {
-    throw new Error('ALL_PROVIDERS_FAILED: All Groq API keys are currently cooling down');
+    throw new Error('ALL_PROVIDERS_FAILED: No healthy keys available across Cerebras, Groq, or Mistral');
   }
 
   let lastError;
@@ -143,20 +313,28 @@ export const callWithFallback = async (opts) => {
   for (const provider of queue) {
     try {
       console.log(`[MultiProvider] Trying ${provider.name}...`);
-      const result = await callGroq({
-        ...opts,
-        modelName: provider.model,
-        _apiKey:   provider.keyEntry.key,
+
+      const result = await callProvider({
+        baseURL:      provider.baseURL,
+        apiKey:       provider.keyEntry.key,
+        model:        provider.model,
+        messages:     opts.messages,
+        systemPrompt: opts.systemPrompt,
+        temperature:  opts.temperature,
+        maxTokens:    opts.maxTokens,
       });
-      console.log(`[MultiProvider] Success via ${provider.name}`);
+
+      console.log(`[MultiProvider] ✓ Success via ${provider.name}`);
       return { ...result, model_used: provider.name };
+
     } catch (err) {
       lastError = err;
-      console.warn(`[MultiProvider] ${provider.name} failed: ${err.message}`);
+      console.warn(`[MultiProvider] ✗ ${provider.name} failed: ${err.message}`);
 
-      if (shouldCoolKey(err) && !cooledThisCall.has(provider.keyEntry.index)) {
-        markKeyFailed(provider.keyEntry.index);
-        cooledThisCall.add(provider.keyEntry.index);
+      const cid = cooldownId(provider.keyEntry.provider, provider.keyEntry.index);
+      if (shouldCoolKey(err) && !cooledThisCall.has(cid)) {
+        markKeyFailed(provider.keyEntry.provider, provider.keyEntry.index);
+        cooledThisCall.add(cid);
       }
 
       if (!isRetryableError(err)) throw err; // Non-retryable — bail immediately
@@ -170,25 +348,19 @@ export const callWithFallback = async (opts) => {
 // ──────────────────────────────────────────
 // STREAMING: streamWithFallback
 //
-// FIX PERF-1: Removed the probe call. Previously this fired
-// callGroq({ content: 'ping', maxTokens: 1 }) before every real
-// stream, adding ~300-500ms to every user message with zero benefit
-// since the cooldown system already handles failed keys.
-//
-// Now we attempt the stream directly. If a key fails during
-// streaming, the error propagates to onError and the caller
-// can retry via a fresh request (SSE streams can't be mid-streamed
-// to a different key anyway without client-side restitch).
+// Attempts each provider/key in queue order.
+// SSE streams can't switch mid-stream, so if a
+// key fails during streaming we fall through to
+// the next provider for a fresh stream attempt.
 // ──────────────────────────────────────────
 export const streamWithFallback = async ({
   messages, systemPrompt, temperature, maxTokens,
   onToken, onComplete, onError,
 }) => {
-  const keyPool = getKeyPool();
-  const queue   = buildProviderQueue(keyPool);
+  const queue = buildProviderQueue();
 
   if (queue.length === 0) {
-    onError?.(new Error('ALL_PROVIDERS_FAILED: All Groq API keys are currently cooling down'));
+    onError?.(new Error('ALL_PROVIDERS_FAILED: No healthy keys available across Cerebras, Groq, or Mistral'));
     return;
   }
 
@@ -198,53 +370,69 @@ export const streamWithFallback = async ({
     try {
       console.log(`[MultiProvider] Streaming via ${provider.name}`);
 
-      // Attempt the stream directly — no probe call needed.
-      // If the key is bad, streamGroq will throw and we fall through.
-      await streamGroq({
-        messages, systemPrompt, temperature, maxTokens,
-        modelName: provider.model,
-        _apiKey:   provider.keyEntry.key,
+      await streamProvider({
+        baseURL:      provider.baseURL,
+        apiKey:       provider.keyEntry.key,
+        model:        provider.model,
+        messages,
+        systemPrompt,
+        temperature,
+        maxTokens,
         onToken,
         onComplete: (content, usage) =>
           onComplete?.(content, { ...usage, model_used: provider.name }),
-        onError: (err) => {
-          // Re-throw so we fall through to the next provider
-          throw err;
-        },
       });
+
       return; // Stream completed successfully
 
     } catch (err) {
       console.warn(`[MultiProvider] Stream failed for ${provider.name}: ${err.message}`);
 
-      if (shouldCoolKey(err) && !cooledThisCall.has(provider.keyEntry.index)) {
-        markKeyFailed(provider.keyEntry.index);
-        cooledThisCall.add(provider.keyEntry.index);
+      const cid = cooldownId(provider.keyEntry.provider, provider.keyEntry.index);
+      if (shouldCoolKey(err) && !cooledThisCall.has(cid)) {
+        markKeyFailed(provider.keyEntry.provider, provider.keyEntry.index);
+        cooledThisCall.add(cid);
       }
 
       if (!isRetryableError(err)) { onError?.(err); return; }
-      // Otherwise continue to next provider in queue
+      // Otherwise continue to next provider
     }
   }
 
-  onError?.(new Error('ALL_PROVIDERS_FAILED: No healthy Groq providers available'));
+  onError?.(new Error('ALL_PROVIDERS_FAILED: All providers and keys exhausted'));
 };
 
 // ──────────────────────────────────────────
-// UTILITY: Key health status (for debugging / admin)
+// UTILITY: Full provider health status
+// Useful for /admin/status or debug endpoints.
 // ──────────────────────────────────────────
 export const getProviderStatus = () => {
-  const keyPool = getKeyPool();
-  return keyPool.map(k => {
-    const cd      = keyCooldowns.get(k.index);
-    const cooling = isKeyCooling(k.index);
-    return {
-      key_index:     k.index,
-      status:        cooling ? 'cooling' : 'healthy',
-      fail_count:    cd?.failCount || 0,
-      cooling_until: cooling ? new Date(cd.failedAt + KEY_COOLDOWN_MS).toISOString() : null,
-    };
-  });
+  const pools  = getPools();
+  const status = [];
+
+  for (const providerId of PROVIDER_ORDER) {
+    const def     = PROVIDER_REGISTRY[providerId];
+    const keyPool = pools[providerId];
+
+    for (const k of keyPool) {
+      const id      = cooldownId(k.provider, k.index);
+      const cd      = keyCooldowns.get(id);
+      const cooling = isKeyCooling(k.provider, k.index);
+
+      status.push({
+        provider:      providerId,
+        models:        def.models,
+        key_index:     k.index,
+        status:        cooling ? 'cooling' : 'healthy',
+        fail_count:    cd?.failCount || 0,
+        cooling_until: cooling
+          ? new Date(cd.failedAt + KEY_COOLDOWN_MS).toISOString()
+          : null,
+      });
+    }
+  }
+
+  return status;
 };
 
 export default { callWithFallback, streamWithFallback, getProviderStatus };

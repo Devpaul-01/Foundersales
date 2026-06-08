@@ -6,6 +6,7 @@
 // - rate-limited refresh (5/hr) with toast on 429
 // - Infinite scroll (no Load More button per brief)
 // - team view for managers
+// - "Assigned to me" badge when opportunity was assigned (not owned)
 // ============================================================
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
@@ -14,6 +15,7 @@ import { opportunitiesApi } from '@/api/opportunities';
 import { queryClient }      from '@/lib/queryClient';
 import { queryKeys }        from '@/lib/queryKeys';
 import { useRole }          from '@/hooks/useRole';
+import { useAuth }          from '@/hooks/useAuth';
 import { useToast }         from '@/hooks/useToast';
 import { Button }           from '@/components/ui/Button';
 import { Badge, PlatformBadge, ScoreBadge } from '@/components/ui/Badge';
@@ -26,18 +28,22 @@ import { formatRelativeDate, cn }     from '@/lib/utils';
 import { Zap, RefreshCw, ChevronRight, AlertTriangle } from 'lucide-react';
 
 const STATUS_TABS = [
+  { value: 'all',     label: 'All'     },
   { value: 'pending', label: 'Pending' },
   { value: 'viewed',  label: 'Viewed'  },
-  { value: 'acted',   label: 'Acted'   },
-  { value: 'sent',    label: 'Sent'    },
-  { value: 'all',     label: 'All'     },
 ];
 
-function OpportunityCard({ opp }: { opp: Opportunity }) {
+function OpportunityCard({ opp, currentUserId }: { opp: Opportunity; currentUserId: string }) {
   const navigate = useNavigate();
   const pct = opp.composite_score;
   const scoreColor =
-    pct >= 70 ? 'text-success' : pct >= 40 ? 'text-warning' : 'text-danger';
+    pct >= 7 ? 'text-success' : pct >= 4 ? 'text-warning' : 'text-danger';
+
+  // True when this opp was assigned to me by someone else (I'm not the creator)
+  const isAssignedToMe =
+    !!opp.assigned_to &&
+    opp.assigned_to === currentUserId &&
+    opp.user_id !== currentUserId;
 
   return (
     <div
@@ -51,12 +57,17 @@ function OpportunityCard({ opp }: { opp: Opportunity }) {
           <span className="text-sm font-medium text-text-primary truncate max-w-[200px]">
             {opp.target_name ?? 'Anonymous prospect'}
           </span>
+          {isAssignedToMe && (
+            <Badge variant="purple" size="xs">
+              Assigned to me
+            </Badge>
+          )}
         </div>
         {/* Composite score circle */}
         <div className={cn(
           'w-10 h-10 rounded-full border-2 flex items-center justify-center shrink-0 font-bold text-sm',
-          pct >= 70 ? 'border-success text-success' :
-          pct >= 40 ? 'border-warning text-warning' :
+          pct >= 7 ? 'border-success text-success' :
+          pct >= 4 ? 'border-warning text-warning' :
           'border-danger text-danger',
         )}>
           {Math.round(pct)}
@@ -88,8 +99,7 @@ function OpportunityCard({ opp }: { opp: Opportunity }) {
         <Badge
           variant={
             opp.status === 'sent'    ? 'green' :
-            opp.status === 'viewed'  ? 'blue'  :
-            opp.status === 'pending' ? 'gray'  : 'amber'
+            opp.status === 'viewed'  ? 'blue'  : 'gray'
           }
           size="xs"
         >
@@ -106,6 +116,7 @@ function OpportunityCard({ opp }: { opp: Opportunity }) {
 export default function OpportunitiesPage() {
   const navigate     = useNavigate();
   const { isManager } = useRole();
+  const { user }      = useAuth();
   const { showToast } = useToast();
   const [searchParams, setSearchParams] = useSearchParams();
   const activeStatus = searchParams.get('status') ?? 'pending';
@@ -227,7 +238,9 @@ export default function OpportunitiesPage() {
       ) : (
         <>
           <div className="space-y-3">
-            {allOpps.map((opp) => <OpportunityCard key={opp.id} opp={opp} />)}
+            {allOpps.map((opp) => (
+              <OpportunityCard key={opp.id} opp={opp} currentUserId={user?.id ?? ''} />
+            ))}
           </div>
           {/* Infinite scroll sentinel */}
           <div ref={sentinelRef} className="flex justify-center py-4">

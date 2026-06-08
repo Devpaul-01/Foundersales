@@ -13,7 +13,6 @@ import { InlineAlert } from '@/components/common/index';
 import { AppError } from '@/api/types';
 import { ROUTES } from '@/lib/constants';
 import { authApi } from '@/api/auth';
-import { onboardingApi } from '@/api/onboarding';
 
 export default function LoginPage() {
   const { login }       = useAuth();
@@ -28,32 +27,40 @@ export default function LoginPage() {
     formState: { errors, isSubmitting },
   } = useForm<LoginSchema>({ resolver: zodResolver(loginSchema) });
 
-  // src/pages/auth/LoginPage.tsx
-const onSubmit = async (data: LoginSchema) => {
-  setServerError('');
-  try {
-    // ✅ Login now returns onboarding status directly
-    const result = await login(data.email, data.password);
-    const status = result.onboarding;
-    
-    console.log('[Login] Onboarding status:', status);
-    
-    // Redirect based on onboarding step
-    if (status.completed) {
-      navigate(from, { replace: true });
-    } else if (status.step === 0) {
-      navigate('/onboarding/basic', { replace: true });
-    } else if (status.step === 1) {
-      navigate('/onboarding/q/2', { replace: true });
-    } else if (status.step === 2) {
-      navigate('/onboarding/q/3', { replace: true });
-    } else {
-      navigate('/onboarding/q/3', { replace: true });
+  const onSubmit = async (data: LoginSchema) => {
+    setServerError('');
+    try {
+      const result = await login(data.email, data.password);
+      const status = result.onboarding;
+
+      console.log('[Login] Onboarding status:', status);
+
+      // ── Invite flow takes priority over normal onboarding routing ──
+      // AcceptInvitePage stores the token here before redirecting to login,
+      // using localStorage so cross-tab email-verification flows don't lose it.
+      const pendingToken = localStorage.getItem('pending_invite_token');
+      if (pendingToken) {
+        localStorage.removeItem('pending_invite_token');
+        navigate(`/accept-invite?token=${pendingToken}`, { replace: true });
+        return;
+      }
+
+      // ── Normal post-login routing based on onboarding state ──────
+      if (status.completed) {
+        navigate(from, { replace: true });
+      } else if (status.step === 0) {
+        navigate('/onboarding/basic', { replace: true });
+      } else if (status.step === 1) {
+        navigate('/onboarding/q/2', { replace: true });
+      } else if (status.step === 2) {
+        navigate('/onboarding/q/3', { replace: true });
+      } else {
+        navigate('/onboarding/q/3', { replace: true });
+      }
+    } catch (err) {
+      setServerError(err instanceof AppError ? err.message : 'Login failed. Please try again.');
     }
-  } catch (err) {
-    setServerError(err instanceof AppError ? err.message : 'Login failed. Please try again.');
-  }
-};
+  };
 
   const handleGoogle = async () => {
     setGoogleLoading(true);
@@ -96,11 +103,11 @@ const onSubmit = async (data: LoginSchema) => {
           Sign in
         </Button>
 
-<div className="text-right">
-  <Link to="/forgot-password" className="text-xs text-brand hover:underline">
-    Forgot password?
-  </Link>
-</div>
+        <div className="text-right">
+          <Link to="/forgot-password" className="text-xs text-brand hover:underline">
+            Forgot password?
+          </Link>
+        </div>
       </form>
 
       <div className="relative my-5">

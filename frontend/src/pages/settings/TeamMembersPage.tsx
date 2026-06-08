@@ -1,7 +1,7 @@
 // FILE: src/pages/settings/TeamMembersPage.tsx
 // GET  /api/workspaces/:id/members
 // GET  /api/workspaces/:id/invites
-// POST /api/workspaces/:id/invite
+// POST /api/workspaces/:id/invite-test (TEST ENDPOINT)
 // DELETE /api/workspaces/:id/invites/:inviteId
 // PUT  /api/workspaces/:id/members/:uid/role
 // DELETE /api/workspaces/:id/members/:uid
@@ -24,7 +24,7 @@ import { Modal }         from '@/components/ui/Modal';
 import { Skeleton }      from '@/components/ui/Skeleton';
 import { InlineAlert, ConfirmDialog } from '@/components/common/index';
 import { formatShortDate } from '@/lib/utils';
-import { UserPlus, X, Clock } from 'lucide-react';
+import { UserPlus, X, Clock, Copy, Check } from 'lucide-react';
 import type { WorkspaceMember, PendingInvite } from '@/api/types';
 
 const ROLE_OPTIONS = [
@@ -40,6 +40,16 @@ export default function TeamMembersPage() {
   const wsId = activeWorkspace?.id ?? '';
   const [inviteOpen,  setInviteOpen]  = useState(false);
   const [removeTarget, setRemoveTarget] = useState<WorkspaceMember | null>(null);
+  
+  // State for showing generated invite link
+  const [generatedInvite, setGeneratedInvite] = useState<{
+    url: string;
+    email: string;
+    workspaceName: string;
+    expiresAt: string;
+  } | null>(null);
+  
+  const [copied, setCopied] = useState(false);
 
   const { data: members, isLoading: membersLoading } = useQuery({
     queryKey: queryKeys.members(wsId),
@@ -58,15 +68,28 @@ export default function TeamMembersPage() {
   const { register, handleSubmit, reset, formState: { errors, isSubmitting } } =
     useForm<InviteMemberSchema>({ resolver: zodResolver(inviteMemberSchema), defaultValues: { role: 'member' } });
 
+  // TEST MUTATION - uses invite-test endpoint
   const inviteMutation = useMutation({
-    mutationFn: (d: InviteMemberSchema) => workspacesApi.invite(wsId, d),
-    onSuccess: () => {
+    mutationFn: (d: InviteMemberSchema) => workspacesApi.inviteTest(wsId, d),
+    onSuccess: (response) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.invites(wsId) });
-      showToast('Invite sent!', 'success');
+      
+      // Store the generated invite info to show in modal
+      setGeneratedInvite({
+        url: response.data.invite_url,
+        email: response.data.email,
+        workspaceName: response.data.workspace_name,
+        expiresAt: response.data.expires_at,
+      });
+      
       reset();
-      setInviteOpen(false);
+      // Don't close the invite modal yet - we'll show the link modal
     },
-    onError: () => showToast('Could not send invite.', 'error'),
+    onError: (error: any) => {
+      console.error('Invite error:', error);
+      const message = error?.response?.data?.error || 'Could not create invite.';
+      showToast(message, 'error');
+    },
   });
 
   const revokeInviteMutation = useMutation({
@@ -75,6 +98,7 @@ export default function TeamMembersPage() {
       queryClient.invalidateQueries({ queryKey: queryKeys.invites(wsId) });
       showToast('Invite revoked.', 'info');
     },
+    onError: () => showToast('Could not revoke invite.', 'error'),
   });
 
   const updateRoleMutation = useMutation({
@@ -96,6 +120,15 @@ export default function TeamMembersPage() {
     },
     onError: () => showToast('Could not remove member.', 'error'),
   });
+
+  const handleCopyLink = async () => {
+    if (generatedInvite?.url) {
+      await navigator.clipboard.writeText(generatedInvite.url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+      showToast('Invite link copied to clipboard!', 'success');
+    }
+  };
 
   if (!isAdmin) {
     return (
@@ -217,10 +250,77 @@ export default function TeamMembersPage() {
           <div className="flex justify-end gap-2">
             <Button variant="secondary" size="sm" type="button" onClick={() => setInviteOpen(false)}>Cancel</Button>
             <Button size="sm" type="submit" isLoading={inviteMutation.isPending || isSubmitting}>
-              Send invite
+              Create invite
             </Button>
           </div>
         </form>
+      </Modal>
+
+      {/* Invite Link Modal (shows after invite is created) */}
+      <Modal 
+        isOpen={!!generatedInvite} 
+        onClose={() => {
+          setGeneratedInvite(null);
+          setInviteOpen(false);
+        }} 
+        title="Invite created (test mode)" 
+        size="sm"
+      >
+        {generatedInvite && (
+          <div className="space-y-4">
+            <div className="bg-amber-50 border border-amber-200 rounded-md p-3">
+              <p className="text-xs text-amber-700 font-medium mb-1">⚠️ Test Mode Active</p>
+              <p className="text-xs text-amber-600">
+                Email sending is disabled. Copy the link below and share it manually with the user.
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-text-muted mb-1">Invite for:</p>
+              <p className="text-sm font-medium text-text-primary">{generatedInvite.email}</p>
+            </div>
+
+            <div>
+              <p className="text-xs text-text-muted mb-1">Workspace:</p>
+              <p className="text-sm text-text-primary">{generatedInvite.workspaceName}</p>
+            </div>
+
+            <div>
+              <p className="text-xs text-text-muted mb-1">Expires:</p>
+              <p className="text-sm text-text-primary">{formatShortDate(generatedInvite.expiresAt)}</p>
+            </div>
+
+            <div>
+              <p className="text-xs text-text-muted mb-2">Invite Link (copy and share):</p>
+              <div className="flex items-center gap-2">
+                <code className="flex-1 text-xs bg-surface-base p-2 rounded border border-surface-border break-all font-mono">
+                  {generatedInvite.url}
+                </code>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={handleCopyLink}
+                  leftIcon={copied ? <Check size={14} /> : <Copy size={14} />}
+                >
+                  {copied ? 'Copied!' : 'Copy'}
+                </Button>
+              </div>
+            </div>
+
+            <div className="pt-2">
+              <Button
+                size="sm"
+                fullWidth
+                onClick={() => {
+                  setGeneratedInvite(null);
+                  setInviteOpen(false);
+                }}
+              >
+                Done
+              </Button>
+            </div>
+          </div>
+        )}
       </Modal>
 
       {/* Remove confirm */}

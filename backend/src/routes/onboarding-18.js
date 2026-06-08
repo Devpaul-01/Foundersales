@@ -467,20 +467,10 @@ router.post('/answers', validate(onboardingAnswersSchema), asyncHandler(async (r
   res.json({ success: true, voice_profile: voiceProfile });
 }));
 
-// ── Zod schema for /abbreviated ─────────────────────────────
-const onboardingAbbreviatedSchema = z.object({
-  name:             z.string().max(100).optional(),
-  role:             z.string().max(50).optional(),
-  primary_goal:     z.string().max(200).optional(),
-  experience_level: z.string().max(50).optional(),
-  bio:              z.string().max(2000).optional(),
-  websites:         z.array(z.string().max(500)).max(10).optional(),
-});
-
 // POST /api/onboarding/abbreviated
-router.post('/abbreviated', validate(onboardingAbbreviatedSchema), asyncHandler(async (req, res) => {
+router.post('/abbreviated', asyncHandler(async (req, res) => {
   const userId = req.user.id, workspaceId = req.workspace.id;
-  const { role, primary_goal, name, experience_level, bio, websites } = req.body;
+  const { role, primary_goal } = req.body;
   log('POST /abbreviated', { userId, workspaceId });
 
   // Build profile updates conditionally.
@@ -491,29 +481,13 @@ router.post('/abbreviated', validate(onboardingAbbreviatedSchema), asyncHandler(
   const profileUpdates = {
     primary_goal:         primary_goal || null,
     onboarding_completed: true,
-    onboarding_step:      3,
+    onboarding_step:      1,
   };
-  
-  if (experience_level) profileUpdates.experience_level = experience_level;
-  if (bio?.trim())      profileUpdates.bio              = bio.trim();
-  if (websites?.length) profileUpdates.websites         = websites;
+  if (role) profileUpdates.role = role;
 
-  // Use upsert instead of a plain UPDATE so that if the profile row was never
-  // created (e.g. accept-invite profile upsert failed silently), we create it
-  // here rather than returning a false { success: true } with nothing saved.
-  const { error: profileUpsertErr } = await supabaseAdmin
-    .from('workspace_profiles')
-    .upsert(
-      { workspace_id: workspaceId, user_id: userId, ...profileUpdates, updated_at: new Date().toISOString() },
-      { onConflict: 'workspace_id,user_id', ignoreDuplicates: false }
-    );
-  if (profileUpsertErr) throw profileUpsertErr;
-
+  await updateWorkspaceProfile(workspaceId, userId, profileUpdates);
   try {
-    const userUpdates = { onboarding_completed: true, onboarding_step: 3 };
-    // Save name if provided — invited users may not have set one yet.
-    if (name?.trim()) userUpdates.name = name.trim();
-    await supabaseAdmin.from('users').update(userUpdates).eq('id', userId);
+    await supabaseAdmin.from('users').update({ onboarding_completed: true }).eq('id', userId);
   } catch (e) {
     logError('abbreviated users.update (non-fatal)', e, { userId });
   }

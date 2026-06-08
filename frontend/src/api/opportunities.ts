@@ -1,5 +1,5 @@
 import apiClient from './client';
-import type { Opportunity, OpportunityIntel } from './types';
+import type { Opportunity, OpportunityIntel, OpportunityOutreach } from './types';
 
 export const opportunitiesApi = {
   list: (params: { status?: string; limit?: number; offset?: number }) =>
@@ -26,9 +26,13 @@ export const opportunitiesApi = {
     apiClient.get<{ opportunity: Opportunity }>(`/api/opportunities/${id}`),
 
   getIntel: (id: string) =>
-    apiClient.get<{ intel: OpportunityIntel | null; reason: string | null }>(
-      `/api/opportunities/${id}/intel`,
-    ),
+    apiClient.get<{
+      intel:    OpportunityIntel    | null;
+      outreach: OpportunityOutreach | null;
+      research: { citations: string[] } | null;
+      reason:   string | null;
+      cached:   boolean;
+    }>(`/api/opportunities/${id}/intel`),
 
   updateStatus: (id: string, status: string) =>
     apiClient.put<{ success: boolean; status: string }>(

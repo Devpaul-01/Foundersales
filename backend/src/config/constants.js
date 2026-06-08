@@ -53,7 +53,9 @@ export const STAGE_COLORS = { new: '#64748B', contacted: '#3B82F6', replied: '#8
 // FIX MED-02: OPP_STATUS is now a live alias of OPPORTUNITY_STATUS.
 // Both names export the same object reference — updating OPPORTUNITY_STATUS
 // automatically updates OPP_STATUS. Prefer OPPORTUNITY_STATUS in new code.
-export const OPPORTUNITY_STATUS = { PENDING: 'pending', VIEWED: 'viewed', ACTED: 'acted', SENT: 'sent', DONE: 'done' };
+// Status lifecycle: pending (untouched) → viewed (auto on open) → sent (feedback logged)
+// ACTED and DONE removed — simplified to 3 states.
+export const OPPORTUNITY_STATUS = { PENDING: 'pending', VIEWED: 'viewed', SENT: 'sent' };
 export const OPP_STATUS = OPPORTUNITY_STATUS; // @deprecated — use OPPORTUNITY_STATUS
 
 export const FEEDBACK_OUTCOMES = { POSITIVE: 'positive', NEGATIVE: 'negative' };

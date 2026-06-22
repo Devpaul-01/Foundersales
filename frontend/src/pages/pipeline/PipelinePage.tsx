@@ -335,7 +335,13 @@ export default function PipelinePage() {
           <p className="text-sm text-brand flex-1">{calPrompt.message}</p>
           <Button
             size="xs"
-            onClick={() => { navigate(ROUTES.CALENDAR); setCalPrompt(null); }}
+            onClick={() => {
+              const params = calPrompt.opportunity_id
+                ? `?opportunityId=${calPrompt.opportunity_id}`
+                : '';
+              navigate(`/calendar${params}`);
+              setCalPrompt(null);
+            }}
           >
             Add to calendar
           </Button>

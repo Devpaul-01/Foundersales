@@ -85,10 +85,23 @@ function GrowthCardItem({ card, onDismiss }: { card: GrowthCard; onDismiss: (id:
     mutationFn: (id: string) => growthApi.markCardRead(id),
   });
 
+  const chatMutation = useMutation({
+    mutationFn: () =>
+      chatApi.createWithMessage({
+        message:        `Let's discuss this: "${card.title}"`,
+        chat_type:      'general',
+        chat_mode:      'general',
+        growth_card_id: card.id,
+        title:          `Growth: ${card.title}`.slice(0, 100),
+      }),
+    onSuccess: (response) => navigate(`/chat/${response.data.chat.id}`),
+    onError:   () => showToast('Could not start chat. Please try again.', 'error'),
+  });
+
   const handleClick = () => {
     if (!card.is_read) readMutation.mutate(card.id);
     if (card.action_type === 'internal_chat') {
-      navigate(ROUTES.CHAT);
+      chatMutation.mutate();
     } else if (card.action_type === 'external_url' && card.metadata?.source_url) {
       window.open(card.metadata.source_url as string, '_blank', 'noopener,noreferrer');
     } else if (card.action_type === 'internal_nav') {
@@ -118,12 +131,15 @@ function GrowthCardItem({ card, onDismiss }: { card: GrowthCard; onDismiss: (id:
       {card.action_label && (
         <button
           onClick={handleClick}
-          className="text-xs text-brand font-medium hover:underline flex items-center gap-1"
+          disabled={chatMutation.isPending}
+          className="text-xs text-brand font-medium hover:underline flex items-center gap-1 disabled:opacity-50"
         >
-          {card.action_label}
-          {card.action_type === 'external_url'
-            ? <ExternalLink size={10} />
-            : <ChevronRight size={11} />}
+          {chatMutation.isPending ? 'Starting…' : card.action_label}
+          {!chatMutation.isPending && (
+            card.action_type === 'external_url'
+              ? <ExternalLink size={10} />
+              : <ChevronRight size={11} />
+          )}
         </button>
       )}
     </div>

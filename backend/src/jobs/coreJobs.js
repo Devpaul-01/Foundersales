@@ -250,9 +250,11 @@ export const runPerformanceSummaryJob = async () => {
 };
 
 export const summarizeUserPerformance = async (userId, workspaceId) => {
+  // Select message_style and message_length so summarizePerformancePatterns
+  // can compute best-* fields from the joined opportunity row.
   const { data: recentFeedback } = await supabaseAdmin
     .from('feedback')
-    .select('outcome, outcome_note, opportunities(platform, target_context)')
+    .select('outcome, outcome_note, opportunities(platform, target_context, message_style, message_length)')
     .eq('user_id', userId)
     .eq('workspace_id', workspaceId)
     .order('created_at', { ascending: false })
@@ -269,17 +271,20 @@ export const summarizeUserPerformance = async (userId, workspaceId) => {
 
   const userCtx = { id: userId, ...wpCtx, workspace_id: workspaceId };
   const summary = await groqService.summarizePerformancePatterns(userCtx, recentFeedback);
+  // summarizePerformancePatterns must return:
+  // { learned_patterns: string, best_message_style: string,
+  //   best_message_length: string, best_platform: string,
+  //   messages_at_last_summary: number }
   if (!summary) return;
 
   await supabaseAdmin.from('user_performance_profiles').upsert({
     user_id:                  userId,
     workspace_id:             workspaceId,
-    learned_patterns:         summary.learned_patterns,
-    best_message_style:       summary.best_message_style,
-    best_message_length:      summary.best_message_length,
-    main_objection:           summary.main_objection,
-    objection_reframe:        summary.objection_reframe,
-    messages_at_last_summary: summary.messages_at_last_summary,
+    learned_patterns:         summary.learned_patterns         ?? null,
+    best_message_style:       summary.best_message_style       ?? null,
+    best_message_length:      summary.best_message_length      ?? null,
+    best_platform:            summary.best_platform            ?? null,
+    messages_at_last_summary: summary.messages_at_last_summary ?? 0,
     last_summarized_at:       new Date().toISOString(),
   }, { onConflict: 'user_id,workspace_id' });
 };

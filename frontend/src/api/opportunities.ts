@@ -8,6 +8,19 @@ export const opportunitiesApi = {
       should_refresh: boolean;
       workspace_id:   string;
     }>('/api/opportunities', { params }),
+    create: (body: {
+  platform:          string;
+  prepared_message:  string;
+  stage?:            string;
+  target_name?:      string;
+  target_context?:   string;
+  source_url?:       string;
+  follow_up_message?: string;
+  fit_score?:        number;
+  timing_score?:     number;
+  intent_score?:     number;
+}) =>
+  apiClient.post<{ opportunity: Opportunity }>('/api/opportunities', body),
 
   refresh: () =>
     apiClient.post<{
@@ -42,5 +55,15 @@ export const opportunitiesApi = {
   assign: (id: string, userId: string) =>
     apiClient.put<{ success: boolean; assigned_to: string }>(
       `/api/opportunities/${id}/assign`, { user_id: userId },
+    ),
+
+  trackLinkClick: (id: string) =>
+    apiClient.put<{ success: boolean; link_clicked_at: string }>(
+      `/api/opportunities/${id}/link-clicked`, {},
+    ),
+
+  trackMessageCopy: (id: string) =>
+    apiClient.put<{ success: boolean; message_copied_at: string }>(
+      `/api/opportunities/${id}/message-copied`, {},
     ),
 };

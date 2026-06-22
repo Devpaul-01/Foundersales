@@ -188,7 +188,7 @@ Provide coaching in this EXACT JSON format:
     const { content } = await callGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.55,
-      maxTokens:   800,
+      maxTokens:   2000,
     });
     const clean  = content.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
@@ -258,7 +258,7 @@ Keep response under 60 words. End with a rewrite in quotes starting with "Try:"`
     const { content } = await callGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.5,
-      maxTokens:   180,
+      maxTokens:   2000,
     });
     return parseTextResponse(content, 'Good self-awareness. The key is specificity — name the result, reference their situation, and ask one easy question.');
   } catch {
@@ -373,7 +373,7 @@ Return ONLY a JSON array of exactly 3 objects (no markdown):
     const { content } = await callGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.78,
-      maxTokens:   800,
+      maxTokens:   2000,
       modelName:   PRO_MODEL
     });
     const clean  = content.replace(/```json|```/g, '').trim();
@@ -455,7 +455,7 @@ Return ONLY a JSON array of 3 question strings:
     const { content } = await callGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.65,
-      maxTokens:   200,
+      maxTokens:   2000,
       modelName:   PRO_MODEL
     });
     const clean     = content.replace(/```json|```/g, '').trim();
@@ -552,7 +552,7 @@ Return ONLY this JSON:
     const { content } = await callGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.7,
-      maxTokens:   300,
+      maxTokens:   2000,
       modelName:   PRO_MODEL
     });
     const clean  = content.replace(/```json|```/g, '').trim();
@@ -633,7 +633,7 @@ Return ONLY this JSON:
     const { content } = await callGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.65,
-      maxTokens:   500,
+      maxTokens:   2000,
       modelName:   PRO_MODEL
     });
     const clean  = content.replace(/```json|```/g, '').trim();

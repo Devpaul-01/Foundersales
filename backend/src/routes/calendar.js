@@ -446,6 +446,7 @@ async function extractAndSaveCommitmentsSignals(userId, workspaceId, event, rawN
           workspace_id: workspaceId,
           user_id:      userId,
           prospect_id:  event.prospect_id || null,
+          detected_at: new Date(),
           event_id:     event.id,
           signal_type:  s.signal_type,
           signal_text:  s.signal_text,

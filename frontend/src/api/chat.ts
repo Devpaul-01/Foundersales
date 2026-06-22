@@ -13,6 +13,7 @@ export const chatApi = {
     prospect_id?:   string | null;
     event_id?:      string | null;
     initial_context?: string | null;
+    growth_card_id?: string | null;
   }) =>
     apiClient.post<{ chat: Chat }>('/api/chat', body),
 
@@ -27,6 +28,7 @@ export const chatApi = {
     title?:         string;
     force_search?:  boolean;
     attachments?:   Array<{ name: string; type: string; url?: string }>;
+    growth_card_id?: string | null;
   }) =>
     apiClient.post<{ chat: Chat; message: ChatMessage }>('/api/chat/with-message', body),
 

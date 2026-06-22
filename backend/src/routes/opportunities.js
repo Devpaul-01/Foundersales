@@ -68,6 +68,73 @@ const computeIntelNeeded = (targetContext = '', targetName = '') => {
   ].some(p => p.test(targetContext));
 };
 
+
+// POST /api/opportunities — manual creation
+// POST /api/opportunities — manual creation (updated with new fields)
+router.post('/', requirePermission('member'), asyncHandler(async (req, res) => {
+  const {
+    target_name,
+    platform,
+    prepared_message,
+    target_context,
+    source_url,
+    stage,
+    follow_up_message,
+    fit_score,
+    timing_score,
+    intent_score,
+  } = req.body;
+
+  const userId = req.user.id, workspaceId = req.workspace.id;
+
+  if (!platform || !prepared_message?.trim()) {
+    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'platform and prepared_message are required.' });
+  }
+
+  // Validate stage if provided
+  const validStages = Object.values(PIPELINE_STAGES);
+  const finalStage = stage && validStages.includes(stage) ? stage : PIPELINE_STAGES.NEW;
+
+  // Set marked_sent_at if the stage is "contacted" or further along the pipeline
+  const SENT_STAGES = new Set([
+    PIPELINE_STAGES.CONTACTED,
+    PIPELINE_STAGES.REPLIED,
+    PIPELINE_STAGES.CALL_DEMO,
+    PIPELINE_STAGES.CLOSED_WON,
+    PIPELINE_STAGES.CLOSED_LOST,
+  ]);
+  const markedSentAt = SENT_STAGES.has(finalStage) ? new Date().toISOString() : null;
+
+  const { data: opp, error } = await supabaseAdmin
+    .from('opportunities')
+    .insert({
+      workspace_id:        workspaceId,
+      user_id:             userId,
+      target_name:         target_name?.trim()          || null,
+      target_context:      target_context?.trim()       || null,
+      source_url:          source_url?.trim()           || '',
+      platform,
+      prepared_message:    prepared_message.trim(),
+      follow_up_message:   follow_up_message?.trim()    || null,
+      status:              OPPORTUNITY_STATUS.PENDING,
+      stage:               finalStage,
+      marked_sent_at:      markedSentAt,
+      generated_by:        'manual',
+      fit_score:           Number.isInteger(fit_score) && fit_score >= 0 && fit_score <= 10 ? fit_score : null,
+      timing_score:        Number.isInteger(timing_score) && timing_score >= 0 && timing_score <= 10 ? timing_score : null,
+      intent_score:        Number.isInteger(intent_score) && intent_score >= 0 && intent_score <= 10 ? intent_score : null,
+    })
+    .select()
+    .single();
+
+  if (error) {
+    logError('POST / manual', error, { userId });
+    throw error;
+  }
+
+  log('CREATE_MANUAL', { userId, workspaceId, opportunityId: opp.id });
+  res.status(201).json({ opportunity: opp });
+}));
 // GET /api/opportunities
 router.get('/', validate(listOpportunitiesQuerySchema, 'query'), asyncHandler(async (req, res) => {
   const userId = req.user.id, workspaceId = req.workspace.id;
@@ -151,6 +218,7 @@ router.post('/refresh', requirePermission('member'), refreshRateLimiter, asyncHa
     intent_score:    o.intent_score    || null,
     status:          OPPORTUNITY_STATUS.PENDING,
     stage:           PIPELINE_STAGES.NEW,
+    created_at: new Date()
   }));
 
   const { data: inserted, error: insertErr } = await supabaseAdmin
@@ -234,17 +302,83 @@ router.put('/:id/assign', requirePermission('manager'), validate(assignOpportuni
   res.json({ success: true, assigned_to: assigneeId });
 }));
 
+// PUT /api/opportunities/:id/message-copied
+// Stamps message_copied_at the first time the prepared message is copied.
+router.put('/:id/message-copied', requirePermission('member'), asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const userId = req.user.id, workspaceId = req.workspace.id;
+
+  const { data: opp } = await supabaseAdmin
+    .from('opportunities')
+    .select('id, message_copied_at')
+    .eq('id', id)
+    .eq('workspace_id', workspaceId)
+    .or(`user_id.eq.${userId},assigned_to.eq.${userId}`)
+    .single();
+
+  if (!opp) return res.status(404).json({ error: 'NOT_FOUND' });
+
+  // Only stamp once — preserve the original first-copy timestamp.
+  if (!opp.message_copied_at) {
+    const message_copied_at = new Date().toISOString();
+    await supabaseAdmin
+      .from('opportunities')
+      .update({ message_copied_at })
+      .eq('id', id);
+    log('MESSAGE_COPIED', { userId, workspaceId, opportunityId: id });
+    return res.json({ success: true, message_copied_at });
+  }
+
+  return res.json({ success: true, message_copied_at: opp.message_copied_at });
+}));
+
+// PUT /api/opportunities/:id/link-clicked
+// Stamps link_clicked_at the first time a user opens the source URL.
+router.put('/:id/link-clicked', requirePermission('member'), asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const userId = req.user.id, workspaceId = req.workspace.id;
+
+  const { data: opp } = await supabaseAdmin
+    .from('opportunities')
+    .select('id, link_clicked_at')
+    .eq('id', id)
+    .eq('workspace_id', workspaceId)
+    .or(`user_id.eq.${userId},assigned_to.eq.${userId}`)
+    .single();
+
+  if (!opp) return res.status(404).json({ error: 'NOT_FOUND' });
+
+  // Only stamp once — preserve the original first-click timestamp.
+  if (!opp.link_clicked_at) {
+    const link_clicked_at = new Date().toISOString();
+    await supabaseAdmin
+      .from('opportunities')
+      .update({ link_clicked_at })
+      .eq('id', id);
+    log('LINK_CLICKED', { userId, workspaceId, opportunityId: id });
+    return res.json({ success: true, link_clicked_at });
+  }
+
+  return res.json({ success: true, link_clicked_at: opp.link_clicked_at });
+}));
+
 // GET /api/opportunities/:id
 router.get('/:id', asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const userId = req.user.id, workspaceId = req.workspace.id;
-  const { data: opp, error } = await supabaseAdmin
+  const userId     = req.user.id, workspaceId = req.workspace.id;
+  const memberRole = req.membership?.role || 'member';
+  const isManager  = ['manager', 'admin', 'owner'].includes(memberRole);
+
+  // FIX 3: Managers can view any workspace opportunity; members only their own.
+  let oppQuery = supabaseAdmin
     .from('opportunities').select('*')
-    .eq('id', id).eq('workspace_id', workspaceId)
-    .or(`user_id.eq.${userId},assigned_to.eq.${userId}`).single();
+    .eq('id', id).eq('workspace_id', workspaceId);
+  if (!isManager) oppQuery = oppQuery.or(`user_id.eq.${userId},assigned_to.eq.${userId}`);
+
+  const { data: opp, error } = await oppQuery.single();
   if (error || !opp) return res.status(404).json({ error: 'NOT_FOUND' });
   if (opp.status === OPPORTUNITY_STATUS.PENDING) {
-    await supabaseAdmin.from('opportunities').update({ status: OPPORTUNITY_STATUS.VIEWED }).eq('id', id);
+    await supabaseAdmin.from('opportunities').update({viewed_at: new Date(), status: OPPORTUNITY_STATUS.VIEWED }).eq('id', id);
   }
   res.json({
     opportunity: {
@@ -267,11 +401,9 @@ router.put('/:id/status', requirePermission('member'), validate(updateStatusSche
   if (!opp) return res.status(404).json({ error: 'NOT_FOUND' });
 
   const updates = { status };
-  if (status === OPPORTUNITY_STATUS.SENT)  updates.marked_sent_at = new Date().toISOString();
-  if (status === OPPORTUNITY_STATUS.DONE) {
-    updates.stage = PIPELINE_STAGES.CONTACTED;
-    updates.last_stage_changed_at = new Date().toISOString();
-  }
+  // SENT is the terminal status — stamp the time so follow-up jobs can use it.
+  // (DONE/ACTED were removed in the status lifecycle simplification; see constants.js)
+  if (status === OPPORTUNITY_STATUS.SENT) updates.marked_sent_at = new Date().toISOString();
 
   await supabaseAdmin.from('opportunities').update(updates).eq('id', id);
   res.json({ success: true, status });
@@ -295,7 +427,8 @@ router.put('/:id/status', requirePermission('member'), validate(updateStatusSche
 //  - Token usage for both calls is recorded together under workspaceId.
 const INTEL_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
-router.get('/:id/intel', asyncHandler(async (req, res) => {
+// FIX 4: Guard added — unprotected endpoint was triggering expensive AI calls for any caller.
+router.get('/:id/intel', requirePermission('member'), asyncHandler(async (req, res) => {
   const { id } = req.params;
   const userId = req.user.id, workspaceId = req.workspace.id;
 

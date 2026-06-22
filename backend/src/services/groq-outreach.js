@@ -196,39 +196,63 @@ Return ONLY: {"score": <0-100>, "strongest_element": "<one phrase from the messa
 
 // ──────────────────────────────────────────
 // PERFORMANCE PATTERN SUMMARIZATION
+//
+// Accepts the joined feedback rows that coreJobs fetches:
+//   { outcome, outcome_note, opportunities: { platform, message_style, message_length } }
+//
+// Returns:
+//   { learned_patterns, best_platform, best_message_style,
+//     best_message_length, messages_at_last_summary }
 // ──────────────────────────────────────────
-export const summarizePerformancePatterns = async (user, sentOpps, feedbackData) => {
-  if (!sentOpps?.length || sentOpps.length < 5) return null;
+export const summarizePerformancePatterns = async (user, recentFeedback) => {
+  if (!recentFeedback?.length || recentFeedback.length < 5) return null;
 
-  const positive = feedbackData.filter(f => f.outcome === 'positive').length;
-  const total    = feedbackData.length;
-  if (total === 0) return null;
-
+  // ── Build stats from joined feedback rows ──────────────────
   const platformStats = {}, styleStats = {}, lengthStats = {};
+  let positive = 0;
 
-  for (const opp of sentOpps) {
-    const fb         = feedbackData.find(f => f.opportunity_id === opp.id);
-    if (!fb) continue;
+  for (const fb of recentFeedback) {
+    const opp        = fb.opportunities;          // joined single object
     const isPositive = fb.outcome === 'positive' ? 1 : 0;
+    positive += isPositive;
 
-    if (!platformStats[opp.platform]) platformStats[opp.platform] = { sent: 0, positive: 0 };
-    platformStats[opp.platform].sent++;
-    platformStats[opp.platform].positive += isPositive;
-
-    if (opp.message_style) {
-      if (!styleStats[opp.message_style]) styleStats[opp.message_style] = { sent: 0, positive: 0 };
-      styleStats[opp.message_style].sent++;
-      styleStats[opp.message_style].positive += isPositive;
+    const platform = opp?.platform;
+    if (platform) {
+      if (!platformStats[platform]) platformStats[platform] = { sent: 0, positive: 0 };
+      platformStats[platform].sent++;
+      platformStats[platform].positive += isPositive;
     }
 
-    if (opp.message_length) {
-      const bucket = opp.message_length < 60 ? 'short' : opp.message_length < 120 ? 'medium' : 'long';
+    const style = opp?.message_style;
+    if (style) {
+      if (!styleStats[style]) styleStats[style] = { sent: 0, positive: 0 };
+      styleStats[style].sent++;
+      styleStats[style].positive += isPositive;
+    }
+
+    const msgLen = opp?.message_length;
+    if (msgLen) {
+      const bucket = msgLen < 60 ? 'short' : msgLen < 120 ? 'medium' : 'long';
       if (!lengthStats[bucket]) lengthStats[bucket] = { sent: 0, positive: 0 };
       lengthStats[bucket].sent++;
       lengthStats[bucket].positive += isPositive;
     }
   }
 
+  const total = recentFeedback.length;
+
+  // ── Derive best-* fields from stats (min 2 sends to qualify) ──
+  const bestByRate = (stats) => {
+    const candidates = Object.entries(stats).filter(([, v]) => v.sent >= 2);
+    if (!candidates.length) return null;
+    return candidates.sort((a, b) => (b[1].positive / b[1].sent) - (a[1].positive / a[1].sent))[0][0];
+  };
+
+  const best_platform       = bestByRate(platformStats);
+  const best_message_style  = bestByRate(styleStats);
+  const best_message_length = bestByRate(lengthStats);
+
+  // ── Ask AI for the learned_patterns narrative ──────────────
   const systemPrompt = `You are a battle-tested sales mentor analyzing outreach performance data. Be specific and data-driven.`;
   const userPrompt   = `Analyze this founder's outreach data and write a 2-sentence insight summary.
 
@@ -236,6 +260,9 @@ Overall: ${total} sent, ${positive} positive (${Math.round(positive / total * 10
 By platform: ${JSON.stringify(platformStats)}
 By style:    ${JSON.stringify(styleStats)}
 By length:   ${JSON.stringify(lengthStats)}
+Best platform: ${best_platform ?? 'insufficient data'}
+Best style:    ${best_message_style ?? 'insufficient data'}
+Best length:   ${best_message_length ?? 'insufficient data'}
 
 Return ONLY the 2-sentence summary. No JSON. No preamble.`;
 
@@ -245,9 +272,18 @@ Return ONLY the 2-sentence summary. No JSON. No preamble.`;
       systemPrompt,
       temperature: 0.3,
       maxTokens:   200,
-      modelName:   PRO_MODEL
+      modelName:   PRO_MODEL,
     });
-    return parseTextResponse(content, null);
+
+    const learned_patterns = parseTextResponse(content, null);
+
+    return {
+      learned_patterns,
+      best_platform,
+      best_message_style,
+      best_message_length,
+      messages_at_last_summary: total,
+    };
   } catch (err) {
     console.error('[Groq] summarizePerformancePatterns FAILED:', err.message);
     return null;

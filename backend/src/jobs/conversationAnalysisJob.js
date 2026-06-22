@@ -148,6 +148,7 @@ Product/Service: ${user?.product_description || 'not specified'}
 Target customers: ${user?.target_audience || 'not specified'}
 Archetype: ${user?.archetype || 'seller'}
 PLATFORM: ${platform}
+VOICE PROFILE : ${user.voice_profile}
 PROSPECT CONTEXT: ${prospect}
 OUTREACH MESSAGE (${wordCount} words):
 "${message}"
@@ -198,13 +199,97 @@ const countSelfReferentialSentences = (text) => {
 const classifyObjection = (note) => {
   if (!note) return 'other';
   const n = note.toLowerCase();
-  if (/ghost|no response|no reply|didn't respond|never heard|ignored/i.test(n)) return 'ghost';
-  if (/price|expensive|cost|budget|afford|spend/i.test(n))                       return 'price';
-  if (/timing|later|busy|not (right|a good) time|too soon/i.test(n))             return 'timing';
-  if (/trust|prove|evidence|skeptic|doubt|not sure/i.test(n))                    return 'trust';
-  if (/competitor|already using|current (solution|vendor)|happy with/i.test(n))  return 'competition';
-  if (/not (the right|a) fit|different (audience|market)|not what/i.test(n))     return 'fit';
-  return 'other';
+
+  const patterns = [
+    {
+      type: 'ghost',
+      positive: [
+        /\b(no (response|reply|answer|word|callback))\b/i,
+        /\b(didn'?t|did not|never|hasn'?t|has not) (respond|reply|answer|get back|hear back)\b/i,
+        /\b(ghosted?|ignored?|went (silent|dark|cold)|stopped (responding|replying))\b/i,
+        /\b(left on (read|seen)|no follow.?up|fell (off|through))\b/i,
+      ],
+      negative: [],
+    },
+    {
+      type: 'price',
+      positive: [
+        /\b(too |very )?(expensive|pricey|costly|overpriced)\b/i,
+        /\b(can'?t|cannot|won'?t) (afford|justify|spend)\b/i,
+        /\b(out of|over|beyond) (my |our |the )?(budget|price range)\b/i,
+        /\b(price|cost|fee|rate|pricing) (is |seems |feels )?(too )?(high|steep|much)\b/i,
+        /\bno (money|budget|funds)\b/i,
+      ],
+      negative: [
+        /\bprice (is(n'?t| not)|was(n'?t| not)) (the |an? )?(issue|concern|problem|factor)\b/i,
+        /\bnot (about|related to) (the )?price\b/i,
+      ],
+    },
+    {
+      type: 'timing',
+      positive: [
+        /\b(not|bad) (the right |a good )?(time|timing|moment)\b/i,
+        /\b(too )?(busy|hectic|overwhelmed) (right now|at the moment|currently|now)\b/i,
+        /\b(come back|reach out|talk|revisit|follow.?up) (in |after |later|next) (a few |[0-9]+ )?(weeks?|months?|quarters?|years?)\b/i,
+        /\b(need(s)? more time|not ready|on hold|paused?|deferred?)\b/i,
+        /\b(too soon|too early|not (the right|a good) time)\b/i,
+      ],
+      negative: [
+        /\btiming (is |looks |seems )?(fine|good|ok|okay|perfect)\b/i,
+      ],
+    },
+    {
+      type: 'trust',
+      positive: [
+        /\b(need(s)?|want(s)?|require(s)?) (more )?(proof|evidence|case studies?|references?|testimonials?|validation)\b/i,
+        /\b(skepti(c|cal)|doubtful?|not (sure|convinced|confident)|uncertain)\b/i,
+        /\b(how do (i|we) know|prove (it|this)|show (me|us)|can you (verify|demonstrate|prove))\b/i,
+        /\b(too good to be true|sounds? (too|like) (good|a pitch))\b/i,
+      ],
+      negative: [
+        /\b(trust(s)?|believe(s)?|confident) (you|in you|it|this)\b/i,
+      ],
+    },
+    {
+      type: 'competition',
+      positive: [
+        /\b(going with|chose|chosen|picked|using|already (have|using|signed|implemented))\b/i,
+        /\b(hubspot|salesforce|monday|asana|zendesk|intercom|pipedrive|zoho|freshdesk|notion|clickup|jira)\b/i,
+        /\b(happy with|sticking with) (our |the )?(current|existing|another|other)\b/i,
+        /\b(competitor|another (vendor|provider|solution|tool|platform))\b/i,
+      ],
+      negative: [
+        /\b(evaluating|comparing|considering) (multiple|several|other)? ?(options|solutions|vendors)\b/i,
+      ],
+    },
+    {
+      type: 'fit',
+      positive: [
+        /\bnot (the right|a( good)?) fit\b/i,
+        /\b(different (audience|market|use case|industry|niche))\b/i,
+        /\b(not what (we|i|they) (need|want|use|were looking for))\b/i,
+        /\b(doesn'?t|does not|won'?t) (work|apply|integrate|fit) (for|with) (us|me|our)\b/i,
+        /\b(too (basic|advanced|complex|simple|niche|broad) for (us|me|our))\b/i,
+      ],
+      negative: [
+        /\b(good fit|right fit|perfect fit|works well)\b/i,
+      ],
+    },
+  ];
+
+  // Score each type
+  const scores = {};
+  for (const p of patterns) {
+    let score = 0;
+    for (const rx of p.positive) if (rx.test(n)) score += 1;
+    for (const rx of p.negative) if (rx.test(n)) score -= 2;
+    if (score > 0) scores[p.type] = score;
+  }
+
+  if (!Object.keys(scores).length) return 'other';
+
+  // Return the highest scoring type
+  return Object.entries(scores).sort((a, b) => b[1] - a[1])[0][0];
 };
 
 export default { runConversationAnalysis };

@@ -187,6 +187,7 @@ export default function FollowupPage() {
     onSuccess: (res) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.followups() });
       queryClient.invalidateQueries({ queryKey: queryKeys.pipeline() });
+      queryClient.invalidateQueries({ queryKey: ['followup', 'unviewed-count'] });
       const count = (res.data as any)?.follow_up_count;
       showToast(
         count != null ? `Follow-up #${count} marked sent.` : 'Marked as sent.',
@@ -200,6 +201,7 @@ export default function FollowupPage() {
     mutationFn: (id: string) => followupApi.dismiss(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.followups() });
+      queryClient.invalidateQueries({ queryKey: ['followup', 'unviewed-count'] });
       showToast('Follow-up dismissed.', 'info');
     },
     onError: () => showToast('Could not dismiss.', 'error'),

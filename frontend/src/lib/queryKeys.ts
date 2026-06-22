@@ -8,8 +8,6 @@ export const queryKeys = {
   me:               ['auth', 'me']              as const,
   onboardingStatus: ['onboarding', 'status']    as const,
   onboardingQuestions: ['onboarding', 'questions'] as const,
-  members:          (workspaceId: string) => ['workspace', workspaceId, 'members'] as const,
-  invites:          (workspaceId: string) => ['workspace', workspaceId, 'invites'] as const,
 
   // ── User ────────────────────────────────────────────────────
   memoryFacts:      ['user', 'memory']          as const,
@@ -69,7 +67,10 @@ export const queryKeys = {
   commitments:      (params?: object) => ['commitments', params]              as const,
 
   // ── Follow-up ───────────────────────────────────────────────
-  followup:         ['followup']                                              as const,
+  
+  followup:           ['followup'] as const,
+  followups:          () => ['followup', 'list'] as const,  // 👈 add this
+  followupUnviewed:   () => ['followup', 'unviewed-count'] as const,  // 👈 add this
 
   // ── Insights ────────────────────────────────────────────────
   insightsSummary:  ['insights', 'summary']                                   as const,
@@ -84,11 +85,13 @@ export const queryKeys = {
 
   // ── Growth ──────────────────────────────────────────────────
   growthFeed:       (params?: object) => ['growth', 'feed', params]           as const,
+  growthPlan:       ['growth', 'plan']                                        as const,
+  growthHistory:    (params?: object) => ['growth', 'history', params]        as const,
   checkInToday:     ['growth', 'checkin', 'today']                            as const,
   weeklyPlan:       ['growth', 'plan']                                        as const,
-  growthHistory:    (params?: object) => ['growth', 'history', params]        as const,
 
   // ── Metrics ─────────────────────────────────────────────────
+  metrics:          (sub?: string) => sub ? ['metrics', sub] : ['metrics', 'dashboard'] as const,
   dashboard:        ['metrics', 'dashboard']                                  as const,
   skillBreakdown:   ['metrics', 'skill-breakdown']                            as const,
   intelligence:     ['metrics', 'intelligence']                               as const,

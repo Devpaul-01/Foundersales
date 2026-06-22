@@ -8,11 +8,13 @@ import React, {
 import { calendarApi } from '@/api/calendar';
 import { feedbackApi } from '@/api/feedback';
 import { userApi } from '@/api/user';
+import { followupApi } from '@/api/followup';
 import { useAuthContext } from './AuthContext';
 
 interface NotificationContextValue {
   calendarAlertCount:    number;
   pendingFeedbackCount:  number;
+  followupUnviewedCount: number;
   unreadNotificationCount: number;
   refreshCounts:         () => Promise<void>;
 }
@@ -20,6 +22,7 @@ interface NotificationContextValue {
 const NotificationContext = createContext<NotificationContextValue>({
   calendarAlertCount:      0,
   pendingFeedbackCount:    0,
+  followupUnviewedCount:   0,
   unreadNotificationCount: 0,
   refreshCounts:           async () => {},
 });
@@ -28,15 +31,17 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
   const { isAuthenticated, user } = useAuthContext();
   const [calendarAlertCount,    setCalendarAlertCount]    = useState(0);
   const [pendingFeedbackCount,  setPendingFeedbackCount]  = useState(0);
+  const [followupUnviewedCount, setFollowupUnviewedCount] = useState(0);
   const [unreadNotificationCount, setUnreadNotificationCount] = useState(0);
 
   const refreshCounts = useCallback(async () => {
     if (!isAuthenticated || !user?.onboarding_completed) return;
 
-    const [alertsRes, feedbackRes, notifRes] = await Promise.allSettled([
+    const [alertsRes, feedbackRes, notifRes, followupRes] = await Promise.allSettled([
       calendarApi.getAlerts(),
       feedbackApi.getPending(),
       userApi.listNotifications({ limit: 1 }),
+      followupApi.getUnviewedCount(),
     ]);
 
     if (alertsRes.status === 'fulfilled') {
@@ -48,6 +53,9 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
     }
     if (notifRes.status === 'fulfilled') {
       setUnreadNotificationCount(notifRes.value.data.unread_count);
+    }
+    if (followupRes.status === 'fulfilled') {
+      setFollowupUnviewedCount(followupRes.value.data.unviewed_count);
     }
   }, [isAuthenticated, user?.onboarding_completed]);
 
@@ -64,6 +72,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       value={{
         calendarAlertCount,
         pendingFeedbackCount,
+        followupUnviewedCount,
         unreadNotificationCount,
         refreshCounts,
       }}

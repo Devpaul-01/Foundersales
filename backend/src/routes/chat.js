@@ -55,6 +55,37 @@ const CHAT_MODES = {
   FOLLOWUP_COACH: 'followup_coach',
 };
 
+// ── Growth card helper ───────────────────────────────────────
+// Fetches a growth card (scoped to workspace + user), builds a rich system
+// message from it, and returns the card data so callers can store the id.
+async function fetchGrowthCard(growthCardId, userId, workspaceId) {
+  if (!growthCardId) return null;
+  const { data: card, error } = await supabaseAdmin
+    .from('growth_cards')
+    .select('id, card_type, title, body, action_label, metadata')
+    .eq('id', growthCardId)
+    .eq('workspace_id', workspaceId)
+    .eq('user_id', userId)
+    .single();
+  if (error || !card) return null;
+  return card;
+}
+
+function buildGrowthCardSystemMessage(card) {
+  const metaSummary = card.metadata
+    ? `\n\nAdditional context: ${JSON.stringify(card.metadata).slice(0, 600)}`
+    : '';
+  return (
+    `The user wants to discuss a growth card generated for them.\n\n` +
+    `Card type: ${card.card_type}\n` +
+    `Title: ${card.title}\n` +
+    `Content: ${card.body}` +
+    metaSummary +
+    `\n\nHelp the user explore, action, or get deeper on this card. ` +
+    `Ask clarifying questions if helpful and keep the conversation focused on their growth.`
+  ).slice(0, 4000);
+}
+
 // ── FIX LOW-07: Input validation schema for message endpoint ─
 const chatMessageSchema = z.object({
   message: z.string().min(1).max(5000, 'Message cannot exceed 5000 characters'),
@@ -66,6 +97,7 @@ const chatMessageSchema = z.object({
     url:  z.string().url().optional(),
   })).max(10).optional(),
   chat_mode: z.string().optional(),
+  growth_card_id: z.string().uuid().optional(),
 });
 
 const validateChatMessage = (req, res, next) => {
@@ -93,7 +125,7 @@ router.get('/', asyncHandler(async (req, res) => {
   let query = supabaseAdmin
     .from('chats')
     .select(`
-      id, title, chat_type, chat_mode, opportunity_id, prospect_id, event_id,
+      id, title, chat_type, chat_mode, opportunity_id, prospect_id, event_id, growth_card_id,
       created_at, updated_at, last_message_at, message_count, is_archived
     `)
     .eq('user_id', userId)
@@ -123,12 +155,12 @@ router.get('/', asyncHandler(async (req, res) => {
 router.post('/', asyncHandler(async (req, res) => {
   const {
     title, chat_type = CHAT_TYPES.GENERAL, chat_mode = CHAT_MODES.GENERAL,
-    opportunity_id, initial_context, prospect_id, event_id,
+    opportunity_id, initial_context, prospect_id, event_id, growth_card_id,
   } = req.body;
   const userId      = req.user.id;
   const workspaceId = req.workspace.id;
 
-  log('CREATE_CHAT', { userId, workspaceId, chat_type, chat_mode, opportunity_id, event_id });
+  log('CREATE_CHAT', { userId, workspaceId, chat_type, chat_mode, opportunity_id, event_id, growth_card_id });
 
   if (!Object.values(CHAT_TYPES).includes(chat_type)) {
     return res.status(400).json({
@@ -137,9 +169,17 @@ router.post('/', asyncHandler(async (req, res) => {
     });
   }
 
+  // Fetch growth card early so we can use its title if needed
+  const growthCard = await fetchGrowthCard(growth_card_id, userId, workspaceId);
+  if (growth_card_id && !growthCard) {
+    return res.status(404).json({ error: 'NOT_FOUND', message: 'Growth card not found' });
+  }
+
   let chatTitle = title;
   if (!chatTitle) {
-    if (opportunity_id) {
+    if (growthCard) {
+      chatTitle = `Growth: ${growthCard.title}`.slice(0, 100);
+    } else if (opportunity_id) {
       const { data: opp } = await supabaseAdmin
         .from('opportunities')
         .select('target_name, target_context, platform')
@@ -165,6 +205,7 @@ router.post('/', asyncHandler(async (req, res) => {
       opportunity_id: opportunity_id || null,
       prospect_id:    prospect_id    || null,
       event_id:       event_id       || null,
+      growth_card_id: growth_card_id || null,
     })
     .select()
     .single();
@@ -172,6 +213,18 @@ router.post('/', asyncHandler(async (req, res) => {
   if (error) {
     logError('CREATE_CHAT_INSERT', error, { userId });
     throw error;
+  }
+
+  // Inject growth card context as system message
+  if (growthCard) {
+    logDB('INSERT', 'chat_messages', { chatId: chat.id, role: 'system', source: 'growth_card_context' });
+    await supabaseAdmin.from('chat_messages').insert({
+      chat_id:      chat.id,
+      user_id:      userId,
+      workspace_id: workspaceId,
+      role:         'system',
+      content:      buildGrowthCardSystemMessage(growthCard),
+    });
   }
 
   // Inject opportunity context as system message
@@ -374,6 +427,16 @@ router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, re
     latestMood: latestCheckIn?.mood_score || null,
   });
 
+  // If this chat is linked to a growth card, prepend card context to the system prompt
+  let finalSystemPrompt = systemPrompt;
+  if (chat.growth_card_id) {
+    const growthCard = await fetchGrowthCard(chat.growth_card_id, userId, workspaceId);
+    if (growthCard) {
+      finalSystemPrompt = buildGrowthCardSystemMessage(growthCard) + '\n\n' + systemPrompt;
+      log('GROWTH_CARD_CONTEXT_INJECTED', { chatId, cardId: growthCard.id });
+    }
+  }
+
   let attachmentPrompt = '';
   let processedAttachments = null;
   if (attachments?.length) {
@@ -392,7 +455,7 @@ router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, re
     try {
       const perplexityCheck = await checkWorkspacePerplexityUsage(workspaceId, userCtx.tier);
       if (perplexityCheck.allowed) {
-        const { content: searchResult } = await searchForChat(message, systemPrompt);
+        const { content: searchResult } = await searchForChat(message, finalSystemPrompt);
         if (searchResult?.trim()) {
           searchContext = `\n\nWeb search results:\n${searchResult}`;
           await incrementWorkspaceUsage(workspaceId).catch(() => {});
@@ -454,7 +517,7 @@ router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, re
 
     try {
       const fullContent = await streamAndSave({
-        systemPrompt,
+        finalSystemPrompt,
         messages:    messagesForAI,
         temperature: 0.7,
         maxTokens:   800,
@@ -488,7 +551,7 @@ router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, re
 
   try {
     const { content: aiContent, tokens_in, tokens_out } = await callWithFallback({
-      systemPrompt,
+      finalSystemPrompt,
       messages:    messagesForAI,
       temperature: 0.7,
       maxTokens:   800,
@@ -533,20 +596,29 @@ router.post('/with-message', validateChatMessage, asyncHandler(async (req, res) 
     title,
     force_search,
     attachments,
+    growth_card_id,
   } = req.body;
   
   const userId = req.user.id;
   const workspaceId = req.workspace.id;
   
-  log('CREATE_CHAT_WITH_MESSAGE', { userId, workspaceId, chat_mode, chat_type, messageLength: message?.length });
+  log('CREATE_CHAT_WITH_MESSAGE', { userId, workspaceId, chat_mode, chat_type, messageLength: message?.length, growth_card_id });
   
   if (!message?.trim()) {
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'message is required' });
   }
+
+  // Fetch growth card early for title + context injection
+  const growthCard = await fetchGrowthCard(growth_card_id, userId, workspaceId);
+  if (growth_card_id && !growthCard) {
+    return res.status(404).json({ error: 'NOT_FOUND', message: 'Growth card not found' });
+  }
   
   let chatTitle = title;
   if (!chatTitle) {
-    if (opportunity_id) {
+    if (growthCard) {
+      chatTitle = `Growth: ${growthCard.title}`.slice(0, 100);
+    } else if (opportunity_id) {
       const { data: opp } = await supabaseAdmin
         .from('opportunities')
         .select('target_name, target_context, platform')
@@ -571,6 +643,7 @@ router.post('/with-message', validateChatMessage, asyncHandler(async (req, res) 
       opportunity_id: opportunity_id || null,
       prospect_id: prospect_id || null,
       event_id: event_id || null,
+      growth_card_id: growth_card_id || null,
     })
     .select()
     .single();
@@ -581,6 +654,17 @@ router.post('/with-message', validateChatMessage, asyncHandler(async (req, res) 
   }
   
   logDB('INSERT', 'chats', { userId, workspaceId, chatId: chat.id, chat_mode });
+
+  // Inject growth card context as system message
+  if (growthCard) {
+    await supabaseAdmin.from('chat_messages').insert({
+      chat_id: chat.id,
+      user_id: userId,
+      workspace_id: workspaceId,
+      role: 'system',
+      content: buildGrowthCardSystemMessage(growthCard),
+    });
+  }
   
   if (opportunity_id) {
     const { data: opp } = await supabaseAdmin

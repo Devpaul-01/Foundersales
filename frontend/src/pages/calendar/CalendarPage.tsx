@@ -8,8 +8,8 @@
 //   for prep_generated update (calendar-7.txt Issue 14 fix)
 // - Date range navigation
 // ============================================================
-import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useState, useEffect } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -98,10 +98,11 @@ function EventCard({ event }: { event: CalendarEvent }) {
 
 // ── Create event modal ────────────────────────────────────────
 function CreateEventModal({
-  open, onClose,
+  open, onClose, opportunityId,
 }: {
-  open:    boolean;
-  onClose: () => void;
+  open:           boolean;
+  onClose:        () => void;
+  opportunityId?: string | null;
 }) {
   const { showToast } = useToast();
   const [newEventId,  setNewEventId]  = useState<string | null>(null);
@@ -128,7 +129,7 @@ function CreateEventModal({
 
   const createMutation = useMutation({
     mutationFn: (data: CreateCalendarEventSchema) =>
-      calendarApi.create(data).then((r) => r.data.event),
+      calendarApi.create({ ...data, opportunity_id: opportunityId ?? null }).then((r) => r.data.event),
     onSuccess: (event) => {
       setNewEventId(event.id);
       queryClient.invalidateQueries({ queryKey: queryKeys.calendar() });
@@ -200,6 +201,7 @@ function CreateEventModal({
 // ── Main page ─────────────────────────────────────────────────
 export default function CalendarPage() {
   const navigate    = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [view,      setView]      = useState<'list' | 'month'>('list');
   const [createOpen,setCreateOpen]= useState(false);
   const [fromDate,  setFromDate]  = useState(
@@ -208,6 +210,19 @@ export default function CalendarPage() {
   const [toDate, setToDate] = useState(
     () => format(addDays(new Date(), 30), 'yyyy-MM-dd'),
   );
+
+  // Auto-open the create modal when arriving from pipeline with an opportunityId
+  const opportunityId = searchParams.get('opportunityId');
+  useEffect(() => {
+    if (opportunityId) {
+      setCreateOpen(true);
+      // Clean the param from the URL without a navigation entry
+      setSearchParams((prev) => {
+        prev.delete('opportunityId');
+        return prev;
+      }, { replace: true });
+    }
+  }, [opportunityId]);
 
   const { data: eventsData, isLoading } = useQuery({
     queryKey: queryKeys.calendar({ from: fromDate, to: toDate }),
@@ -301,7 +316,11 @@ export default function CalendarPage() {
         </div>
       )}
 
-      <CreateEventModal open={createOpen} onClose={() => setCreateOpen(false)} />
+      <CreateEventModal
+        open={createOpen}
+        onClose={() => setCreateOpen(false)}
+        opportunityId={opportunityId}
+      />
     </div>
   );
 }

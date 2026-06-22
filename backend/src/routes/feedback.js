@@ -137,6 +137,7 @@ router.post('/', validate(feedbackSchema), asyncHandler(async (req, res) => {
     opportunity_id,
     outcome,
     outcome_note:         outcome_note?.slice(0, 500) || null,
+  
     is_final:             !!is_final,
     deal_value_usd:       deal_value_usd ? parseInt(deal_value_usd, 10) : null,
     scheduled_call:       !!scheduled_call,
@@ -164,7 +165,11 @@ router.post('/', validate(feedbackSchema), asyncHandler(async (req, res) => {
   console.log(`[FEEDBACK POST] ✔ Feedback upserted | id=${feedback.id}`);
 
   // ─── Opportunity Stage Advancement ───────────────────────────────────────
-  const oppUpdates = { status: OPPORTUNITY_STATUS.SENT };
+  // ✅ CORRECT - Use new Date()
+const oppUpdates = { 
+  status: OPPORTUNITY_STATUS.SENT, 
+  marked_sent_at: new Date()  // Returns Date object
+};
   let stageAdvanced = false;
 
   if (outcome === 'positive' && opp.stage === PIPELINE_STAGES.NEW) {
@@ -179,9 +184,12 @@ router.post('/', validate(feedbackSchema), asyncHandler(async (req, res) => {
 
   const oppUpdateStart = Date.now();
   const { error: oppUpdateError } = await supabaseAdmin
-    .from('opportunities')
-    .update(oppUpdates)
-    .eq('id', opportunity_id);
+  .from('opportunities')
+  .update(oppUpdates)
+  .eq('id', opportunity_id)
+  .eq('workspace_id', workspaceId)
+  .or(`user_id.eq.${userId},assigned_to.eq.${userId}`);  // ← CRITICAL!
+  
 
   console.log(`[FEEDBACK POST] Opportunity update: ${Date.now() - oppUpdateStart}ms`);
 

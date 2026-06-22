@@ -27,6 +27,7 @@ const OnboardingPreviewPage   = lazy(() => import('@/pages/onboarding/Onboarding
 const DashboardPage         = lazy(() => import('@/pages/dashboard/DashboardPage'));
 const OpportunitiesPage     = lazy(() => import('@/pages/opportunities/OpportunitiesPage'));
 const OpportunityDetailPage = lazy(() => import('@/pages/opportunities/OpportunityDetailPage'));
+const CreateOpportunityPage     = lazy(() => import('@/pages/opportunities/CreateOpportunityPage'));
 const PipelinePage          = lazy(() => import('@/pages/pipeline/PipelinePage'));
 const DealDetailPage        = lazy(() => import('@/pages/pipeline/DealDetailPage'));
 
@@ -146,6 +147,7 @@ export const router = createBrowserRouter([
               { path: '/home',       element: <Page><DashboardPage /></Page> },
               { path: '/opportunities',    element: <Page><OpportunitiesPage /></Page> },
               { path: '/opportunities/:id',element: <Page><OpportunityDetailPage /></Page> },
+              { path: '/opportunities/create',element: <Page><CreateOpportunityPage /></Page> },
               { path: '/pipeline',         element: <Page><PipelinePage /></Page> },
               { path: '/pipeline/:id',     element: <Page><DealDetailPage /></Page> },
 

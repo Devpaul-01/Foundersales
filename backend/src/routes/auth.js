@@ -408,7 +408,7 @@ router.get('/me', authenticate, asyncHandler(async (req, res) => {
     supabaseAdmin
       .from('users')
       .select(
-        'id, name, email, tier, active_workspace_id, ' +
+        'id, name, email, tier,check_in_streak, active_workspace_id, ' +
         'onboarding_completed, onboarding_step, debug_mode, fcm_token, ' +
         'notification_preferences, memory_enabled, email_digest_enabled'
       )

@@ -1,16 +1,9 @@
 // ============================================================
 // FILE: src/pages/opportunities/OpportunitiesPage.tsx
-// Matches opportunities-13.txt exactly:
-// - status filter tabs with URL persistence
-// - should_refresh staleness banner
-// - rate-limited refresh (5/hr) with toast on 429
-// - Infinite scroll (no Load More button per brief)
-// - team view for managers
-// - "Assigned to me" badge when opportunity was assigned (not owned)
 // ============================================================
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { useInfiniteQuery, useMutation } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { opportunitiesApi } from '@/api/opportunities';
 import { queryClient }      from '@/lib/queryClient';
 import { queryKeys }        from '@/lib/queryKeys';
@@ -23,9 +16,24 @@ import { Tabs }             from '@/components/ui/Tabs';
 import { SkeletonOpportunityCard } from '@/components/ui/Skeleton';
 import { EmptyState, Spinner } from '@/components/common/index';
 import { AppError, type Opportunity } from '@/api/types';
-import { ROUTES, STATUS_LABELS }      from '@/lib/constants';
+import { ROUTES, STATUS_LABELS } from '@/lib/constants';
 import { formatRelativeDate, cn }     from '@/lib/utils';
-import { Zap, RefreshCw, ChevronRight, AlertTriangle } from 'lucide-react';
+import { Zap, RefreshCw, ChevronRight, AlertTriangle, Plus, ExternalLink, Copy, Check } from 'lucide-react';
+
+// Platform labels mapping
+export const PLATFORM_LABELS: Record<string, string> = {
+  reddit:       'Reddit',
+  linkedin:     'LinkedIn',
+  twitter:      'X / Twitter',
+  facebook:     'Facebook',
+  instagram:    'Instagram',
+  producthunt:  'Product Hunt',
+  indiehackers: 'Indie Hackers',
+  hackernews:   'Hacker News',
+  quora:        'Quora',
+  youtube:      'YouTube',
+  other:        'Other',
+};
 
 const STATUS_TABS = [
   { value: 'all',     label: 'All'     },
@@ -33,17 +41,53 @@ const STATUS_TABS = [
   { value: 'viewed',  label: 'Viewed'  },
 ];
 
+// ── Opportunity Card ─────────────────────────────────────────────────────────
+
 function OpportunityCard({ opp, currentUserId }: { opp: Opportunity; currentUserId: string }) {
-  const navigate = useNavigate();
+  const navigate    = useNavigate();
+  const queryClient = useQueryClient();
   const pct = opp.composite_score;
   const scoreColor =
     pct >= 7 ? 'text-success' : pct >= 4 ? 'text-warning' : 'text-danger';
 
-  // True when this opp was assigned to me by someone else (I'm not the creator)
   const isAssignedToMe =
     !!opp.assigned_to &&
     opp.assigned_to === currentUserId &&
     opp.user_id !== currentUserId;
+
+  const isManual = opp.generated_by === 'manual';
+
+  const handleSourceClick = async (e: React.MouseEvent<HTMLAnchorElement>) => {
+    e.stopPropagation(); // don't navigate to detail page
+    // Fire-and-forget — don't block the browser from opening the URL
+    opportunitiesApi.trackLinkClick(opp.id).then(() => {
+      // Optimistically update the cached opportunity so link_clicked_at reflects
+      // immediately in any detail view that reads from cache.
+      queryClient.setQueryData<{ opportunity: Opportunity }>(
+        ['opportunities', opp.id],
+        (old) => old ? { opportunity: { ...old.opportunity, link_clicked_at: new Date().toISOString() } } : old,
+      );
+    }).catch(() => {/* non-critical — swallow silently */});
+  };
+
+  const [copied, setCopied] = useState(false);
+
+  const handleCopyMessage = async (e: React.MouseEvent<HTMLButtonElement>) => {
+    e.stopPropagation(); // don't navigate to detail page
+    try {
+      await navigator.clipboard.writeText(opp.prepared_message);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+      opportunitiesApi.trackMessageCopy(opp.id).then(() => {
+        queryClient.setQueryData<{ opportunity: Opportunity }>(
+          ['opportunities', opp.id],
+          (old) => old ? { opportunity: { ...old.opportunity, message_copied_at: new Date().toISOString() } } : old,
+        );
+      }).catch(() => {/* non-critical — swallow silently */});
+    } catch {
+      // clipboard API unavailable — fail silently
+    }
+  };
 
   return (
     <div
@@ -58,63 +102,114 @@ function OpportunityCard({ opp, currentUserId }: { opp: Opportunity; currentUser
             {opp.target_name ?? 'Anonymous prospect'}
           </span>
           {isAssignedToMe && (
-            <Badge variant="purple" size="xs">
-              Assigned to me
-            </Badge>
+            <Badge variant="purple" size="xs">Assigned to me</Badge>
+          )}
+          {isManual && (
+            <Badge variant="gray" size="xs">Manual</Badge>
           )}
         </div>
-        {/* Composite score circle */}
+        {/* Composite score circle — show dash for manual entries with no score */}
         <div className={cn(
           'w-10 h-10 rounded-full border-2 flex items-center justify-center shrink-0 font-bold text-sm',
           pct >= 7 ? 'border-success text-success' :
           pct >= 4 ? 'border-warning text-warning' :
+          isManual  ? 'border-slate-300 text-text-muted' :
           'border-danger text-danger',
         )}>
-          {Math.round(pct)}
+          {isManual && !pct ? '—' : Math.round(pct)}
         </div>
       </div>
 
       {/* Context */}
       <p className="text-sm text-text-secondary leading-relaxed line-clamp-3">
-        {opp.target_context}
+        {opp.target_context ?? <span className="italic text-text-muted">No context added</span>}
       </p>
 
-      {/* Sub-scores */}
-      <div className="flex items-center gap-3">
-        {[
-          { label: 'Fit',    value: opp.fit_score },
-          { label: 'Timing', value: opp.timing_score },
-          { label: 'Intent', value: opp.intent_score },
-        ].filter((s) => s.value != null).map((s) => (
-          <div key={s.label} className="flex items-center gap-1">
-            <span className="text-xs text-text-muted">{s.label}</span>
-            <span className={cn('text-xs font-mono font-semibold', scoreColor)}>{s.value}/10</span>
-          </div>
-        ))}
-        <span className="ml-auto text-xs text-text-muted">{formatRelativeDate(opp.created_at)}</span>
-      </div>
+      {/* Source URL */}
+      {opp.source_url && (
+        <div className="flex items-center gap-1.5">
+          <a
+            href={opp.source_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={handleSourceClick}
+            className={cn(
+              'inline-flex items-center gap-1 text-xs font-medium truncate max-w-[260px] hover:underline',
+              opp.link_clicked_at ? 'text-text-muted' : 'text-brand',
+            )}
+          >
+            <ExternalLink size={11} className="shrink-0" />
+            {opp.source_url.replace(/^https?:\/\//, '')}
+          </a>
+          {opp.link_clicked_at && (
+            <span className="text-xs text-text-muted shrink-0">· visited</span>
+          )}
+        </div>
+      )}
+
+      {/* Sub-scores — hidden for manual entries with no scores */}
+      {!isManual && (
+        <div className="flex items-center gap-3">
+          {[
+            { label: 'Fit',    value: opp.fit_score },
+            { label: 'Timing', value: opp.timing_score },
+            { label: 'Intent', value: opp.intent_score },
+          ].filter((s) => s.value != null).map((s) => (
+            <div key={s.label} className="flex items-center gap-1">
+              <span className="text-xs text-text-muted">{s.label}</span>
+              <span className={cn('text-xs font-mono font-semibold', scoreColor)}>{s.value}/10</span>
+            </div>
+          ))}
+          <span className="ml-auto text-xs text-text-muted">{formatRelativeDate(opp.created_at)}</span>
+        </div>
+      )}
+      {isManual && (
+        <div className="flex items-center justify-end">
+          <span className="text-xs text-text-muted">{formatRelativeDate(opp.created_at)}</span>
+        </div>
+      )}
 
       {/* Footer */}
       <div className="flex items-center justify-between pt-1 border-t border-surface-border">
-        <Badge
-          variant={
-            opp.status === 'sent'    ? 'green' :
-            opp.status === 'viewed'  ? 'blue'  : 'gray'
-          }
-          size="xs"
-        >
-          {STATUS_LABELS[opp.status]}
-        </Badge>
-        <span className="text-xs text-brand flex items-center gap-0.5 font-medium">
-          View details <ChevronRight size={12} />
-        </span>
+        <div className="flex items-center gap-2">
+          <Badge
+            variant={
+              opp.status === 'sent'   ? 'green' :
+              opp.status === 'viewed' ? 'blue'  : 'gray'
+            }
+            size="xs"
+          >
+            {STATUS_LABELS[opp.status] ?? opp.status}
+          </Badge>
+          {opp.message_copied_at && (
+            <span className="text-xs text-text-muted">· message copied</span>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleCopyMessage}
+            title="Copy prepared message"
+            className={cn(
+              'inline-flex items-center gap-1 text-xs font-medium transition-colors',
+              copied ? 'text-success' : 'text-text-muted hover:text-text-primary',
+            )}
+          >
+            {copied ? <Check size={12} /> : <Copy size={12} />}
+            {copied ? 'Copied!' : 'Copy message'}
+          </button>
+          <span className="text-xs text-brand flex items-center gap-0.5 font-medium">
+            View details <ChevronRight size={12} />
+          </span>
+        </div>
       </div>
     </div>
   );
 }
 
+// ── Page ─────────────────────────────────────────────────────────────────────
+
 export default function OpportunitiesPage() {
-  const navigate     = useNavigate();
+  const navigate      = useNavigate();
   const { isManager } = useRole();
   const { user }      = useAuth();
   const { showToast } = useToast();
@@ -137,7 +232,6 @@ export default function OpportunitiesPage() {
     staleTime: 60_000,
   });
 
-  // Auto-fetch next page when sentinel is visible
   const handleObserver = useCallback(
     (entries: IntersectionObserverEntry[]) => {
       if (entries[0].isIntersecting && hasNextPage && !isFetchingNextPage) {
@@ -171,20 +265,28 @@ export default function OpportunitiesPage() {
     },
   });
 
-  const allOpps    = data?.pages.flatMap((p) => p.opportunities) ?? [];
+  const allOpps       = data?.pages.flatMap((p) => p.opportunities) ?? [];
   const shouldRefresh = data?.pages[0]?.should_refresh;
 
   return (
     <div className="page-container space-y-5">
       {/* Header */}
-      <div className="flex items-center justify-between gap-4">
+      <div className="flex items-start justify-between gap-3">
         <h1 className="text-xl font-bold text-text-primary">Opportunities</h1>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
           {isManager && (
             <Button variant="secondary" size="sm" onClick={() => navigate('/team/opportunities')}>
               Team view
             </Button>
           )}
+          <Button
+            variant="secondary"
+            size="sm"
+            leftIcon={<Plus size={13} />}
+            onClick={() => navigate('/opportunities/create')}
+          >
+            Add manually
+          </Button>
           <Button
             size="sm"
             leftIcon={<RefreshCw size={13} className={refreshMutation.isPending ? 'animate-spin' : ''} />}
@@ -248,6 +350,7 @@ export default function OpportunitiesPage() {
           </div>
         </>
       )}
+
     </div>
   );
 }

@@ -100,36 +100,202 @@ router.post('/cards/:id/dismiss', requirePermission('member'), asyncHandler(asyn
 
 // GET /api/growth/checkin/today
 router.get('/checkin/today', asyncHandler(async (req, res) => {
-  const userId = req.user.id, workspaceId = req.workspace.id;
+  const userId = req.user.id;
+  const workspaceId = req.workspace.id;
   const archetype = req.workspaceProfile?.archetype || 'seller';
-  const today     = new Date().toISOString().split('T')[0];
-  log('CHECKIN TODAY', { userId, workspaceId, today });
+  const today = new Date().toISOString().split('T')[0];
+  
+  log('=== CHECKIN TODAY START ===', { userId, workspaceId, today, archetype });
 
-  const { data: existing } = await supabaseAdmin
-    .from('daily_check_ins').select('*')
-    .eq('user_id', userId).eq('workspace_id', workspaceId).eq('date', today).single();
-  if (existing) return res.json({ check_in: existing, is_new: false });
-
-  const { data: recentMessages } = await supabaseAdmin
-    .from('chat_messages').select('content, role')
-    .eq('user_id', userId).eq('workspace_id', workspaceId)
-    .in('role', ['user', 'assistant']).order('created_at', { ascending: false }).limit(8);
-  const chatContext = recentMessages?.map(m => m.content?.slice(0, 200)).join(' | ').slice(0, 600) || '';
-
-  const { data: goals } = await supabaseAdmin
-    .from('user_goals').select('goal_text, target_value, target_unit, current_value')
-    .eq('workspace_id', workspaceId).eq('user_id', userId).eq('status', 'active').limit(2);
-
-  logAI('generateCheckInQuestions', { userId, archetype });
-  const userCtx   = buildUserContext(req);
-  const questions = await groqService.generateCheckInQuestions(userCtx, archetype, chatContext, goals || []);
-
-  const { data: newCheckIn } = await supabaseAdmin
+  // 1. Check for existing check-in
+  const { data: existing, error: existingError } = await supabaseAdmin
     .from('daily_check_ins')
-    .insert({ user_id: userId, workspace_id: workspaceId, date: today, questions, chat_context: chatContext })
-    .select().single();
-  logDB('INSERT', 'daily_check_ins', { userId, workspaceId, date: today });
-  res.json({ check_in: newCheckIn, is_new: true });
+    .select('*')
+    .eq('user_id', userId)
+    .eq('workspace_id', workspaceId)
+    .eq('date', today)
+    .single();
+  
+  if (existingError && existingError.code !== 'PGRST116') {
+    log('ERROR fetching existing check-in', { error: existingError });
+  }
+  
+  if (existing) {
+    log('✅ Existing check-in found', { 
+      id: existing.id, 
+      hasQuestions: !!existing.questions,
+      questionsLength: Array.isArray(existing.questions) ? existing.questions.length : 'not_array',
+      questionsType: typeof existing.questions,
+      questionsPreview: JSON.stringify(existing.questions).slice(0, 200)
+    
+    });
+    return res.json({ check_in: existing, is_new: false });
+  }
+
+  // 2. Fetch recent messages
+  const { data: recentMessages, error: messagesError } = await supabaseAdmin
+    .from('chat_messages')
+    .select('content, role')
+    .eq('user_id', userId)
+    .eq('workspace_id', workspaceId)
+    .in('role', ['user', 'assistant'])
+    .order('created_at', { ascending: false })
+    .limit(8);
+  
+  if (messagesError) {
+    log('ERROR fetching messages', { error: messagesError });
+  }
+  
+  const chatContext = recentMessages?.map(m => m.content?.slice(0, 200)).join(' | ').slice(0, 600) || '';
+  log('📝 Chat context', { 
+    messageCount: recentMessages?.length || 0,
+    contextLength: chatContext.length,
+    contextPreview: chatContext.slice(0, 100)
+  });
+
+  // 3. Fetch active goals
+  const { data: goals, error: goalsError } = await supabaseAdmin
+    .from('user_goals')
+    .select('goal_text, target_value, target_unit, current_value')
+    .eq('workspace_id', workspaceId)
+    .eq('user_id', userId)
+    .eq('status', 'active')
+    .limit(2);
+  
+  if (goalsError) {
+    log('ERROR fetching goals', { error: goalsError });
+  }
+  
+  log('🎯 Goals fetched', { 
+    goalCount: goals?.length || 0,
+    goals: goals?.map(g => ({ text: g.goal_text?.slice(0, 50), target: g.target_value }))
+  });
+
+  // 4. Generate questions with GROQ
+  logAI('generateCheckInQuestions START', { userId, archetype });
+  const userCtx = buildUserContext(req);
+  log('👤 User context', { 
+    userCtxLength: JSON.stringify(userCtx).length,
+    userCtxPreview: JSON.stringify(userCtx).slice(0, 200)
+  });
+  
+  let questions;
+  try {
+    questions = await groqService.generateCheckInQuestions(userCtx, archetype, chatContext, goals || []);
+    
+    // Comprehensive logging of GROQ response
+    log('🤖 GROQ Response Details', {
+      questionsType: typeof questions,
+      isArray: Array.isArray(questions),
+      length: Array.isArray(questions) ? questions.length : 'N/A',
+      rawValue: JSON.stringify(questions),
+      firstQuestion: Array.isArray(questions) && questions[0] ? JSON.stringify(questions[0]) : 'none',
+      questionsPreview: JSON.stringify(questions).slice(0, 500)
+    });
+    
+    // Validate questions format
+    if (!questions) {
+      log('⚠️ GROQ returned null/undefined', { questions });
+      questions = [];
+    }
+    
+    if (!Array.isArray(questions)) {
+      log('❌ GROQ did not return an array!', { type: typeof questions, value: questions });
+      questions = [];
+    }
+    
+    if (questions.length === 0) {
+      log('⚠️ GROQ returned empty array');
+    }
+    
+    // Check each question format
+    questions.forEach((q, idx) => {
+      if (!q.id || !q.question) {
+        log(`⚠️ Question ${idx} missing id or question field`, { 
+          id: q.id, 
+          question: q.question,
+          hasId: !!q.id,
+          hasQuestion: !!q.question,
+          fullObject: JSON.stringify(q)
+        });
+      }
+    });
+    
+  } catch (groqError) {
+    log('❌ GROQ generation failed', { 
+      error: groqError.message,
+      stack: groqError.stack,
+      name: groqError.name
+    });
+    questions = []; // Fallback to empty array
+  }
+
+  // 5. Ensure proper format before insertion
+  const formattedQuestions = questions.map((q, idx) => ({
+    id: q.id || `q${idx + 1}`,
+    question: q.question || q.text || q.prompt || `Question ${idx + 1}`,
+    ...(q.type && { type: q.type }) // preserve any additional fields
+  }));
+  
+  log('📦 Formatted questions for DB', {
+    originalCount: questions.length,
+    formattedCount: formattedQuestions.length,
+    formattedPreview: JSON.stringify(formattedQuestions).slice(0, 300)
+  });
+
+  // 6. Insert into database
+  const insertData = {
+    user_id: userId,
+    workspace_id: workspaceId,
+    date: today,
+    questions: formattedQuestions,
+    chat_context: chatContext
+  };
+  
+  log('💾 Inserting check-in', { 
+    insertData: {
+      ...insertData,
+      questions_length: formattedQuestions.length,
+      questions_sample: JSON.stringify(formattedQuestions).slice(0, 200)
+    }
+  });
+  
+  const { data: newCheckIn, error: insertError } = await supabaseAdmin
+    .from('daily_check_ins')
+    .insert(insertData)
+    .select()
+    .single();
+  
+  if (insertError) {
+    log('❌ Database insert failed', { 
+      error: insertError,
+      message: insertError.message,
+      details: insertError.details,
+      hint: insertError.hint
+    });
+    throw new Error(`Failed to create check-in: ${insertError.message}`);
+  }
+  
+  logDB('INSERT', 'daily_check_ins', { 
+    userId, 
+    workspaceId, 
+    date: today,
+    checkInId: newCheckIn.id,
+    questionsStored: Array.isArray(newCheckIn.questions) ? newCheckIn.questions.length : 'invalid'
+  });
+  
+  // 7. Final response validation
+  const responseData = { check_in: newCheckIn, is_new: true };
+  log('✅ CHECKIN TODAY COMPLETE', {
+    checkInId: newCheckIn.id,
+    hasQuestions: !!newCheckIn.questions,
+    questionsType: typeof newCheckIn.questions,
+    questionsLength: Array.isArray(newCheckIn.questions) ? newCheckIn.questions.length : 'not_array',
+    questionsValue: JSON.stringify(newCheckIn.questions).slice(0, 200),
+    fullResponsePreview: JSON.stringify(responseData).slice(0, 300)
+  });
+  
+  res.json(responseData);
 }));
 
 // POST /api/growth/checkin
@@ -182,6 +348,7 @@ router.post('/checkin', requirePermission('member'), validate(checkInSubmitSchem
     userCtx, archetype, checkIn.questions, answers, goals || [], mood_score || null,
     { lastSentMessage: lastSentData, lastAnalysis: lastAnalysisData }
   );
+  console.log(`Responss receibed: ${response_text}`);
 
   await supabaseAdmin.from('daily_check_ins').update({
     answers, mood_score: mood_score || null,

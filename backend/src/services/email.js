@@ -392,7 +392,7 @@ export const sendDealAssignedEmail = async ({
   correlationId = null,
 }) => {
   const cid = correlationId || generateCorrelationId();
-  const dealUrl = `${FRONTEND_URL}/opportunities/${opportunityId}`;  // fix path if needed
+  const dealUrl = `${FRONTEND_URL}/pipeline/${opportunityId}`;  // fix path if needed
 
   const html = `
 <!DOCTYPE html>

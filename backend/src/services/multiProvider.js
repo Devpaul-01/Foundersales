@@ -1,21 +1,31 @@
 // src/services/multiProvider.js
 // ============================================================
-// MULTI-PROVIDER AI FALLBACK — Cerebras + Groq + Mistral
+// MULTI-PROVIDER AI FALLBACK — Cerebras + Groq + Mistral + OpenRouter
 //
 // Provider priority (highest free TPM first):
-//   1. Cerebras  (~60K TPM free)  — llama3.1-8b / llama3.3-70b
-//   2. Groq      (~30K TPM free)  — llama-3.1-8b-instant / llama-3.3-70b-versatile
-//   3. Mistral   (500K TPM free*) — open-mistral-7b / open-mixtral-8x7b
+//   1. Cerebras    (~60K TPM free)  — gpt-oss-120b (production) + dynamic discovery
+//   2. Groq        (~30K TPM free)  — llama-4-scout (vision!) + llama-3.3-70b + dynamic discovery
+//   3. Mistral     (500K TPM free*) — mistral-small-latest / mistral-medium-latest (provider aliases)
 //      *Mistral free tier may use your prompts for training.
+//   4. OpenRouter  (paid, many models) — dynamic discovery; fallback of last resort
 //
 // Multi-key support per provider (add real keys from separate accounts):
-//   CEREBRAS_API_KEY_1 … CEREBRAS_API_KEY_5
-//   GROQ_API_KEY_1     … GROQ_API_KEY_10
-//   MISTRAL_API_KEY_1  … MISTRAL_API_KEY_5
-//   (single-key fallback: CEREBRAS_API_KEY, GROQ_API_KEY, MISTRAL_API_KEY)
+//   CEREBRAS_API_KEY_1    … CEREBRAS_API_KEY_5
+//   GROQ_API_KEY_1        … GROQ_API_KEY_10
+//   MISTRAL_API_KEY_1     … MISTRAL_API_KEY_5
+//   OPENROUTER_API_KEY_1  … OPENROUTER_API_KEY_5
+//   (single-key fallback: CEREBRAS_API_KEY, GROQ_API_KEY, MISTRAL_API_KEY, OPENROUTER_API_KEY)
 //
-// All three use OpenAI-compatible APIs — no separate SDKs needed.
+// All four use OpenAI-compatible APIs — no separate SDKs needed.
 // Failed keys cool down for 1 hour (in-memory).
+//
+// MODEL SELECTION STRATEGY:
+//   - Mistral: uses provider-managed alias IDs (mistral-small-latest etc.) that
+//     Mistral automatically keeps pointing to their current best model — no manual
+//     updates needed.
+//   - Groq & Cerebras: dynamic model discovery via GET /v1/models at startup,
+//     ranked by MODEL_PRIORITY. Unknown new models are appended automatically.
+//     Falls back gracefully to the static priority list if discovery fails.
 //
 // NOTE: groq.js is no longer imported. This file handles all
 // provider calls directly via fetch against each provider's
@@ -23,35 +33,100 @@
 // ============================================================
 
 // ──────────────────────────────────────────
+// MODEL PRIORITY LISTS (static fallback + ranking template)
+//
+// For Groq & Cerebras: these lists drive the ranking of dynamically
+// discovered models. Models listed here that are found at /v1/models
+// are used first (in order). Newly discovered models not in this list
+// are appended at the end as additional fallbacks.
+//
+// For Mistral: used as-is. The alias IDs (e.g. mistral-small-latest)
+// are provider-managed and always resolve to Mistral's current
+// recommended version — no /v1/models discovery needed.
+// ──────────────────────────────────────────
+
+const MODEL_PRIORITY = {
+  cerebras: [
+    'gpt-oss-120b',
+  ],
+
+  groq: [
+    'openai/gpt-oss-120b',
+    'qwen/qwen3-32b',
+    'meta-llama/llama-4-scout-17b-16e-instruct',
+  ],
+
+  mistral: [
+    'mistral-large-2512',
+    'mistral-medium-latest',
+    'ministral-3b-2512',
+  ],
+
+  openrouter: [
+    'meta-llama/llama-3.3-70b-instruct:free', // Best default free model
+    'google/gemma-4-31b-it:free',             // Vision + reasoning
+    'nousresearch/hermes-3-405b:free',        // Highest intelligence
+  ],
+};
+
+// ──────────────────────────────────────────
+// NON-CHAT MODEL FILTER
+// Patterns matching model IDs that are NOT chat/text-generation models.
+// Used during dynamic discovery to exclude embeddings, speech, guard, etc.
+// ──────────────────────────────────────────
+const NON_CHAT_PATTERN = /whisper|embed|guard|tts|moderation|transcribe|ocr|safeguard|vision-only/i;
+
+// ──────────────────────────────────────────
 // PROVIDER REGISTRY
+// `models` = static fallback list used when dynamic discovery is unavailable.
+//            Also serves as the ranking template for discovery results.
 // ──────────────────────────────────────────
 const PROVIDER_REGISTRY = {
   cerebras: {
     name:      'cerebras',
     baseURL:   'https://api.cerebras.ai/v1',
-    models:    ['llama-3.1-8b', 'llama-3.3-70b'],  // fixed: hyphens not dots
+    // gpt-oss-120b is the current production model on Cerebras (June 2026).
+    // Legacy llama models kept as fallbacks in case a dedicated endpoint still exposes them.
+    models:    MODEL_PRIORITY.cerebras,
     envPrefix: 'CEREBRAS_API_KEY',
     maxKeys:   5,
   },
   groq: {
     name:      'groq',
     baseURL:   'https://api.groq.com/openai/v1',
-    // Updated to llama-3.1-8b-instant as primary — highest free TPM on Groq
-    models:    ['llama-3.1-8b-instant', 'llama-3.3-70b-versatile'],
+    // llama-4-scout: latest Groq production model; also vision-capable (multimodal).
+    // llama-3.3-70b-versatile + llama-3.1-8b-instant remain Groq production models.
+    models:    MODEL_PRIORITY.groq,
     envPrefix: 'GROQ_API_KEY',
     maxKeys:   10,
   },
   mistral: {
     name:      'mistral',
     baseURL:   'https://api.mistral.ai/v1',
-    models:    ['mistral-small-2506', 'ministral-8b-2410'],
+    // Provider-managed aliases: Mistral keeps these pointing to the current recommended
+    // version. mistral-small-2506 (Small 3.2) and ministral-8b-2410 are now legacy.
+    models:    MODEL_PRIORITY.mistral,
     envPrefix: 'MISTRAL_API_KEY',
     maxKeys:   5,
   },
+  openrouter: {
+    name:      'openrouter',
+    baseURL:   'https://openrouter.ai/api/v1',
+    // Dynamic discovery via /v1/models. Static list here is the ranking template
+    // and fallback in case discovery fails.
+    models:    MODEL_PRIORITY.openrouter,
+    envPrefix: 'OPENROUTER_API_KEY',
+    maxKeys:   5,
+    // OpenRouter recommends sending Referer + X-Title headers for attribution/ranking.
+    extraHeaders: {
+      'HTTP-Referer': process.env.OPENROUTER_REFERER ?? 'https://localhost',
+      'X-Title':      process.env.OPENROUTER_APP_TITLE ?? 'MultiProvider',
+    },
+  },
 };
 
-// Attempt order: highest free TPM first
-const PROVIDER_ORDER = ['cerebras', 'groq', 'mistral'];
+// Attempt order: highest free TPM first; OpenRouter is paid so it goes last
+const PROVIDER_ORDER = ['cerebras', 'groq', 'mistral', 'openrouter'];
 
 // ──────────────────────────────────────────
 // KEY POOL BUILDER
@@ -135,6 +210,71 @@ const shouldCoolKey = (err) =>
 // ──────────────────────────────────────────
 let _pools = null;
 
+// ──────────────────────────────────────────
+// DYNAMIC MODEL DISCOVERY
+//
+// Fetches /v1/models once per provider at startup (fire-and-forget).
+// Results are cached indefinitely for the process lifetime — restart
+// to re-discover after a provider adds/removes models.
+//
+// Mistral is excluded from discovery because it uses provider-managed
+// alias IDs (e.g. mistral-small-latest) that already auto-track the
+// current recommended version.
+// ──────────────────────────────────────────
+const _discoveredModels = {};   // { providerId: string[] }
+const _discoveryDone    = {};   // { providerId: boolean }
+
+const _discoverProviderModels = async (providerId, baseURL, apiKey) => {
+  if (providerId === 'mistral') {
+    // Aliases are provider-managed — no discovery needed.
+    _discoveredModels[providerId] = MODEL_PRIORITY.mistral;
+    _discoveryDone[providerId] = true;
+    return;
+  }
+
+  try {
+    const res = await fetch(`${baseURL}/models`, {
+      headers:  { Authorization: `Bearer ${apiKey}` },
+      signal:   AbortSignal.timeout(8000),
+    });
+
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+    const json   = await res.json();
+    const allIds = (json.data || []).map(m => m.id).filter(Boolean);
+
+    // Separate into known-priority models and newly discovered unknown models.
+    const priorityList = MODEL_PRIORITY[providerId] || [];
+    const known   = priorityList.filter(id => allIds.includes(id));
+    const unknown = allIds.filter(id =>
+      !priorityList.includes(id) && !NON_CHAT_PATTERN.test(id)
+    ).sort();
+
+    const ranked = [...known, ...unknown];
+    if (ranked.length > 0) {
+      _discoveredModels[providerId] = ranked;
+      console.log(`[MultiProvider] ${providerId}: discovered ${ranked.length} chat model(s) — using dynamic list`);
+    } else {
+      console.warn(`[MultiProvider] ${providerId}: discovery returned 0 usable models — falling back to static list`);
+      _discoveredModels[providerId] = priorityList;
+    }
+  } catch (err) {
+    console.warn(`[MultiProvider] ${providerId}: model discovery failed (${err.message}) — using static priority list`);
+    _discoveredModels[providerId] = MODEL_PRIORITY[providerId] || [];
+  }
+
+  _discoveryDone[providerId] = true;
+};
+
+/**
+ * Returns the effective model list for a provider.
+ * Uses dynamically discovered models when available; falls back to MODEL_PRIORITY.
+ */
+const getEffectiveModels = (providerId) =>
+  (_discoveryDone[providerId] && _discoveredModels[providerId]?.length > 0)
+    ? _discoveredModels[providerId]
+    : MODEL_PRIORITY[providerId] || PROVIDER_REGISTRY[providerId]?.models || [];
+
 const getPools = () => {
   if (!_pools) {
     _pools = {};
@@ -143,12 +283,21 @@ const getPools = () => {
     for (const id of PROVIDER_ORDER) {
       _pools[id] = buildKeyPool(PROVIDER_REGISTRY[id]);
       total += _pools[id].length;
+
+      // Kick off dynamic model discovery in the background (fire-and-forget).
+      // The first few requests will use the static MODEL_PRIORITY list; once
+      // discovery completes, getEffectiveModels() returns the live list.
+      const firstKey = _pools[id][0];
+      if (firstKey) {
+        _discoverProviderModels(id, PROVIDER_REGISTRY[id].baseURL, firstKey.key)
+          .catch(() => {}); // errors are already logged inside _discoverProviderModels
+      }
     }
 
     if (total === 0) {
       console.error('[MultiProvider] CRITICAL: No API keys found for any provider!');
     } else {
-      console.log(`[MultiProvider] Ready — ${total} total key(s) across ${PROVIDER_ORDER.length} providers`);
+      console.log(`[MultiProvider] Ready — ${total} total key(s) across ${PROVIDER_ORDER.length} providers: Cerebras, Groq, Mistral, OpenRouter (model discovery warming up)`);
     }
   }
   return _pools;
@@ -160,7 +309,7 @@ const getPools = () => {
 // expose the same /chat/completions endpoint shape.
 // ──────────────────────────────────────────
 const callProvider = async ({
-  baseURL, apiKey, model,
+  baseURL, apiKey, model, extraHeaders,
   messages, systemPrompt, temperature, maxTokens,
 }) => {
   const body = {
@@ -178,6 +327,7 @@ const callProvider = async ({
     headers: {
       'Content-Type':  'application/json',
       'Authorization': `Bearer ${apiKey}`,
+      ...extraHeaders,
     },
     body: JSON.stringify(body),
   });
@@ -198,7 +348,7 @@ const callProvider = async ({
 // Reads SSE chunks and calls onToken per delta.
 // ──────────────────────────────────────────
 const streamProvider = async ({
-  baseURL, apiKey, model,
+  baseURL, apiKey, model, extraHeaders,
   messages, systemPrompt, temperature, maxTokens,
   onToken, onComplete,
 }) => {
@@ -218,6 +368,7 @@ const streamProvider = async ({
     headers: {
       'Content-Type':  'application/json',
       'Authorization': `Bearer ${apiKey}`,
+      ...extraHeaders,
     },
     body: JSON.stringify(body),
   });
@@ -267,7 +418,8 @@ const streamProvider = async ({
 // PROVIDER QUEUE BUILDER
 //
 // Order: Cerebras → Groq → Mistral
-// Within each provider: primary model first, then fallback.
+// Within each provider: models are ordered by getEffectiveModels() —
+// either the dynamically discovered + ranked list, or MODEL_PRIORITY fallback.
 // Only healthy (non-cooling) keys are included.
 // ──────────────────────────────────────────
 const buildProviderQueue = () => {
@@ -281,14 +433,18 @@ const buildProviderQueue = () => {
 
     if (healthy.length === 0) continue;
 
-    for (const model of def.models) {
+    // Use dynamically discovered models when available, otherwise static priority list.
+    const models = getEffectiveModels(providerId);
+
+    for (const model of models) {
       for (const keyEntry of healthy) {
         queue.push({
           providerId,
           model,
           keyEntry,
-          baseURL: def.baseURL,
-          name:    `${providerId}-${model}-key${keyEntry.index}`,
+          baseURL:      def.baseURL,
+          extraHeaders: def.extraHeaders ?? {},
+          name:         `${providerId}-${model}-key${keyEntry.index}`,
         });
       }
     }
@@ -304,7 +460,7 @@ export const callWithFallback = async (opts) => {
   const queue = buildProviderQueue();
 
   if (queue.length === 0) {
-    throw new Error('ALL_PROVIDERS_FAILED: No healthy keys available across Cerebras, Groq, or Mistral');
+    throw new Error('ALL_PROVIDERS_FAILED: No healthy keys available across Cerebras, Groq, Mistral, or OpenRouter');
   }
 
   let lastError;
@@ -318,6 +474,7 @@ export const callWithFallback = async (opts) => {
         baseURL:      provider.baseURL,
         apiKey:       provider.keyEntry.key,
         model:        provider.model,
+        extraHeaders: provider.extraHeaders,
         messages:     opts.messages,
         systemPrompt: opts.systemPrompt,
         temperature:  opts.temperature,
@@ -360,7 +517,7 @@ export const streamWithFallback = async ({
   const queue = buildProviderQueue();
 
   if (queue.length === 0) {
-    onError?.(new Error('ALL_PROVIDERS_FAILED: No healthy keys available across Cerebras, Groq, or Mistral'));
+    onError?.(new Error('ALL_PROVIDERS_FAILED: No healthy keys available across Cerebras, Groq, Mistral, or OpenRouter'));
     return;
   }
 
@@ -374,6 +531,7 @@ export const streamWithFallback = async ({
         baseURL:      provider.baseURL,
         apiKey:       provider.keyEntry.key,
         model:        provider.model,
+        extraHeaders: provider.extraHeaders,
         messages,
         systemPrompt,
         temperature,
@@ -420,12 +578,14 @@ export const getProviderStatus = () => {
       const cooling = isKeyCooling(k.provider, k.index);
 
       status.push({
-        provider:      providerId,
-        models:        def.models,
-        key_index:     k.index,
-        status:        cooling ? 'cooling' : 'healthy',
-        fail_count:    cd?.failCount || 0,
-        cooling_until: cooling
+        provider:         providerId,
+        models_static:    def.models,
+        models_effective: getEffectiveModels(providerId),
+        model_discovery:  _discoveryDone[providerId] ? 'complete' : 'pending',
+        key_index:        k.index,
+        status:           cooling ? 'cooling' : 'healthy',
+        fail_count:       cd?.failCount || 0,
+        cooling_until:    cooling
           ? new Date(cd.failedAt + KEY_COOLDOWN_MS).toISOString()
           : null,
       });

@@ -65,7 +65,7 @@ export function Sidebar({ onNavigate }: SidebarProps) {
   const { user, logout } = useAuth();
   const { isManager }    = useRole();
   const { activeWorkspace, switchWorkspace, isSwitching } = useWorkspaceContext();
-  const { calendarAlertCount, pendingFeedbackCount } = useNotificationContext();
+  const { calendarAlertCount, pendingFeedbackCount, followupUnviewedCount } = useNotificationContext();
   const navigate = useNavigate();
 
   const [teamExpanded,      setTeamExpanded]      = useState(false);
@@ -155,7 +155,7 @@ export function Sidebar({ onNavigate }: SidebarProps) {
         <NavItem to={ROUTES.CALENDAR} icon={<Calendar size={16} />} label="Calendar" badge={calendarAlertCount} onClick={onNavigate} />
         <NavItem to={ROUTES.PROSPECTS} icon={<Users size={16} />} label="Prospects" onClick={onNavigate} />
         <NavItem to={ROUTES.GOALS} icon={<Target size={16} />} label="Goals" onClick={onNavigate} />
-        <NavItem to={ROUTES.FOLLOWUP} icon={<Send size={16} />} label="Follow-up" onClick={onNavigate} />
+        <NavItem to={ROUTES.FOLLOWUP} icon={<Send size={16} />} label="Follow-up" badge={followupUnviewedCount} onClick={onNavigate} />
         <NavItem to={ROUTES.COMMITMENTS} icon={<CheckSquare size={16} />} label="Commitments" onClick={onNavigate} />
 
         <SectionLabel>Insights</SectionLabel>

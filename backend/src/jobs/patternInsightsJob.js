@@ -182,14 +182,18 @@ const processUserInsights = async (userId, workspaceId) => {
   const rows = insights.map(i => ({
     workspace_id:     workspaceId,
     user_id:          userId,
-    type:             i.type,
+    insight_type:     i.type,
     title:            i.title,
     body:             i.body,
     suggested_action: i.suggested_action || null,
     affected_count:   i.affected_count   || 1,
     expires_at:       new Date(Date.now() + 14 * 86400000).toISOString(),
   }));
-  await supabaseAdmin.from('prospect_insights').insert(rows);
+  const { error: insightsInsertError } = await supabaseAdmin.from('prospect_insights').insert(rows);
+  if (insightsInsertError) {
+    console.error(`[PatternInsightsJob] prospect_insights insert failed for user ${userId} workspace ${workspaceId}:`, insightsInsertError.message);
+    return;
+  }
 
   const highValueInsights = insights.filter(i => i.type === 'stall' || i.type === 'question_cluster');
   if (highValueInsights.length) {

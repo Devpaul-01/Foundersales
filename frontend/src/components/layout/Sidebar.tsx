@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Zap, Layers, Dumbbell, MessageCircle,
   Calendar, Users, Target, Send, CheckSquare, TrendingUp,
   BarChart2, Activity, Building2, Settings, ChevronDown,
-  ChevronRight, Shield, LogOut, RefreshCw,
+  ChevronRight, Shield, LogOut, RefreshCw, Gauge,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useAuth } from '@/hooks/useAuth';
@@ -176,6 +176,8 @@ export function Sidebar({ onNavigate }: SidebarProps) {
             </button>
             {teamExpanded && (
               <div className="ml-4 space-y-0.5">
+                <NavItem to={ROUTES.TEAM_METRICS}    icon={<Gauge size={14} />}     label="Metrics"     onClick={onNavigate} />
+
                 <NavItem to={ROUTES.TEAM_PIPELINE}    icon={<Layers size={14} />}    label="Pipeline"     onClick={onNavigate} />
                 <NavItem to={ROUTES.TEAM_OPPS}        icon={<Zap size={14} />}       label="Opportunities" onClick={onNavigate} />
                 <NavItem to={ROUTES.TEAM_INSIGHTS}    icon={<BarChart2 size={14} />} label="Insights"     onClick={onNavigate} />

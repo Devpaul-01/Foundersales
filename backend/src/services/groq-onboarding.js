@@ -6,8 +6,7 @@
 
 import { parseTextResponse, parseJSONObject, parseJSONArray, validateAndFill } from '../utils/parser.js';
 import supabaseAdmin from '../config/supabase.js';
-import { callGroq }  from './groq-client.js';
-import { PRO_MODEL } from './groq-client.js';
+import { callWithFallbackGroq } from './multiProvider.js';
 import { SYSTEM_PROMPTS } from './groq-prompts.js';
 
 // ──────────────────────────────────────────
@@ -221,11 +220,12 @@ RETURN EXACT JSON:
   };
 
   try {
-    const { content } = await callGroq({
-      messages: [{ role: 'user', content: prompt }],
+    const { content } = await callWithFallbackGroq({
+      messages:    [{ role: 'user', content: prompt }],
       temperature: 0.4,
-      maxTokens: 2500,
-      modelName: PRO_MODEL
+      maxTokens:   2500,
+      tier:        'quality',
+      sourceJob:   'build_voice_profile',
     });
 
     const parsed = parseJSONObject(content, FALLBACK);
@@ -350,11 +350,12 @@ Return ONLY this JSON:
       ];
 
   try {
-    const { content } = await callGroq({
-      messages: [{ role: 'user', content: prompt }],
+    const { content } = await callWithFallbackGroq({
+      messages:    [{ role: 'user', content: prompt }],
       temperature: 0.7,
-      maxTokens: 2000,
-      modelName: PRO_MODEL
+      maxTokens:   2000,
+      tier:        'quality',
+      sourceJob:   'generate_next_burst',
     });
 
     const clean = content.replace(/```json|```/g, '').trim();
@@ -496,11 +497,12 @@ Return ONLY a JSON array of exactly 3 question strings.`;
       ];
 
   try {
-    const { content } = await callGroq({
-      messages: [{ role: 'user', content: prompt }],
+    const { content } = await callWithFallbackGroq({
+      messages:    [{ role: 'user', content: prompt }],
       temperature: 0.7,
-      maxTokens: 500,
-      modelName: PRO_MODEL
+      maxTokens:   500,
+      tier:        'quality',
+      sourceJob:   'generate_burst1_questions',
     });
 
     const questions = parseJSONArray(content, FALLBACK);
@@ -584,11 +586,13 @@ Return ONLY a JSON array of objects:
   ...
 ]`;
 
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.3,
       maxTokens:   600,
-      modelName:   PRO_MODEL
+      tier:        'quality',
+      userId,
+      sourceJob:   'seed_memory_from_onboarding',
     });
 
     const clean  = content.replace(/```json|```/g, '').trim();
@@ -670,11 +674,14 @@ Write one genuine, specific outreach message. Under 100 words. Sound like a real
   const fallback = `Hey — I noticed you mentioned [specific pain point]. I'm building ${user.product_description || 'something that might be relevant'} specifically for ${user.target_audience || 'people in your situation'}. Happy to share what we've been seeing work — no pitch, just useful context. Worth a quick look?`;
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.8,
       maxTokens:   200,
-      modelName:   PRO_MODEL
+      tier:        'quality',
+      workspaceId: user.workspace_id,
+      userId:      user.id,
+      sourceJob:   'generate_sample_outreach_message',
     });
     const result = parseTextResponse(content, fallback);
     return result.length > 20 ? result : fallback;
@@ -719,11 +726,12 @@ Return ONLY this JSON (no markdown):
   const FALLBACK = { archetype: 'seller', confidence: 0.5, reasoning: 'Default based on profile' };
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.2,
       maxTokens:   120,
-      modelName:   PRO_MODEL
+      tier:        'fast',
+      sourceJob:   'detect_user_archetype',
     });
     const clean  = content.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);

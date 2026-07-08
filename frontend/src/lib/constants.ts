@@ -377,6 +377,8 @@ export const ROUTES = {
   TEAM_ANALYTICS:   '/team/analytics',
   TEAM_LEADERBOARD: '/team/leaderboard',
   TEAM_COACHING:    '/team/coaching',
+  TEAM_METRICS: '/team/metrics',
+
   TEAM_ACTIVITY:    '/team/activity',
   ONBOARDING:       '/onboarding',
   ONBOARDING_BASIC: '/onboarding/basic',

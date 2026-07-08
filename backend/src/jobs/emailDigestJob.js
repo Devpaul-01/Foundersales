@@ -13,9 +13,9 @@
 
 import nodemailer from 'nodemailer';
 import { Resend }  from 'resend';
-import { callWithFallback as cwfDigest } from '../services/multiProvider.js';
-import { recordTokenUsage as rtuDigest } from '../services/tokenTracker.js';
-import { searchForChat, checkPerplexityUsage, incrementUsage } from '../services/perplexity.js';
+import { callWithFallbackGroq as cwfDigest } from '../services/multiProvider.js';
+import { searchForChat } from '../services/exa.js';
+import { checkWorkspaceExaUsage } from '../services/tokenTracker.js';
 import { BATCH_DELAY_MS } from '../config/constants.js';
 import supabaseAdmin from '../config/supabase.js';
 import { sleep, logJob } from '../utils/jobHelpers.js';
@@ -140,17 +140,15 @@ const sendDigestForUser = async (user) => {
   // Perplexity market intel (pro/enterprise only, per-user quota)
   let marketIntel = null;
   if (user.tier === 'pro' || user.tier === 'enterprise') {
-    const usageCheck = await checkPerplexityUsage(userId, user.tier);
+    const usageCheck = await checkWorkspaceExaUsage(workspaceId, user.tier);
     if (usageCheck.allowed && wp.target_audience) {
       try {
         const { content } = await searchForChat(
           `What are the most effective cold outreach approaches for ${wp.target_audience} in ${new Date().getFullYear()}?`,
-          'Find specific, data-backed insights about effective outreach messaging for this audience.'
+          'Find specific, data-backed insights about effective outreach messaging for this audience.',
+          { workspaceId, userId, sourceJob: 'email_digest_market_intel' }
         );
-        if (content?.trim()) {
-          marketIntel = content.slice(0, 400);
-          await incrementUsage(userId).catch(() => {});
-        }
+        if (content?.trim()) marketIntel = content.slice(0, 400);
       } catch { /* non-fatal */ }
     }
   }
@@ -199,14 +197,12 @@ Return ONLY JSON:
   "skill_summary": "one sentence on skill movement"
 }`;
 
-  const { content, tokens_in, tokens_out } = await cwfDigest({
+  const { content } = await cwfDigest({
     systemPrompt: 'You generate strategic sales intelligence briefs. Return only valid JSON.',
     messages: [{ role: 'user', content: digestPrompt }],
     temperature: 0.4, maxTokens: 600,
+    tier: 'quality', workspaceId, userId, sourceJob: 'email_digest_brief',
   });
-
-  // Token usage tracked at workspace level
-  await rtuDigest(workspaceId, 'groq', tokens_in, tokens_out);
 
   const digest = JSON.parse(content.replace(/```json|```/g, '').trim());
 

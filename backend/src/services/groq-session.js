@@ -4,7 +4,7 @@
 //                          adaptive curriculum, playbook, and retry diff
 // ============================================================
 
-import { callGroq, PRO_MODEL } from './groq-client.js';
+import { callWithFallbackGroq } from './multiProvider.js';
 
 // ──────────────────────────────────────────
 // SESSION DEBRIEF — V1
@@ -61,11 +61,12 @@ Return ONLY this JSON:
   };
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.5,
       maxTokens:   400,
-      modelName:   PRO_MODEL
+      tier:        'quality',
+      workspaceId: user.workspace_id, userId: user.id, sourceJob: 'generate_session_debrief',
     });
     const clean  = content.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
@@ -157,11 +158,12 @@ Return ONLY this JSON:
   };
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.5,
       maxTokens:   600,
-      modelName:   PRO_MODEL,
+      tier:        'quality',
+      workspaceId: user.workspace_id, userId: user.id, sourceJob: 'generate_session_debrief_v3',
     });
     const clean  = content.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
@@ -243,11 +245,12 @@ Return ONLY a JSON array. Each item:
 Only return the JSON array. No explanation, no markdown.`;
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.35,
       maxTokens:   2500,
-      modelName:   PRO_MODEL,
+      tier:        'quality',
+      workspaceId: user.workspace_id, userId: user.id, sourceJob: 'generate_coaching_annotations',
     });
     const clean  = content.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
@@ -328,11 +331,12 @@ Return ONLY this JSON:
   };
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.3,
       maxTokens:   400,
-      modelName:   PRO_MODEL,
+      tier:        'quality',
+      workspaceId: user.workspace_id, userId: user.id, sourceJob: 'generate_multi_axis_scores',
     });
     const clean  = content.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
@@ -423,11 +427,12 @@ Return ONLY this JSON:
   };
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.3,
       maxTokens:   450,
-      modelName:   PRO_MODEL,
+      tier:        'quality',
+      workspaceId: user.workspace_id, userId: user.id, sourceJob: 'generate_multi_axis_scores_v3',
     });
     const clean  = content.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
@@ -519,11 +524,12 @@ Return ONLY this JSON:
 }`;
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.5,
       maxTokens:   700,
-      modelName:   PRO_MODEL,
+      tier:        'quality',
+      workspaceId: user.workspace_id, userId: user.id, sourceJob: 'generate_adaptive_curriculum',
     });
     const clean  = content.replace(/```json|```/g, '').trim();
     return JSON.parse(clean);
@@ -586,11 +592,12 @@ Return ONLY this JSON:
 }`;
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.55,
       maxTokens:   900,
-      modelName:   PRO_MODEL,
+      tier:        'quality',
+      workspaceId: user.workspace_id, userId: user.id, sourceJob: 'generate_playbook',
     });
     const clean  = content.replace(/```json|```/g, '').trim();
     return JSON.parse(clean);
@@ -633,11 +640,12 @@ Return ONLY this JSON:
 }`;
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.4,
       maxTokens:   500,
-      modelName:   PRO_MODEL,
+      tier:        'quality',
+      workspaceId: user.workspace_id, userId: user.id, sourceJob: 'generate_retry_comparison',
     });
     const clean  = content.replace(/```json|```/g, '').trim();
     return JSON.parse(clean);

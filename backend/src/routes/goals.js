@@ -4,8 +4,7 @@ import { asyncHandler }    from '../middleware/errorHandler.js';
 import { requirePermission, buildUserContext } from '../middleware/workspace.js';
 import { createLogger }    from '../utils/logger.js';
 import supabaseAdmin       from '../config/supabase.js';
-import { callWithFallback } from '../services/multiProvider.js';
-import { recordTokenUsage } from '../services/tokenTracker.js';
+import { callWithFallbackGroq } from '../services/multiProvider.js';
 import { getCache, setCache } from '../services/redis.js';
 import { backgroundQueue } from '../jobs/queues.js';
 import { BACKGROUND_JOB_TYPES, ACTIVITY_EVENTS } from '../config/constants.js';
@@ -85,8 +84,7 @@ router.post('/:goalId/notes', requirePermission('member'), asyncHandler(async (r
 
   let parsed = { coaching_response: 'Keep going!', progress_delta: null, needs_tip_card: false, tip_context: null };
   try {
-    const { content, tokens_in, tokens_out } = await callWithFallback({ systemPrompt: 'You are a performance coach. Return only valid JSON.', messages: [{ role: 'user', content: prompt }], temperature: 0.4, maxTokens: 200 });
-    await recordTokenUsage(userId, 'groq', tokens_in, tokens_out);
+    const { content } = await callWithFallbackGroq({ systemPrompt: 'You are a performance coach. Return only valid JSON.', messages: [{ role: 'user', content: prompt }], temperature: 0.4, maxTokens: 200, userId, workspaceId, sourceJob: 'goal_note_coaching' });
     parsed = JSON.parse(content.replace(/```json|```/g, '').trim());
   } catch (aiErr) { logError('goal note AI', aiErr, { userId, goalId }); }
 
@@ -142,8 +140,7 @@ router.get('/pipeline-insight', asyncHandler(async (req, res) => {
   const prompt = `Connect this seller's pipeline metrics to their active goals and give ONE high-leverage observation.\nProduct: ${userCtx.product_description || 'not specified'}\nActive goals: ${goals.map(g => `"${g.goal_text}" (${g.current_value || 0}/${g.target_value || '?'} ${g.target_unit || ''})`).join(', ')}\nPipeline: ${pipelineMetrics.replied_count || 0} replies, ${pipelineMetrics.call_demo_count || 0} demos, ${pipelineMetrics.closed_won_count || 0} wins\nReturn ONLY JSON: {"title":"short title","body":"2-3 specific sentences","action":"one concrete action or null"}`;
 
   try {
-    const { content, tokens_in, tokens_out } = await callWithFallback({ systemPrompt: 'You connect sales pipeline metrics to goals. Return only JSON.', messages: [{ role: 'user', content: prompt }], temperature: 0.4, maxTokens: 250 });
-    await recordTokenUsage(userId, 'groq', tokens_in, tokens_out);
+    const { content } = await callWithFallbackGroq({ systemPrompt: 'You connect sales pipeline metrics to goals. Return only JSON.', messages: [{ role: 'user', content: prompt }], temperature: 0.4, maxTokens: 250, userId, workspaceId, sourceJob: 'pipeline_insight' });
     const insight = JSON.parse(content.replace(/```json|```/g, '').trim());
     await setCache(cKey, insight, 24*60*60).catch(() => {});
     res.json({ insight, cached: false });

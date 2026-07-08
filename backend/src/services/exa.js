@@ -1,164 +1,150 @@
-// src/services/perplexity.js
+// src/services/exa.js
 // ============================================================
-// EXA SEARCH SERVICE — MIGRATED FROM PERPLEXITY
+// EXA SEARCH SERVICE
+// Replaces perplexity.js. The old file was functionally Exa already
+// (migrated from Perplexity) but kept Perplexity naming throughout,
+// which is exactly the kind of thing that confuses a future maintainer —
+// renamed cleanly here, no behavior carried over by accident.
 //
-// CHANGES:
-//  - Replaced Perplexity API client with Exa (exa-js)
-//  - callPerplexity() replaced with callExa() using neural search
-//  - parseSearchResults() updated: Exa returns { text } not { snippet }
-//  - buildSearchQueries() updated: removed site: operator (Exa uses includeDomains)
-//  - searchForChat() now uses Exa neural search instead of Perplexity chat completions
-//  - PERPLEXITY_AVAILABLE kept as variable name so opportunities.js needs no changes
-//  - All quota logic, Groq fallback, workspace refactor unchanged
+// Quota/usage logic has been extracted entirely into tokenTracker.js
+// (checkWorkspaceExaUsage, recordExaUsage) — this file no longer owns any
+// usage-tracking tables or RPCs directly. See migrations/001 for the
+// dropped legacy tables this replaces (perplexity_usage,
+// workspace_perplexity_usage, global_usage).
+//
+// CALL SITE CHANGES vs. the old perplexity.js (see CHANGES.md):
+//   - discoverOpportunities(userId, workspaceId, user)            — unchanged signature
+//   - searchForChat(message, systemContext, { workspaceId, userId, sourceJob }) — NEW required 3rd arg for usage tracking
+//   - checkPerplexityUsage / checkWorkspacePerplexityUsage / incrementUsage /
+//     incrementWorkspaceUsage — REMOVED. Use tokenTracker.checkWorkspaceExaUsage /
+//     tokenTracker.recordExaUsage directly.
+//
+// MULTI-KEY SUPPORT (added):
+//   EXA_API_KEY_1 … EXA_API_KEY_5      (checked in order)
+//   EXA_API_KEY                        (single-key fallback, no suffix)
+// This is intentionally a lighter version of multiProvider.js's key
+// rotation — one provider (Exa), no model discovery, no streaming.
+// A key that fails with a rate-limit/auth/server error is cooled down
+// in-memory for an hour and skipped; the next key in the pool is tried.
+// This is NOT a provider fallback (the Groq fallback below is unchanged) —
+// it's just resilience across multiple Exa accounts/keys.
 // ============================================================
 
 import Exa from 'exa-js';
 import { parseJSONArray } from '../utils/parser.js';
 import {
-  PERPLEXITY_LIMITS,
-  PERPLEXITY_GLOBAL_DAILY_CAP,
-  PERPLEXITY_COST_PER_CALL_CENTS,
   OPPORTUNITIES_PER_RUN,
   SUPPORTED_PLATFORMS,
-  ARCHETYPE_PLATFORM_DEFAULTS,
-  WORKSPACE_PERPLEXITY_LIMITS,
 } from '../config/constants.js';
-import supabaseAdmin from '../config/supabase.js';
+import { callWithFallbackGroq } from './multiProvider.js';
+import { checkWorkspaceExaUsage, recordExaUsage } from './tokenTracker.js';
 
-// ── API key availability ──────────────────────────────────────
-const EXA_API_KEY          = process.env.EXA_API_KEY;
-const PERPLEXITY_AVAILABLE = !!(EXA_API_KEY?.trim()); // name kept so other files need no changes
+// ──────────────────────────────────────────────────────────────
+// EXA KEY POOL
+// ──────────────────────────────────────────────────────────────
+const EXA_ENV_PREFIX = 'EXA_API_KEY';
+const EXA_MAX_KEYS   = 5;
 
-if (!PERPLEXITY_AVAILABLE) {
-  console.warn('[Exa] EXA_API_KEY not set — all calls will use Groq fallback.');
+const buildExaKeyPool = () => {
+  const keys = [];
+  for (let i = 1; i <= EXA_MAX_KEYS; i++) {
+    const key = process.env[`${EXA_ENV_PREFIX}_${i}`];
+    if (key?.trim()) keys.push({ key: key.trim(), index: i });
+  }
+  // Single-key fallback (no suffix)
+  if (keys.length === 0 && process.env[EXA_ENV_PREFIX]?.trim()) {
+    keys.push({ key: process.env[EXA_ENV_PREFIX].trim(), index: 0 });
+  }
+  if (keys.length > 0) {
+    console.log(`[Exa] ${keys.length} key(s) loaded`);
+  }
+  return keys;
+};
+
+const EXA_KEY_POOL  = buildExaKeyPool();
+const EXA_AVAILABLE = EXA_KEY_POOL.length > 0;
+
+if (!EXA_AVAILABLE) {
+  console.warn('[Exa] No EXA_API_KEY(s) set — all calls will use Groq fallback.');
 }
 
-const exaClient = PERPLEXITY_AVAILABLE ? new Exa(EXA_API_KEY) : null;
-
-// ──────────────────────────────────────────────────────────────
-// WORKSPACE QUOTA CHECK
-// Checks the pooled workspace-level daily call count.
-// Used by opportunity discovery and intel lookups.
-// Plan limits are sourced from constants.js (WORKSPACE_PERPLEXITY_LIMITS)
-// to ensure a single source of truth — no local copies.
-// ──────────────────────────────────────────────────────────────
-export const checkWorkspacePerplexityUsage = async (workspaceId, plan = 'free') => {
-  const today = new Date().toISOString().split('T')[0];
-  const limit = WORKSPACE_PERPLEXITY_LIMITS[plan] ?? WORKSPACE_PERPLEXITY_LIMITS.free;
-
-  // Check global daily cap first
-  const { data: globalUsage } = await supabaseAdmin
-    .from('global_usage').select('perplexity_calls').eq('date', today).single();
-
-  if ((globalUsage?.perplexity_calls || 0) >= PERPLEXITY_GLOBAL_DAILY_CAP) {
-    return { allowed: false, reason: 'global_cap_reached', used: globalUsage.perplexity_calls, limit };
+// key index -> Exa client, built lazily/once per key
+const clientCache = new Map();
+const getClientForKey = (keyEntry) => {
+  if (!clientCache.has(keyEntry.index)) {
+    clientCache.set(keyEntry.index, new Exa(keyEntry.key));
   }
-
-  // Check workspace-level usage
-  const { data: wsUsage } = await supabaseAdmin
-    .from('workspace_perplexity_usage')
-    .select('call_count').eq('workspace_id', workspaceId).eq('date', today).single();
-
-  const used = wsUsage?.call_count || 0;
-
-  if (used >= limit) {
-    return { allowed: false, reason: 'workspace_limit_reached', used, limit };
-  }
-
-  return { allowed: true, used, limit };
+  return clientCache.get(keyEntry.index);
 };
 
 // ──────────────────────────────────────────────────────────────
-// INCREMENT WORKSPACE USAGE (atomic)
+// KEY COOLDOWN (in-memory) — mirrors multiProvider.js's approach,
+// scoped to just Exa keys.
 // ──────────────────────────────────────────────────────────────
-export const incrementWorkspaceUsage = async (workspaceId) => {
-  const today = new Date().toISOString().split('T')[0];
+const KEY_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
+const keyCooldowns    = new Map();
 
-  try {
-    await supabaseAdmin
-      .rpc('increment_workspace_perplexity_usage', {
-        p_workspace_id: workspaceId,
-        p_date:         today,
-      });
-  } catch (rpcErr) {
-    console.warn('[Exa] increment_workspace_perplexity_usage RPC not found, using fallback:', rpcErr.message);
+const markKeyFailed = (keyIndex) => {
+  const existing = keyCooldowns.get(keyIndex) || { failCount: 0 };
+  keyCooldowns.set(keyIndex, { failedAt: Date.now(), failCount: existing.failCount + 1 });
+  console.warn(`[Exa] key #${keyIndex} cooling down (fail #${existing.failCount + 1}) — retrying in 1h`);
+};
+
+const isKeyCooling = (keyIndex) => {
+  const cd = keyCooldowns.get(keyIndex);
+  if (!cd) return false;
+  if (Date.now() - cd.failedAt >= KEY_COOLDOWN_MS) {
+    keyCooldowns.delete(keyIndex);
+    console.log(`[Exa] key #${keyIndex} cooldown expired — back in rotation`);
+    return false;
+  }
+  return true;
+};
+
+const RATE_LIMIT_SIGNALS = ['rate_limit', 'rate limit', '429', 'too many requests', 'quota exceeded'];
+const AUTH_ERROR_SIGNALS = ['401', 'unauthorized', 'invalid api key', 'invalid_api_key', 'authentication'];
+const UNAVAIL_SIGNALS    = ['503', '502', '500', 'unavailable', 'overloaded', 'server error'];
+
+const matchesAny = (msg, signals) => signals.some(s => msg.includes(s));
+
+const shouldCoolKey = (err) => {
+  const msg = (err?.message || '').toLowerCase();
+  return matchesAny(msg, RATE_LIMIT_SIGNALS) || matchesAny(msg, AUTH_ERROR_SIGNALS) || matchesAny(msg, UNAVAIL_SIGNALS);
+};
+
+const getHealthyKeys = () => EXA_KEY_POOL.filter(k => !isKeyCooling(k.index));
+
+// ──────────────────────────────────────────────────────────────
+// runWithExaKeys — tries `fn(client)` against each healthy key in turn,
+// cooling down any key that fails with a rate-limit/auth/server error,
+// and moving on to the next key. Throws EXA_UNAVAILABLE if no keys are
+// configured/healthy, or the last error if every key was tried and failed.
+// ──────────────────────────────────────────────────────────────
+const runWithExaKeys = async (fn) => {
+  const healthy = getHealthyKeys();
+  if (healthy.length === 0) {
+    throw new Error('EXA_UNAVAILABLE: no Exa API keys configured or all keys cooling down');
+  }
+
+  let lastError;
+  for (const keyEntry of healthy) {
     try {
-      const { data: existing } = await supabaseAdmin
-        .from('workspace_perplexity_usage')
-        .select('call_count').eq('workspace_id', workspaceId).eq('date', today).maybeSingle();
-      await supabaseAdmin.from('workspace_perplexity_usage').upsert(
-        { workspace_id: workspaceId, date: today, call_count: (existing?.call_count || 0) + 1 },
-        { onConflict: 'workspace_id,date', ignoreDuplicates: false }
-      );
-    } catch (_) {}
+      const client = getClientForKey(keyEntry);
+      return await fn(client);
+    } catch (err) {
+      lastError = err;
+      console.warn(`[Exa] key #${keyEntry.index} failed: ${err.message}`);
+      if (shouldCoolKey(err)) markKeyFailed(keyEntry.index);
+      // try the next key regardless of error type — a bad key shouldn't
+      // block the whole search when another key is available
+    }
   }
 
-  // Also increment global counter
-  try {
-    await supabaseAdmin.rpc('increment_perplexity_global_usage', { p_date: today });
-  } catch (_) {}
+  throw lastError || new Error('EXA_UNAVAILABLE: all Exa keys exhausted');
 };
 
 // ──────────────────────────────────────────────────────────────
-// PER-USER INCREMENT (kept for email digest individual quota)
-// ──────────────────────────────────────────────────────────────
-export const incrementUsage = async (userId) => {
-  const today = new Date().toISOString().split('T')[0];
-
-  try {
-    await supabaseAdmin
-      .rpc('increment_perplexity_user_usage', { p_user_id: userId, p_date: today });
-  } catch (rpcErr) {
-    console.warn('[Exa] increment_perplexity_user_usage RPC not found, using upsert fallback:', rpcErr.message);
-    try {
-      const { data: existing } = await supabaseAdmin
-        .from('perplexity_usage').select('call_count').eq('user_id', userId).eq('date', today).maybeSingle();
-      await supabaseAdmin.from('perplexity_usage').upsert(
-        { user_id: userId, date: today, call_count: (existing?.call_count || 0) + 1 },
-        { onConflict: 'user_id,date', ignoreDuplicates: false }
-      );
-    } catch (_) {}
-  }
-
-  try {
-    await supabaseAdmin.rpc('increment_perplexity_global_usage', { p_date: today });
-  } catch (rpcErr) {
-    console.warn('[Exa] increment_perplexity_global_usage RPC not found, using upsert fallback:', rpcErr.message);
-    try {
-      const { data: existingGlobal } = await supabaseAdmin
-        .from('global_usage').select('perplexity_calls').eq('date', today).maybeSingle();
-      await supabaseAdmin.from('global_usage').upsert(
-        { date: today, perplexity_calls: (existingGlobal?.perplexity_calls || 0) + 1 },
-        { onConflict: 'date', ignoreDuplicates: false }
-      );
-    } catch (_) {}
-  }
-};
-
-// ──────────────────────────────────────────────────────────────
-// PER-USER QUOTA CHECK (kept for email digest)
-// ──────────────────────────────────────────────────────────────
-export const checkPerplexityUsage = async (userId, tier = 'free') => {
-  const today = new Date().toISOString().split('T')[0];
-  const limit = PERPLEXITY_LIMITS[tier] ?? PERPLEXITY_LIMITS.free;
-
-  const { data: globalUsage } = await supabaseAdmin
-    .from('global_usage').select('perplexity_calls').eq('date', today).single();
-  if ((globalUsage?.perplexity_calls || 0) >= PERPLEXITY_GLOBAL_DAILY_CAP) {
-    return { allowed: false, reason: 'global_cap_reached', used: globalUsage.perplexity_calls, limit };
-  }
-
-  const { data: userUsage } = await supabaseAdmin
-    .from('perplexity_usage').select('call_count').eq('user_id', userId).eq('date', today).single();
-  const used = userUsage?.call_count || 0;
-  if (used >= limit) {
-    return { allowed: false, reason: 'user_limit_reached', used, limit };
-  }
-  return { allowed: true, used, limit };
-};
-
-// ──────────────────────────────────────────────────────────────
-// SMART COST ROUTER (unchanged — reads from user context object)
+// SMART COST ROUTER — decides whether a search is worth the spend
 // ──────────────────────────────────────────────────────────────
 export const needsRealTimeSearch = async (user) => {
   if (!user.product_description || user.product_description.length < 30) {
@@ -167,11 +153,10 @@ export const needsRealTimeSearch = async (user) => {
   if (!user.target_audience || user.target_audience.length < 20) {
     return { needed: false, reason: 'no_target_audience' };
   }
-  if (!PERPLEXITY_AVAILABLE) {
+  if (!EXA_AVAILABLE) {
     return { needed: false, reason: 'exa_not_configured' };
   }
 
-  const { callGroq } = await import('./groq.js');
   const prompt = `You are deciding whether to make an expensive real-time web search API call.
 Analyze this user profile and decide: does a live search right now have a GOOD CHANCE of finding specific, relevant people expressing the problem this product solves?
 Product: "${user.product_description}"
@@ -186,7 +171,11 @@ OR
 {"needed": false, "reason": "one short sentence why not"}`;
 
   try {
-    const { content } = await callGroq({ messages: [{ role: 'user', content: prompt }], temperature: 0.1, maxTokens: 500 });
+    const { content } = await callWithFallbackGroq({
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.1, maxTokens: 200, tier: 'fast',
+      workspaceId: user.workspace_id, userId: user.id, sourceJob: 'needs_real_time_search',
+    });
     const clean  = content.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
     if (typeof parsed.needed === 'boolean') return parsed;
@@ -198,7 +187,7 @@ OR
 };
 
 // ──────────────────────────────────────────────────────────────
-// PLATFORM DETECTION (unchanged)
+// PLATFORM DETECTION
 // ──────────────────────────────────────────────────────────────
 const PLATFORM_URL_PATTERNS = [
   { platform: SUPPORTED_PLATFORMS.REDDIT,       pattern: /reddit\.com/i },
@@ -220,48 +209,34 @@ const detectPlatformFromUrl = (url) => {
 };
 
 // ──────────────────────────────────────────────────────────────
-// CORE EXA SEARCH — replaces callPerplexity()
-// Uses neural search to find semantically relevant posts/pages
-// with direct URLs — exactly what Perplexity couldn't do.
+// CORE EXA SEARCH
 // ──────────────────────────────────────────────────────────────
 const callExa = async (query, domains = []) => {
-  if (!exaClient) throw new Error('PERPLEXITY_UNAVAILABLE: Exa API key not configured');
-
-  const result = await exaClient.searchAndContents(query, {
+  const result = await runWithExaKeys((client) => client.searchAndContents(query, {
     type: 'neural',
     numResults: 10,
     ...(domains.length > 0 && { includeDomains: domains }),
     text: { maxCharacters: 600 },
     useAutoprompt: true,
-  });
-
+  }));
   return { results: result.results || [] };
 };
 
-// ──────────────────────────────────────────────────────────────
-// PARSE EXA RESULTS — updated from Perplexity's { snippet } to Exa's { text }
-// ──────────────────────────────────────────────────────────────
-const parseSearchResults = (results) => {
-  return (results || [])
-    .filter(r => r?.url && r?.text)
-    .map(r => ({
-      source_url:     r.url,
-      target_context: r.text?.slice(0, 600) || '',
-      target_name:    null,
-      platform:       detectPlatformFromUrl(r.url),
-    }))
-    .filter(r => r.target_context.length > 30);
-};
+const parseSearchResults = (results) => (results || [])
+  .filter(r => r?.url && r?.text)
+  .map(r => ({
+    source_url:     r.url,
+    target_context: r.text?.slice(0, 600) || '',
+    target_name:    null,
+    platform:       detectPlatformFromUrl(r.url),
+  }))
+  .filter(r => r.target_context.length > 30);
 
-// ──────────────────────────────────────────────────────────────
-// BUILD SEARCH QUERIES — updated for Exa (no site: operator needed,
-// domains passed as includeDomains directly to callExa)
-// ──────────────────────────────────────────────────────────────
 const buildSearchQueries = (user) => {
   const product    = user.product_description?.slice(0, 100) || '';
-  const audience   = user.target_audience?.slice(0, 80)      || '';
-  const icpTrigger = user.voice_profile?.icp_trigger?.slice(0, 80) || '';
-  const platforms  = (user.preferred_platforms || ['reddit']).slice(0, 2);
+  const audience    = user.target_audience?.slice(0, 80)      || '';
+  const icpTrigger  = user.voice_profile?.icp_trigger?.slice(0, 80) || '';
+  const platforms   = (user.preferred_platforms || ['reddit']).slice(0, 2);
 
   return platforms.map(p => {
     const platformDomains = {
@@ -271,22 +246,15 @@ const buildSearchQueries = (user) => {
       indiehackers: ['indiehackers.com'],
       hackernews:   ['news.ycombinator.com'],
     };
-
-    // Clean query — no site: operator, Exa handles domain filtering natively
-    const query = [
-      icpTrigger || audience,
-      product.slice(0, 50),
-    ].filter(Boolean).join(' ');
-
+    const query = [icpTrigger || audience, product.slice(0, 50)].filter(Boolean).join(' ');
     return { query, domains: platformDomains[p] || [] };
   });
 };
 
 // ──────────────────────────────────────────────────────────────
-// GROQ FALLBACK (unchanged — reads from user context)
+// GROQ FALLBACK — practice examples when Exa is unavailable/over quota
 // ──────────────────────────────────────────────────────────────
 const searchWithGroqFallback = async (user) => {
-  const { callGroq } = await import('./groq.js');
   const platforms = (user.preferred_platforms || ['reddit']).slice(0, 3);
 
   const prompt = `Generate ${OPPORTUNITIES_PER_RUN} realistic practice examples of people online who would genuinely benefit from: "${user.product_description}".
@@ -302,12 +270,16 @@ Return ONLY a JSON array:
 Make contexts feel real — include specific details, realistic frustrations, and platform-appropriate language.`;
 
   try {
-    const { content } = await callGroq({ messages: [{ role: 'user', content: prompt }], temperature: 0.75, maxTokens: 900 });
+    const { content } = await callWithFallbackGroq({
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.75, maxTokens: 900, tier: 'quality',
+      workspaceId: user.workspace_id, userId: user.id, sourceJob: 'opportunity_fetch_fallback',
+    });
     const examples = parseJSONArray(content, []);
     return {
       opportunities: examples.map(e => ({ ...e, is_example: true, prepared_message: null })),
       model_used:    'groq_fallback',
-      notice: PERPLEXITY_AVAILABLE
+      notice: EXA_AVAILABLE
         ? "Today's live search is used up. These are practice examples — not real people. Real leads refresh at midnight."
         : "Live search is not active. These are practice examples, not real leads",
       is_fallback: true,
@@ -320,23 +292,16 @@ Make contexts feel real — include specific details, realistic frustrations, an
 
 // ──────────────────────────────────────────────────────────────
 // MAIN EXPORT — discoverOpportunities
-// WORKSPACE REFACTOR: now accepts workspaceId, checks workspace quota
 // ──────────────────────────────────────────────────────────────
 export const discoverOpportunities = async (userId, workspaceId, user) => {
-  if (!PERPLEXITY_AVAILABLE) {
-    return await searchWithGroqFallback(user);
-  }
+  if (!EXA_AVAILABLE) return await searchWithGroqFallback(user);
 
-  // Workspace-level quota check (Option A: pooled)
-  const workspacePlan = user.tier || 'free';
-  const usageCheck    = await checkWorkspacePerplexityUsage(workspaceId, workspacePlan);
-
+  const usageCheck = await checkWorkspaceExaUsage(workspaceId, user.tier || 'free');
   if (!usageCheck.allowed) {
     console.log(`[Exa] Workspace limit hit for ${workspaceId} (${usageCheck.reason}), falling back to Groq`);
     return await searchWithGroqFallback(user);
   }
 
-  // Smart cost router
   const routerDecision = await needsRealTimeSearch(user);
   if (!routerDecision.needed) {
     console.log(`[SmartRouter] Skipping Exa for workspace ${workspaceId}: ${routerDecision.reason}`);
@@ -351,16 +316,12 @@ export const discoverOpportunities = async (userId, workspaceId, user) => {
     for (const { query, domains } of queryConfigs) {
       const { results } = await callExa(query, domains);
       for (const r of results) {
-        if (r?.url && !seen.has(r.url)) {
-          seen.add(r.url);
-          allResults.push(r);
-        }
+        if (r?.url && !seen.has(r.url)) { seen.add(r.url); allResults.push(r); }
       }
       if (allResults.length >= 10) break;
     }
 
-    // Increment workspace-level usage
-    await incrementWorkspaceUsage(workspaceId);
+    await recordExaUsage({ workspaceId, userId, creditsUsed: queryConfigs.length, sourceJob: 'opportunity_fetch' });
 
     const rawOpportunities = parseSearchResults(allResults);
     console.log(`[Exa] ${rawOpportunities.length} unique opportunities from ${queryConfigs.length} queries for workspace ${workspaceId}`);
@@ -385,12 +346,11 @@ export const discoverOpportunities = async (userId, workspaceId, user) => {
 };
 
 // ──────────────────────────────────────────────────────────────
-// CHAT SEARCH ROUTER (unchanged)
+// CHAT SEARCH ROUTER
 // ──────────────────────────────────────────────────────────────
-export const needsChatSearch = async (message) => {
-  if (!PERPLEXITY_AVAILABLE) return { needs_search: false, reason: 'exa_not_configured' };
+export const needsChatSearch = async (message, { workspaceId, userId } = {}) => {
+  if (!EXA_AVAILABLE) return { needs_search: false, reason: 'exa_not_configured' };
 
-  const { callGroq: cg } = await import('./groq.js');
   const prompt = `You decide if a user's question needs a real-time web search to answer accurately.
 Question: "${message.slice(0, 400)}"
 Answer ONLY with this JSON (no markdown):
@@ -401,7 +361,11 @@ Search IS needed for: current news, recent events, today's prices/data, "latest"
 Search is NOT needed for: sales strategy advice, coaching, product feedback, how-to questions, writing help, explaining concepts.`;
 
   try {
-    const { content } = await cg({ messages: [{ role: 'user', content: prompt }], temperature: 0.1, maxTokens: 60 });
+    const { content } = await callWithFallbackGroq({
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.1, maxTokens: 100, tier: 'fast',
+      workspaceId, userId, sourceJob: 'needs_chat_search',
+    });
     const parsed = JSON.parse(content.replace(/```json|```/g, '').trim());
     if (typeof parsed.needs_search === 'boolean') return parsed;
     return { needs_search: false, reason: 'parse_fallback' };
@@ -412,29 +376,26 @@ Search is NOT needed for: sales strategy advice, coaching, product feedback, how
 };
 
 // ──────────────────────────────────────────────────────────────
-// SEARCH FOR CHAT — now uses Exa neural search instead of
-// Perplexity chat completions. Returns content + citations.
-// FIX MED-09: systemContext is incorporated into the search query
+// SEARCH FOR CHAT — used by emailDigestJob.js (market intel) and
+// messageQueueWorker.js (real-time search trigger during practice replies).
+// workspaceId/userId are required for usage tracking; pass sourceJob to
+// label where the spend came from in ai_usage_events.
 // ──────────────────────────────────────────────────────────────
-export const searchForChat = async (message, systemContext = '') => {
-  if (!PERPLEXITY_AVAILABLE || !exaClient) {
-    throw new Error('PERPLEXITY_UNAVAILABLE: Exa API key not configured');
+export const searchForChat = async (message, systemContext = '', { workspaceId, userId, sourceJob = 'search_for_chat' } = {}) => {
+  if (!EXA_AVAILABLE) {
+    throw new Error('EXA_UNAVAILABLE: no Exa API keys configured');
   }
 
-  // FIX MED-09: Enhance search query with systemContext if provided
-  let searchQuery = message;
-  if (systemContext) {
-    // Extract key context from system prompt (first 200 chars)
-    const contextHint = systemContext;
-    searchQuery = `${message} Context: ${contextHint}`;
-  }
+  const searchQuery = systemContext ? `${message} Context: ${systemContext}` : message;
 
-  const result = await exaClient.searchAndContents(searchQuery, {
+  const result = await runWithExaKeys((client) => client.searchAndContents(searchQuery, {
     type: 'neural',
     numResults: 5,
     text: { maxCharacters: 1000 },
     useAutoprompt: true,
-  });
+  }));
+
+  await recordExaUsage({ workspaceId, userId, creditsUsed: 1, sourceJob });
 
   const results   = result.results || [];
   const content   = results.map(r => `[${r.title || r.url}]\n${r.text || ''}`).join('\n\n');
@@ -443,4 +404,4 @@ export const searchForChat = async (message, systemContext = '') => {
   return { content, citations };
 };
 
-export default { discoverOpportunities, checkWorkspacePerplexityUsage, checkPerplexityUsage, needsRealTimeSearch };
+export default { discoverOpportunities, needsRealTimeSearch, needsChatSearch, searchForChat };

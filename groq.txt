@@ -1,0 +1,3142 @@
+// src/services/groq.js
+// ============================================================
+// GROQ AI SERVICE — Full coaching intelligence layer
+// Changes from audit:
+//  - FIX: Removed hardcoded coaching tip for 'interested' scenario
+//  - NEW: generateSessionDebrief() — post-session full analysis
+//  - NEW: evaluateMessageStrength() — probabilistic ghost revival
+//  - NEW: seedMemoryFromOnboarding() — seeds day-1 memory
+//  - NEW: generateSampleOutreachMessage() — onboarding wow moment
+//  - IMPROVED: generatePracticeProspectReply() — injects ICP persona + difficulty
+//  - IMPROVED: getCoachResponse() — injects main_objection, objection_reframe, mood, streaks
+//  - IMPROVED: generateDailyTips() — uses mood_score for tone adaptation
+//  - IMPROVED: generateCheckInResponse() — mood + goal cross-reference
+// ============================================================
+
+import { parseTextResponse, parseJSONObject, parseJSONArray, validateAndFill } from '../utils/parser.js';
+import supabaseAdmin from '../config/supabase.js';
+
+const GROQ_BASE_URL = 'https://api.groq.com/openai/v1/chat/completions';
+
+export const PRIMARY_MODEL = process.env.GROQ_PRIMARY_MODEL || 'llama-3.1-8b-instant';
+export const PRO_MODEL     = process.env.GROQ_PRO_MODEL     || 'llama-3.3-70b-versatile';
+export const FLASH_MODEL   = process.env.GROQ_FLASH_MODEL   || 'llama-3.1-8b-instant';
+
+const getApiKey = () => {
+  const key = process.env.GROQ_API_KEY;
+  if (!key) throw new Error('GROQ_API_KEY is not set in .env');
+  return key;
+};
+
+// ──────────────────────────────────────────
+// CORE: Non-streaming Groq call
+// ──────────────────────────────────────────
+export const callGroq = async ({
+  messages,
+  systemPrompt = '',
+  temperature  = 0.7,
+  maxTokens    = 1200,
+  modelName    = PRIMARY_MODEL,
+  _apiKey      = null,
+}) => {
+  const apiKey = _apiKey || getApiKey();
+
+  const body = {
+    model:      modelName,
+    temperature,
+    max_tokens: maxTokens,
+    messages: [
+      ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
+      ...messages.map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content || '' }))
+    ]
+  };
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const res = await fetch(GROQ_BASE_URL, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        body:    JSON.stringify(body)
+      });
+
+      if (!res.ok) {
+        const err    = await res.json().catch(() => ({}));
+        const status = res.status;
+        if (status === 401 || status === 403) throw new Error('GROQ_AUTH_ERROR: Invalid API key');
+        if (status === 429) throw new Error(`GROQ_RATE_LIMIT: ${err?.error?.message || 'Too many requests'}`);
+        if (status === 400) throw new Error(`GROQ_BAD_REQUEST: ${err?.error?.message || 'Bad request'}`);
+        throw new Error(`GROQ_UNAVAILABLE: HTTP ${status} — ${err?.error?.message || 'Unknown error'}`);
+      }
+
+      const data    = await res.json();
+      const content = data.choices?.[0]?.message?.content || '';
+      const usage   = data.usage || {};
+
+      return {
+        content,
+        tokens_in:    usage.prompt_tokens     || 0,
+        tokens_out:   usage.completion_tokens || 0,
+        tokens_total: usage.total_tokens      || 0,
+        model_used:   modelName
+      };
+    } catch (err) {
+      if (err.message.startsWith('GROQ_AUTH') || err.message.startsWith('GROQ_BAD')) throw err;
+      if (attempt === 3) throw new Error(`GROQ_UNAVAILABLE: ${err.message}`);
+      await new Promise(r => setTimeout(r, attempt * 1500));
+    }
+  }
+};
+
+export const callGemini = callGroq;
+
+// ──────────────────────────────────────────
+// CORE: Streaming Groq call
+// ──────────────────────────────────────────
+export const streamGroq = async ({
+  messages,
+  systemPrompt = '',
+  temperature  = 0.7,
+  maxTokens    = 1200,
+  modelName    = PRIMARY_MODEL,
+  _apiKey      = null,
+  onToken,
+  onComplete,
+  onError
+}) => {
+  try {
+    const apiKey = _apiKey || getApiKey();
+
+    const body = {
+      model:      modelName,
+      temperature,
+      max_tokens: maxTokens,
+      stream:     true,
+      messages: [
+        ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
+        ...messages.map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content || '' }))
+      ]
+    };
+
+    const res = await fetch(GROQ_BASE_URL, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+      body:    JSON.stringify(body)
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(`GROQ_UNAVAILABLE: HTTP ${res.status} — ${err?.error?.message || 'stream failed'}`);
+    }
+
+    const reader  = res.body.getReader();
+    const decoder = new TextDecoder();
+    let fullContent = '';
+    let tokensIn = 0, tokensOut = 0;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const chunk = decoder.decode(value, { stream: true });
+      const lines = chunk.split('\n').filter(l => l.startsWith('data: '));
+
+      for (const line of lines) {
+        const jsonStr = line.slice(6).trim();
+        if (jsonStr === '[DONE]') continue;
+        try {
+          const parsed = JSON.parse(jsonStr);
+          const token  = parsed.choices?.[0]?.delta?.content || '';
+          if (token) { fullContent += token; onToken?.(token); }
+          if (parsed.x_groq?.usage) {
+            tokensIn  = parsed.x_groq.usage.prompt_tokens     || 0;
+            tokensOut = parsed.x_groq.usage.completion_tokens || 0;
+          }
+        } catch { /* skip malformed chunks */ }
+      }
+    }
+
+    onComplete?.(fullContent, {
+      tokens_in:  tokensIn,
+      tokens_out: tokensOut || Math.ceil(fullContent.length / 4),
+      model_used: modelName
+    });
+  } catch (err) {
+    onError?.(err);
+  }
+};
+
+export const streamGemini = streamGroq;
+
+// ──────────────────────────────────────────
+// PREMIUM SYSTEM PROMPTS
+// ──────────────────────────────────────────
+const SYSTEM_PROMPTS = {
+
+  MESSAGE_GENERATOR: `You are an elite outreach copywriter. You've helped hundreds of people get replies from cold contacts — not because you use tricks, but because you write like a real human who actually cares about the other person's situation.
+
+Your principles:
+- The best message feels like it came from someone who actually knows the recipient
+- Lead with their world, not your offer
+- Specificity is everything — vague claims get ignored
+- One idea per message. One ask. No more.
+- Write how people actually talk, not how marketers write
+
+You write messages that make the recipient think "wait, how do they know exactly what I'm dealing with?"`,
+
+  SALES_COACH: `You are a battle-tested outreach mentor. You've helped hundreds of people — founders, freelancers, creators, professionals — actually get replies and build real conversations from cold outreach.
+
+How you coach:
+- Talk like a real person. Contractions, direct language, zero corporate fluff.
+- Be specific to THIS person's situation — no generic advice that could apply to anyone.
+- When something didn't work, say it directly. Specificity over diplomacy.
+- When something worked, name exactly what it was and why it landed.
+- You've been ignored, rejected, and ghosted thousands of times. You normalize it without dismissing it.
+- One clear next action — not five. One.
+
+You sound like a smart, experienced friend who actually knows this stuff cold.`,
+
+  GROWTH_STRATEGIST: `You are Clutch — an AI co-founder companion.
+You know your user's business, goals, and context intimately.
+You are not a generic assistant. You are the smartest person in the room who has read everything about this person's situation and has one job: help them make real progress today.
+
+Your personality:
+- Direct and specific — you never give advice that could apply to 100 other people
+- Warm but not soft — you push people to act, not just think
+- You celebrate concrete progress, not effort alone
+- You ask sharp follow-up questions that reveal what's actually holding someone back
+- You give ONE clear next action, not a list of ten options
+
+You are the difference between a user who spins their wheels and one who makes real moves.`,
+
+  PRACTICE_PROSPECT: `You are a real person. Not an AI. Not a roleplay bot. A real human with a real life, real frustrations, and limited attention.
+
+HOW YOU WRITE:
+- Casual, natural language. Contractions, informal phrasing, sometimes trailing off.
+- 1–3 sentences. Rarely more. Sometimes just a single line.
+- No bullet points. No headers. No structured lists. Just how a real person messages.
+- No formal sign-offs. Ever. Not even "Thanks."
+- Typos and autocorrect errors are okay — real people make them.
+- If skeptical, SHOW it through your words — don't announce your emotional state.
+- If curious, ask ONE specific question — never say "tell me more."
+
+WHAT MAKES YOU REPLY VS IGNORE:
+- Generic copy-paste pitch: brush-off or silence.
+- Specific reference to your actual situation: you lean in slightly.
+- Vague claims ("saves time," "boosts ROI"): eye-roll energy.
+- Concrete relatable result: genuine interest.
+
+You are the most realistic human contact simulation possible. Honor your persona details exactly. Stay in character completely — no meta-commentary, no helpful explanations, no AI-like structure.`,
+
+  // ── PREMIUM ONBOARDING STRATEGIST ──────────────────────────────────────────
+  ONBOARDING_STRATEGIST: `You are a world-class go-to-market strategist onboarding a founder onto FounderSales — an AI-powered outreach platform.
+
+Your role: Extract the raw, specific, sometimes uncomfortable truths that make this founder's outreach feel HUMAN instead of AI-generated.
+
+Your interrogation philosophy:
+- Generic answers produce generic outreach. You do not accept vague answers.
+- The best positioning data is always hiding in a founder's embarrassing early wins, their most satisfying customer story, or the thing competitors won't say.
+- You ask questions like a seasoned investor who has heard 1,000 pitches — you know the difference between a real differentiator and a polished nothing.
+- Every question must earn its place. No boilerplate. No "tell me more about your product."
+- You care about specificity above all: names, numbers, timelines, exact trigger moments.
+
+The goal of your questions: give the AI enough raw material to write cold messages that feel like they were written by someone who *actually knows* the founder — not by software.`
+};
+
+// ──────────────────────────────────────────
+// ONBOARDING — BURST 1: The Foundation
+// ──────────────────────────────────────────
+export const generateBurst1Questions = async (basicInfo) => {
+  const bioContext = basicInfo.bio
+    ? `\nFounder backstory: ${basicInfo.bio}`
+    : '';
+
+  const industryContext = basicInfo.industry_deep_dive
+    ? `\nIndustry-specific insight they shared: ${basicInfo.industry_deep_dive}`
+    : '';
+
+  const prompt = `${SYSTEM_PROMPTS.ONBOARDING_STRATEGIST}
+
+A founder just told you this about their business:
+Product: ${basicInfo.product_description}
+Target customer: ${basicInfo.target_audience}
+Industry: ${basicInfo.industry || 'not specified'}
+Role: ${basicInfo.role || 'founder'}${bioContext}${industryContext}
+
+BURST 1 — THE FOUNDATION (Product & Proof)
+Your job: Ask exactly 3 questions that uncover their REAL competitive edge and their most credible proof points.
+
+Focus areas for these 3 questions:
+1. Their single sharpest differentiator — not marketing language. The thing a happy customer would text a colleague about.
+2. Their best concrete result — with the messiest, most specific details they can give (company type, timeframe, number).
+3. What makes a prospect *ready right now* — the exact trigger event or situation that makes them the perfect customer today, not in 6 months.
+
+Rules for these questions:
+- Make each question feel like it came from a strategist who actually read their answers above — reference specific details when possible
+- Use plain, direct language. No MBA jargon.
+- The question should be impossible to answer generically. Force specificity.
+- Each question should be 1-2 sentences max.
+- If they mentioned numbers (churn rate, ROAS, etc.) in the industry context, use that as a jumping-off point for a sharper angle.
+
+Return ONLY a JSON array of exactly 3 question strings. No markdown, no explanation.
+Example: ["Question 1?", "Question 2?", "Question 3?"]`;
+
+  const FALLBACK = [
+    "Walk me through the last time a customer said 'this is exactly what I needed' — what was their specific situation the week before they found you?",
+    "Give me your best customer result with actual numbers — company size, timeframe, and the metric that moved.",
+    "What's happening in a prospect's business or life in the 30 days right before they become a perfect customer for you?"
+  ];
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.7,
+      maxTokens:   500,
+      modelName:   PRO_MODEL
+    });
+
+    const questions = parseJSONArray(content, FALLBACK);
+    const valid = questions.filter(q => typeof q === 'string' && q.length > 10);
+    if (valid.length >= 3) {
+      console.log('[Groq] generateBurst1Questions: success');
+      return { questions: valid, source: 'ai' };
+    }
+
+    console.warn('[Groq] generateBurst1Questions: too few valid, using fallback.');
+    return { questions: FALLBACK, source: 'fallback' };
+  } catch (err) {
+    console.error('[Groq] generateBurst1Questions FAILED:', err.message);
+    return { questions: FALLBACK, source: 'fallback' };
+  }
+};
+
+// ──────────────────────────────────────────
+// ONBOARDING — BURST 2 & 3: Contextual Next Questions
+// ──────────────────────────────────────────
+export const generateNextBurst = async ({ burst_number, previous_answers, basic_info }) => {
+
+  const answersText = Object.entries(previous_answers)
+    .map(([q, a]) => `Q: ${q}\nA: ${a}`)
+    .join('\n\n');
+
+  const isBurst2 = burst_number === 2;
+
+  const burstConfig = isBurst2
+    ? {
+        label:   'BURST 2 — THE PROSPECT (Target Audience Deep Dive)',
+        focus:   [
+          "The emotional pain or fear their best prospects feel BEFORE finding them — the specific thing keeping them up at night",
+          "The biggest misconception their ideal customer has that makes them resistant to buying or slow to act",
+          "The trigger — the exact event, conversation, or realization that makes a prospect take action *right now* instead of 'later'"
+        ],
+        interlideInstruction: `Write a 2-3 sentence "strategist reaction" to their Burst 1 answers above.
+— Acknowledge ONE specific impressive thing they revealed (reference exact details — a number, a customer type, a proof point)
+— Then bridge naturally to what you need to learn next: their ideal customer's inner world
+— Sound like a sharp consultant who is genuinely engaged, not a chatbot completing a form
+— Keep it under 60 words`
+      }
+    : {
+        label:   'BURST 3 — THE PERSONA (Voice & Style)',
+        focus:   [
+          "What makes their communication style different from every other founder in their space — the thing that makes people say 'that sounds like them'",
+          "The phrase or sentence that perfectly captures why someone chose them over the alternative — verbatim if they can remember it",
+          "The one thing they never say in their messaging because it makes them cringe — and what they say instead"
+        ],
+        interlideInstruction: `Write a 2-3 sentence "strategist reaction" bridging from Burst 2 to Burst 3.
+— Reference something specific from their prospect insights
+— Bridge to: now I need to understand HOW you communicate — because the best message has the right substance AND the right voice
+— Keep it under 60 words`
+      };
+
+  const prompt = `${SYSTEM_PROMPTS.ONBOARDING_STRATEGIST}
+
+CONTEXT — What this founder told us so far:
+Business: ${basic_info?.product_description || 'not specified'}
+Target audience: ${basic_info?.target_audience || 'not specified'}
+Industry: ${basic_info?.industry || 'not specified'}
+Founder bio: ${basic_info?.bio || 'not provided'}
+
+THEIR PREVIOUS ANSWERS:
+${answersText}
+
+---
+
+${burstConfig.label}
+
+You have read everything above. Now generate exactly 3 questions for this burst.
+
+Focus areas (one question per area):
+${burstConfig.focus.map((f, i) => `${i + 1}. ${f}`).join('\n')}
+
+Rules:
+- Each question MUST reference or build on something specific in their previous answers — no generic questions
+- Use conversational, direct language — like a strategist who just heard something interesting and wants to go deeper
+- Make it impossible to answer with a one-liner. Force reflection and specificity.
+- 1-2 sentences max per question.
+- The questions should feel like a natural progression — as if you're 15 minutes into a great consulting call.
+
+Also write a short AI interlude message (the "strategist reaction").
+${burstConfig.interlideInstruction}
+
+Return ONLY this JSON structure. No markdown, no explanation:
+{
+  "questions": ["Question 1?", "Question 2?", "Question 3?"],
+  "interlude_message": "The strategist reaction message here."
+}`;
+
+  const FALLBACK_QUESTIONS = isBurst2
+    ? [
+        "What's the specific fear or frustration your best customer had the week before they found you — not the surface problem, the emotional weight underneath it?",
+        "What does your ideal customer believe about your category that's completely wrong and keeps them from solving their problem faster?",
+        "What single event or realization is the actual trigger that makes someone reach out NOW rather than saving your link and coming back later?"
+      ]
+    : [
+        "If a customer was recommending you to a colleague, what exact phrase or sentence would they use — try to quote it as precisely as you can?",
+        "What's a phrase or approach your competitors use in their messaging that makes you cringe — and what do you do instead?",
+        "Describe your natural communication style in one sentence — the way you'd explain your business to a smart friend at a bar, not in a pitch deck."
+      ];
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.7,
+      maxTokens:   600,
+      modelName:   PRO_MODEL
+    });
+
+    const clean  = content.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+
+    if (Array.isArray(parsed.questions) && parsed.questions.length >= 3 && parsed.interlude_message) {
+      return { questions: parsed.questions, interlude_message: parsed.interlude_message, source: 'ai' };
+    }
+    throw new Error('Invalid structure');
+  } catch (err) {
+    console.error('[Groq] generateNextBurst FAILED:', err.message);
+    return {
+      questions: FALLBACK_QUESTIONS,
+      interlude_message: isBurst2
+        ? "Your proof point is sharp. Now I need to understand the emotional world of the person you're selling to — because that's what the message has to connect with first."
+        : "Now I understand who you're selling to. The last piece is your voice — the thing that makes your messages sound like you and not like every other founder's template.",
+      source: 'fallback'
+    };
+  }
+};
+
+export const generateOnboardingQuestions = generateBurst1Questions;
+
+// ──────────────────────────────────────────
+// VOICE PROFILE BUILDER
+// ──────────────────────────────────────────
+export const buildVoiceProfile = async (basicInfo, onboardingAnswers) => {
+  const answersText = Object.entries(onboardingAnswers)
+    .map(([q, a]) => `Q: ${q}\nA: ${a}`)
+    .join('\n\n');
+
+  const prompt = `${SYSTEM_PROMPTS.ONBOARDING_STRATEGIST}
+
+You have completed a deep-dive interview with this founder. Now synthesize everything into a precise sales voice profile.
+This profile will be injected into every outreach message the platform writes for them.
+It must be specific, credible, and written so an AI can write messages that sound unmistakably human — not polished, not corporate.
+
+BASIC INFO:
+Business: ${basicInfo.business_name || 'Not provided'}
+Product: ${basicInfo.product_description}
+Audience: ${basicInfo.target_audience}
+Role: ${basicInfo.role || 'founder'}
+Industry: ${basicInfo.industry || 'not specified'}
+Founder bio: ${basicInfo.bio || 'not provided'}
+
+FULL ONBOARDING ANSWERS:
+${answersText}
+
+Build the profile. Be ruthlessly specific — if they gave you numbers, use them. If they gave you a vivid customer story, capture the essence. Avoid any language that could apply to 100 other companies.
+
+Return this exact JSON structure:
+{
+  "unique_value_prop": "Their single sharpest differentiator in 15 words or less — the one thing a happy customer would quote verbatim",
+  "icp_trigger": "The exact moment or event that makes someone a perfect prospect right now — specific and observable",
+  "target_customer_description": "2-sentence vivid description of the ideal customer — who they are, what their world looks like, what they're struggling with",
+  "main_objection": "The #1 thing that makes prospects hesitate or stall — specific to what they shared, not generic",
+  "objection_reframe": "The specific, non-defensive response that actually works — ideally using their own proof point",
+  "best_proof_point": "Their single most credible result — with specific numbers, company type, and timeframe if provided",
+  "voice_style": "3-5 words describing how they naturally write — e.g. 'direct, data-driven, self-deprecating'",
+  "outreach_persona": "1 sentence: the character they play in outreach — e.g. 'Practical operator who shows ROI before asking for anything'",
+  "avoid_phrases": ["phrase or pattern to avoid 1", "phrase or pattern to avoid 2", "phrase or pattern to avoid 3"]
+}
+
+Return ONLY valid JSON.`;
+
+  const FALLBACK = {
+    unique_value_prop:          'Not yet defined — complete onboarding to personalize',
+    icp_trigger:                'Not yet defined',
+    target_customer_description: basicInfo.target_audience || 'Not specified',
+    main_objection:              'Price or timing concerns',
+    objection_reframe:           'Focus on specific ROI and proof points',
+    best_proof_point:            'Not yet provided',
+    voice_style:                 'conversational, direct',
+    outreach_persona:            'Genuine founder sharing something useful',
+    avoid_phrases:               ['just checking in', 'hope this finds you well', 'revolutionary']
+  };
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.4,
+      maxTokens:   800,
+      modelName:   PRO_MODEL
+    });
+    const parsed = parseJSONObject(content, FALLBACK);
+    return validateAndFill(parsed, FALLBACK);
+  } catch (err) {
+    console.error('[Groq] buildVoiceProfile FAILED:', err.message);
+    return FALLBACK;
+  }
+};
+
+// ──────────────────────────────────────────
+// MEMORY SEEDING FROM ONBOARDING
+// NEW: Seeds user_memory immediately after onboarding so day-1 AI context
+// is rich from the first conversation, not empty.
+// ──────────────────────────────────────────
+export const seedMemoryFromOnboarding = async (userId, basicInfo, onboardingAnswers, voiceProfile) => {
+  try {
+    const answersText = Object.entries(onboardingAnswers || {})
+      .map(([q, a]) => `Q: ${q}\nA: ${a}`)
+      .join('\n\n');
+
+    const vp = voiceProfile || {};
+
+    const prompt = `Extract 8-10 key facts about this founder from their onboarding profile. These facts will be used to personalize AI coaching in every future session.
+
+BASIC INFO:
+Business: ${basicInfo.business_name || 'not provided'}
+Product: ${basicInfo.product_description}
+Target audience: ${basicInfo.target_audience}
+Industry: ${basicInfo.industry || 'not specified'}
+Role: ${basicInfo.role || 'founder'}
+Bio: ${basicInfo.bio || 'not provided'}
+
+ONBOARDING ANSWERS:
+${answersText || 'No answers provided'}
+
+SYNTHESIZED VOICE PROFILE:
+Differentiator: ${vp.unique_value_prop || 'not available'}
+ICP trigger: ${vp.icp_trigger || 'not available'}
+Main objection: ${vp.main_objection || 'not available'}
+Best proof point: ${vp.best_proof_point || 'not available'}
+Voice style: ${vp.voice_style || 'not available'}
+
+Extract facts that are:
+- Specific to this founder (not generic)
+- About their business, ICP, differentiators, proof points, challenges, communication style, or goals
+- Worth remembering across ALL future sessions
+
+Each fact must also have a category from: business_context | differentiator | proof_point | icp_description | objection | voice_style | goal | challenge
+
+Return ONLY a JSON array of objects:
+[
+  { "fact": "fact text here", "category": "category name" },
+  ...
+]`;
+
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.3,
+      maxTokens:   600,
+      modelName:   PRO_MODEL
+    });
+
+    const clean  = content.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+
+    if (!Array.isArray(parsed) || parsed.length === 0) return;
+
+    const validFacts = parsed.filter(f => f.fact && f.category && f.fact.length > 10);
+    if (validFacts.length === 0) return;
+
+    await supabaseAdmin.from('user_memory').insert(
+      validFacts.map(f => ({
+        user_id:             userId,
+        fact:                f.fact,
+        fact_category:       f.category,
+        source_chat_id:      null,
+        reinforcement_count: 2,  // Start higher since these are from deliberate onboarding
+        last_reinforced_at:  new Date().toISOString(),
+        is_active:           true,
+      }))
+    );
+
+    console.log(`[Groq] seedMemoryFromOnboarding: seeded ${validFacts.length} facts for user ${userId}`);
+  } catch (err) {
+    // Non-fatal — log and continue
+    console.error('[Groq] seedMemoryFromOnboarding FAILED (non-fatal):', err.message);
+  }
+};
+
+// ──────────────────────────────────────────
+// ONBOARDING WOW MOMENT: Sample outreach message
+// NEW: Generates a sample message using the voice profile + a seed context
+// to show users immediately after onboarding what Clutch can do.
+// ──────────────────────────────────────────
+export const generateSampleOutreachMessage = async (user, sampleProspectContext) => {
+  const vp = user.voice_profile || {};
+
+  const prompt = `${SYSTEM_PROMPTS.MESSAGE_GENERATOR}
+
+Write ONE sample cold outreach message to demonstrate what this founder's AI-personalized outreach looks like.
+Return ONLY the message text — no subject line, no label, no explanation.
+
+═══ FOUNDER CONTEXT ═══
+Their product: ${user.product_description}
+What makes them different: ${vp.unique_value_prop || 'unique in their space'}
+Their best proof point: ${vp.best_proof_point || 'growing customer base'}
+Their ideal customer: ${vp.target_customer_description || user.target_audience}
+How they naturally talk: ${vp.voice_style || 'conversational, direct'}
+Outreach persona: ${vp.outreach_persona || 'genuine founder sharing something useful'}
+Their ICP trigger: ${vp.icp_trigger || 'when they face the core pain'}
+Avoid sounding like: ${(vp.avoid_phrases || []).join(', ') || 'generic AI outreach'}
+
+═══ SAMPLE PROSPECT CONTEXT ═══
+${sampleProspectContext || `A ${user.target_audience} who has been struggling with the core problem ${user.product_description} solves`}
+
+Write one genuine, specific outreach message. Under 100 words. Sound like a real human founder — not a sales tool.`;
+
+  const fallback = `Hey — I noticed you mentioned [specific pain point]. I'm building ${user.product_description || 'something that might be relevant'} specifically for ${user.target_audience || 'people in your situation'}. Happy to share what we've been seeing work — no pitch, just useful context. Worth a quick look?`;
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.8,
+      maxTokens:   200,
+      modelName:   PRO_MODEL
+    });
+    const result = parseTextResponse(content, fallback);
+    return result.length > 20 ? result : fallback;
+  } catch (err) {
+    console.error('[Groq] generateSampleOutreachMessage FAILED:', err.message);
+    return fallback;
+  }
+};
+
+// ──────────────────────────────────────────
+// MESSAGE GENERATION
+// ──────────────────────────────────────────
+export const generateOutreachMessage = async (user, opportunity, performanceProfile = null) => {
+  const vp         = user.voice_profile || {};
+  const wordTarget = performanceProfile?.best_message_length === 'short' ? 70 : 100;
+
+  const prompt = `${SYSTEM_PROMPTS.MESSAGE_GENERATOR}
+
+Write ONE cold outreach message. Return ONLY the message text — no subject line, no label, no explanation.
+
+═══ FOUNDER CONTEXT ═══
+Their product: ${user.product_description}
+What makes them different: ${vp.unique_value_prop || 'not specified'}
+Their best proof point: ${vp.best_proof_point || 'not specified'}
+Their ideal customer: ${vp.target_customer_description || user.target_audience}
+How they naturally talk: ${vp.voice_style || 'conversational'}
+Their outreach persona: ${vp.outreach_persona || 'Direct and genuine'}
+Their ICP trigger: ${vp.icp_trigger || 'not specified'}
+Their main objection they face: ${vp.main_objection || 'not specified'}
+Avoid sounding like: ${(vp.avoid_phrases || []).join(', ') || 'generic AI'}
+
+═══ THE OPPORTUNITY ═══
+Platform: ${opportunity.platform}
+What this person said/posted: ${opportunity.target_context}
+
+${performanceProfile?.learned_patterns ? `═══ WHAT WORKS FOR THIS FOUNDER ═══\n${performanceProfile.learned_patterns}` : ''}
+
+Target ~${wordTarget} words. Sound like a real human, not a template.`;
+
+  const fallback = `Saw your post about ${opportunity.target_context?.slice(0, 50) || 'this'}. I'm building something relevant — happy to share context. No pitch.`;
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.85,
+      maxTokens:   300,
+      modelName:   PRO_MODEL
+    });
+    const result = parseTextResponse(content, fallback);
+    return result.length > 20 ? result : fallback;
+  } catch (err) {
+    console.error('[Groq] generateOutreachMessage FAILED:', err.message);
+    return fallback;
+  }
+};
+
+// ──────────────────────────────────────────
+// OPPORTUNITY SCORING
+// ──────────────────────────────────────────
+export const scoreOpportunities = async (user, opportunities) => {
+  if (!opportunities?.length) return opportunities;
+
+  const vp = user.voice_profile || {};
+
+  const prompt = `Score these opportunities for outreach fit. Return ONLY a JSON array.
+
+FOUNDER:
+Product: ${user.product_description}
+ICP: ${vp.target_customer_description || user.target_audience}
+ICP Trigger: ${vp.icp_trigger || 'not specified'}
+
+OPPORTUNITIES (score each 1-10):
+${opportunities.map((o, i) => `${i}. [${o.platform}] ${o.target_context?.slice(0, 200)}`).join('\n')}
+
+Return ONLY: [{"index": 0, "fit_score": 7, "timing_score": 8, "intent_score": 6}, ...]`;
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.2,
+      maxTokens:   600
+    });
+    const clean   = content.replace(/```json|```/g, '').trim();
+    const scores  = JSON.parse(clean);
+    return opportunities.map((o, i) => {
+      const s = scores.find(x => x.index === i) || {};
+      return {
+        ...o,
+        fit_score:    s.fit_score    || 5,
+        timing_score: s.timing_score || 5,
+        intent_score: s.intent_score || 5,
+      };
+    });
+  } catch (err) {
+    console.error('[Groq] scoreOpportunities FAILED:', err.message);
+    return opportunities.map(o => ({ ...o, fit_score: 5, timing_score: 5, intent_score: 5 }));
+  }
+};
+
+// ──────────────────────────────────────────
+// PRACTICE MODE
+// ──────────────────────────────────────────
+export const generatePracticeScenarioPrompt = async (user, scenarioType) => {
+  const prompt = `${SYSTEM_PROMPTS.PRACTICE_PROSPECT}
+
+Create a realistic social post or message that a prospect would write, to be used for sales practice.
+The founder practicing sells: "${user.product_description}" to ${user.target_audience}.
+Scenario type: ${scenarioType}
+
+Write a 2-3 sentence realistic post. Make it specific — a real person with a real problem, not a generic situation.
+Do NOT mention the scenario type. Just write the situation.
+Return ONLY the post text.`;
+
+  const defaults = {
+    interested:      `Just launched my SaaS 6 weeks ago. Revenue is at $0. I know I need to do outreach but every template I try feels wrong. Anyone found a way to make cold messaging actually work?`,
+    polite_decline:  `PSA to anyone cold DMing founders: I appreciate the hustle but I'm at capacity right now. Not taking any new tools or calls for at least 3 months. Building in heads-down mode.`,
+    ghost:           `Struggling to get traction post-launch. Posted on all the usual places. Got a few upvotes but no customers. Starting to question whether the problem is real.`,
+    skeptical:       `Another week, another 20 cold DMs claiming to "10x my outreach." I've tried 4 of these tools in the past year. None of them delivered what they promised.`,
+    price_objection: `Bootstrapping is brutal. Every $50/month subscription feels like a decision now. Would love to find tools that actually move the needle enough to justify the cost.`,
+    not_right_time:  `Heads down building for the next 60 days. Paused all external calls and demos until we hit our next milestone. Will resurface in April.`
+  };
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.92,
+      maxTokens:   150
+    });
+    const result = parseTextResponse(content, defaults[scenarioType] || defaults.polite_decline);
+    return result.length > 20 ? result : defaults[scenarioType];
+  } catch (err) {
+    console.error('[Groq] generatePracticeScenarioPrompt FAILED:', err.message);
+    return defaults[scenarioType] || defaults.polite_decline;
+  }
+};
+
+export const generatePracticeScenarioFromOpportunity = async (user, scenarioType, opportunityContext) => {
+  const scenarioHints = {
+    interested:      'This person is genuinely curious and might be open to a conversation.',
+    polite_decline:  'This person is politely not interested for now.',
+    ghost:           'This person seems busy and unlikely to respond.',
+    skeptical:       'This person is skeptical and will push back on claims.',
+    price_objection: 'This person is interested but budget-conscious.',
+    not_right_time:  'This person is genuinely interested but has bad timing right now.',
+  };
+
+  const prompt = `You are creating a realistic practice scenario for a sales founder.
+
+The founder sells: "${user.product_description}" to "${user.target_audience || 'their target audience'}".
+They found this real prospect context online:
+"${opportunityContext?.slice(0, 600) || 'A potential customer post'}"
+
+Rewrite or summarize this context as a short 2-3 sentence social post or message that a prospect would write.
+The practice scenario type is: ${scenarioType} — ${scenarioHints[scenarioType] || ''}
+
+Write the scenario from the prospect's perspective. Sound like a real human, not a template.
+Do NOT reveal the scenario type. Return ONLY the scenario text.`;
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.85,
+      maxTokens:   160,
+    });
+    const result = parseTextResponse(content, opportunityContext?.slice(0, 200) || '');
+    return result.length > 20 ? result : (opportunityContext?.slice(0, 300) || '');
+  } catch (err) {
+    console.error('[Groq] generatePracticeScenarioFromOpportunity FAILED:', err.message);
+    return opportunityContext?.slice(0, 300) || '';
+  }
+};
+
+// IMPROVED: Now injects ICP persona + difficulty level so prospects
+// feel like the user's actual target customer and scale appropriately.
+// ──────────────────────────────────────────
+// PRACTICE MODE — UPGRADED
+// Dynamic prospect realism + structured coaching
+// ──────────────────────────────────────────
+
+/**
+ * analyzeMessageQuality - evaluates a founder's message on 4 signals.
+ * Used internally to modulate prospect behavior dynamically.
+ */
+const analyzeMessageQuality = (userMessage) => {
+  const words      = userMessage.trim().split(/\s+/).filter(Boolean);
+  const wordCount  = words.length;
+  const hasMetric  = /\d+%|\d+x|\$[\d,]+|\d+\s*(day|week|month|hour|minute|customer|user|client)/i.test(userMessage);
+  const hasQuestion = userMessage.includes('?');
+  const hasResultWord = /(result|outcome|increase|decrease|improve|grow|save|double|triple|reduce|boost|generate|revenue|close)/i.test(userMessage);
+  const isPersonalized = /(you |your |noticed|saw|read|following|posted|mentioned|struggling|dealing with)/i.test(userMessage);
+
+  return {
+    wordCount,
+    tooLong:        wordCount > 50,
+    veryLong:       wordCount > 80,
+    vague:          !hasMetric && !hasResultWord,
+    noAsk:          !hasQuestion,
+    noPersonalization: !isPersonalized,
+    hasMetric,
+    hasQuestion,
+    hasResultWord,
+    isPersonalized,
+    // Overall quality score 0-4 (one point per dimension)
+    score: (hasMetric ? 1 : 0) + (hasQuestion ? 1 : 0) + (hasResultWord ? 1 : 0) + (isPersonalized ? 1 : 0),
+  };
+};
+
+/**
+ * generatePracticeProspectReply
+ *
+ * UPGRADED: Now dynamically reacts to message quality, not just scenario type.
+ * A weak, vague, or too-long message will cause pushback even in "interested" scenarios.
+ * Difficulty still applies on top of scenario behavior.
+ */
+export const generatePracticeProspectReply = async (
+  user,
+  userMessage,
+  scenarioType,
+  conversationHistory = [],
+  options = {}
+) => {
+  const { difficulty = 'standard' } = options;
+  const vp = user.voice_profile || {};
+  const q  = analyzeMessageQuality(userMessage);
+
+  // Build ICP persona from voice profile
+  const icpPersona = vp.target_customer_description
+    ? `You are specifically: ${vp.target_customer_description}`
+    : '';
+
+  // Difficulty calibration text
+  const difficultyInstructions = {
+    beginner: 'Keep it simple. If the message was OK, give a gentle warm response. If it was weak, be briefly unclear rather than harsh.',
+    standard: 'Be realistic. Show normal busy-professional behavior. Push back naturally when warranted.',
+    advanced:  'Be demanding. Probe hard on specifics, ROI, alternatives. Make the founder earn your interest.',
+    expert:    'Be very difficult. Reference skepticism from past experiences. Only the most specific, compelling message will get a genuine response.',
+  };
+  const difficultyNote = difficultyInstructions[difficulty] || difficultyInstructions.standard;
+
+  // Scenario type is ALWAYS the primary behavior driver (user chose it deliberately).
+  // Message quality signals only modulate the warmth/depth of the response within that scenario.
+  // e.g. a great message gets a warmer "interested" reply; a weak one gets a more guarded one.
+  // Quality NEVER overrides the scenario — a ghost is always a ghost, a decline is always a decline.
+
+  const qualityModifier = q.veryLong
+    ? 'The message was unusually long — you skimmed it. React naturally but briefly.'
+    : q.vague && q.noAsk
+    ? 'The message was a bit vague with no clear question — be slightly less engaged than usual.'
+    : '';
+
+  const scenarioMap = {
+    interested: (() => {
+      if (q.score >= 3) return "You're genuinely intrigued. The specifics caught your attention. Ask ONE pointed follow-up question that shows you're seriously considering it.";
+      if (q.hasMetric)      return "The number caught your attention but you're unsure it applies to you. Ask 'Is that typical or best-case?'";
+      if (q.isPersonalized) return "You appreciate they noticed your situation. Ask ONE clarifying question about how it actually works.";
+      return "You're curious but the value isn't fully clear. Ask a pointed question like 'What exactly do you help with?'";
+    })(),
+    polite_decline:  "You're not interested. Be kind but clear. Give a real reason. 2 sentences max.",
+    ghost:           'Return exactly: __GHOST__',
+    skeptical: q.hasMetric
+      ? "The number sounds too good to be true. Call it out — ask how it's measured or if it's typical. Be blunt but fair."
+      : "The claims are vague. Ask them to name one specific result from a real customer. Be skeptical but not hostile.",
+    price_objection: "You're somewhat interested but price is a real concern. Ask about cost or ROI data.",
+    not_right_time:  "Timing is genuinely bad. Acknowledge their message but be clear you can't engage for at least 2 months.",
+  };
+
+  const behaviorDirection = (scenarioMap[scenarioType] || scenarioMap.polite_decline)
+    + (qualityModifier ? ` Note: ${qualityModifier}` : '');
+
+  const historyText = conversationHistory.length > 0
+    ? `\nConversation so far:\n${conversationHistory.map(m => `${m.role === 'user' ? 'Founder' : 'You'}: ${m.content}`).join('\n')}\n`
+    : '';
+
+  const prompt = `${SYSTEM_PROMPTS.PRACTICE_PROSPECT}
+
+${icpPersona}
+The founder's product: "${user.product_description}"
+${historyText}
+The founder just sent you:
+"${userMessage}"
+
+Your behavior: ${behaviorDirection}
+Difficulty calibration: ${difficultyNote}
+
+Rules:
+- 1-3 sentences MAXIMUM. No longer.
+- Sound like a real person typing quickly on their phone
+- No formal sign-offs, no "Best," or "Regards,"
+- Do NOT explain your reasoning or reference this prompt`;
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.88,
+      maxTokens:   180,
+    });
+
+    if (content.trim() === '__GHOST__' || scenarioType === 'ghost') return null;
+    return parseTextResponse(content, "Thanks for reaching out. I'll have to pass for now.");
+  } catch {
+    return scenarioType === 'ghost' ? null : "Not right now, but good luck with it!";
+  }
+};
+
+// NEW: Evaluates message quality for probabilistic ghost revival.
+// Returns a score 0-100. Strong messages (>65) can revive a ghost scenario.
+export const evaluateMessageStrength = async (user, userMessage) => {
+  const vp = user.voice_profile || {};
+
+  const prompt = `Evaluate this cold outreach message on a scale of 0-100.
+
+Founder's product: "${user.product_description}"
+Their ideal customer: "${vp.target_customer_description || user.target_audience}"
+Their main differentiator: "${vp.unique_value_prop || 'not specified'}"
+
+The message:
+"${userMessage}"
+
+Score it on:
+- Specificity: does it reference something real about the prospect's situation? (0-25)
+- Value clarity: is it immediately obvious what benefit they'd get? (0-25)
+- Tone: does it sound human and genuine, not templated? (0-25)
+- Ask: is the call-to-action lightweight and easy to say yes to? (0-25)
+
+Return ONLY: {"score": <0-100>, "strongest_element": "<one phrase from the message that's best>", "weakest_element": "<what most hurt the score>"}`;
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.3,
+      maxTokens:   150,
+    });
+    const clean  = content.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+    return {
+      score:             Math.min(100, Math.max(0, parsed.score || 50)),
+      strongest_element: parsed.strongest_element || null,
+      weakest_element:   parsed.weakest_element || null,
+    };
+  } catch {
+    return { score: 50, strongest_element: null, weakest_element: null };
+  }
+};
+
+/**
+ * generateCoachingTip — UPGRADED
+ *
+ * Now returns a STRUCTURED 3-part coaching response:
+ * 1. What worked (specific, quotes the message where possible)
+ * 2. What didn't work (specific, explains why)
+ * 3. One concrete improvement suggestion with a rewritten example
+ *
+ * Also returns a `needs_reflection` flag (true when prospect declines/ghosts)
+ * to trigger the reflection step in the UI.
+ */
+export const generateCoachingTip = async (user, userMessage, scenarioType, prospectResponse) => {
+  const vp = user.voice_profile || {};
+  const q  = analyzeMessageQuality(userMessage);
+
+  const outcomeContext = {
+    interested:      'The prospect was curious and engaged.',
+    polite_decline:  'The prospect politely declined.',
+    ghost:           'The prospect did not reply (ghosted).',
+    skeptical:       'The prospect was skeptical and pushed back.',
+    price_objection: 'The prospect raised a pricing concern.',
+    not_right_time:  'The prospect said timing was off.',
+  };
+
+  // Negative outcomes trigger the reflection step
+  const needs_reflection = ['polite_decline', 'ghost', 'skeptical'].includes(scenarioType);
+
+  const qualityContext = [
+    q.veryLong     && `Message was ${q.wordCount} words — too long for cold outreach. Strong messages are under 30 words.`,
+    q.tooLong      && !q.veryLong && `Message was ${q.wordCount} words — lean toward 20-35 for cold outreach.`,
+    q.vague        && 'No specific result, number, or outcome was mentioned.',
+    q.noAsk        && 'No question was asked — the message didn\'t invite a response.',
+    q.noPersonalization && 'The message doesn\'t reference anything specific about this prospect\'s situation.',
+    q.hasMetric    && 'A specific metric was included — this is a strength.',
+    q.isPersonalized && 'The message referenced the prospect\'s situation — this is a strength.',
+  ].filter(Boolean).join('\n');
+
+  const prompt = `${SYSTEM_PROMPTS.SALES_COACH}
+
+Analyze this practice outreach message and give structured coaching.
+
+FOUNDER'S CONTEXT:
+Product: "${user.product_description}"
+ICP: "${vp.target_customer_description || user.target_audience || 'not specified'}"
+Differentiator: "${vp.unique_value_prop || 'not specified'}"
+Their most common objection: "${vp.main_objection || 'not specified'}"
+
+THEIR MESSAGE:
+"${userMessage}"
+
+OUTCOME: ${outcomeContext[scenarioType] || 'The prospect responded.'}
+${prospectResponse ? `PROSPECT SAID: "${prospectResponse}"` : ''}
+
+QUALITY SIGNALS DETECTED:
+${qualityContext || 'No specific issues detected.'}
+
+Provide coaching in this EXACT JSON format:
+{
+  "what_worked": "<1 specific sentence. If something genuinely worked, quote it. If NOTHING worked, say 'N/A — nothing landed this time.' Be honest.>",
+  "what_didnt": "<1-2 sentences. Be specific. Reference their actual words. Explain WHY it hurt them.>",
+  "improvement": "<1-2 sentences. Give a concrete, specific suggestion with a rewritten example in quotes. Format: 'Try: \\"[example message]\\"'>",
+  "hint": "<One short tip (under 12 words) to show as a retry hint. E.g. 'Try mentioning a specific result with a number.'>",
+  "coaching_summary": "<Plain text version of what_worked + what_didnt + improvement combined, under 80 words total. This is the fallback display.>"
+}`;
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.55,
+      maxTokens:   800,
+    });
+    const clean  = content.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+    return {
+      what_worked:      parsed.what_worked || 'N/A — keep iterating.',
+      what_didnt:       parsed.what_didnt  || 'The value proposition wasn\'t specific enough to get a response.',
+      improvement:      parsed.improvement || 'Try adding a specific result with a number and ending with a direct question.',
+      hint:             parsed.hint        || 'Mention a specific outcome with a number.',
+      coaching_summary: parsed.coaching_summary || `${parsed.what_worked || ''} ${parsed.what_didnt || ''} ${parsed.improvement || ''}`.trim(),
+      needs_reflection,
+    };
+  } catch {
+    return {
+      what_worked:      'N/A — keep iterating.',
+      what_didnt:       'The message needed more specificity to get engagement.',
+      improvement:      'Try opening with their specific situation, then mention one result you\'ve achieved for similar people, then ask one easy question.',
+      hint:             'Mention a specific outcome with a number.',
+      coaching_summary: 'The pitch needed more specificity. Try referencing their situation directly, add a specific result, and end with a question.',
+      needs_reflection,
+    };
+  }
+};
+
+/**
+ * generateReflectionContext
+ * Called after a reflection answer is submitted to give more targeted coaching.
+ * Takes the user's reflection choice and returns enriched coaching.
+ */
+export const generateReflectionContext = async (user, userMessage, reflectionAnswer, prospectResponse) => {
+  const vp = user.voice_profile || {};
+
+  const reflectionMap = {
+    // Message quality issues
+    too_generic:        'The user recognized their message was too generic — it could have been sent to anyone.',
+    no_value:           'The user recognized they didn\'t communicate clear value — the recipient couldn\'t picture what they\'d actually get.',
+    weak_question:      'The user recognized they didn\'t ask a compelling question or the ask was unclear.',
+    too_long:           'The user recognized their message was too long — the key point got buried.',
+    too_much_pitch:     'The user recognized they pitched too hard, too fast — before building any rapport.',
+    wrong_timing:       'The user recognized the timing or context of their message was off.',
+    // Personalization issues
+    no_personalization: 'The user recognized they didn\'t reference anything specific about this person\'s situation.',
+    missed_pain:        'The user recognized they missed the real pain point and spoke to the wrong problem.',
+    assumed_too_much:   'The user recognized they made assumptions about what the person wanted without checking.',
+    // Tone/style issues
+    too_formal:         'The user recognized their tone was too formal or corporate — it didn\'t feel human.',
+    too_pushy:          'The user recognized their message came across as pushy or salesy.',
+    no_credibility:     'The user recognized they didn\'t establish any credibility or reason to trust them.',
+    // Self-awareness
+    not_sure:           'The user isn\'t sure why the message got this response — they need guidance.',
+  };
+
+  const insight = reflectionMap[reflectionAnswer] || 'The user submitted a reflection.';
+
+  const prompt = `${SYSTEM_PROMPTS.SALES_COACH}
+
+A founder is practicing outreach. They just got rejected and reflected on why.
+
+Their message: "${userMessage}"
+Prospect replied: "${prospectResponse || '[No reply]'}"
+Their reflection: ${insight}
+
+Their product: "${user.product_description}"
+Their ICP: "${vp.target_customer_description || 'not specified'}"
+
+${reflectionAnswer === 'not_sure'
+  ? 'Gently explain what actually happened in 2-3 sentences, then give a specific rewrite example.'
+  : `Confirm their insight in 1 sentence, then give the specific fix with a rewrite example.`}
+
+Keep response under 60 words. End with a rewrite in quotes starting with "Try:"`;
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.5,
+      maxTokens:   180,
+    });
+    return parseTextResponse(content, 'Good self-awareness. The key is specificity — name the result, reference their situation, and ask one easy question.');
+  } catch {
+    return 'Good self-awareness. Now try rewriting with a specific result and a single direct question.';
+  }
+};
+
+// NEW: Full session debrief — called after a practice session completes.
+// Analyzes the entire conversation and provides structured feedback.
+export const generateSessionDebrief = async (user, messageHistory, scenarioType, difficulty = 'standard') => {
+  const vp = user.voice_profile || {};
+
+  // Build transcript from message history
+  const transcript = messageHistory
+    .filter(m => m.role !== 'system')
+    .map(m => `${m.role === 'user' ? 'Founder' : 'Prospect'}: ${m.content}`)
+    .join('\n');
+
+  const outcomeContext = {
+    interested:      'The prospect engaged positively.',
+    polite_decline:  'The prospect politely declined.',
+    ghost:           'The prospect never replied (ghosted).',
+    skeptical:       'The prospect was skeptical throughout.',
+    price_objection: 'The prospect raised a pricing concern.',
+    not_right_time:  'The prospect said timing was off.',
+  };
+
+  const prompt = `${SYSTEM_PROMPTS.SALES_COACH}
+
+Analyze this complete practice outreach conversation and give a structured debrief.
+
+FOUNDER'S CONTEXT:
+Product: ${user.product_description}
+ICP: ${vp.target_customer_description || user.target_audience || 'not specified'}
+Differentiator: ${vp.unique_value_prop || 'not specified'}
+Main objection they face: ${vp.main_objection || 'not specified'}
+
+SCENARIO: ${scenarioType} (${outcomeContext[scenarioType] || 'Completed session.'})
+DIFFICULTY: ${difficulty}
+
+FULL TRANSCRIPT:
+${transcript || '(No messages exchanged)'}
+
+Provide a structured debrief. Be specific — quote their exact words when relevant.
+
+Return ONLY this JSON:
+{
+  "strength": "One thing they did well — quote the specific phrase or approach that worked. 1 sentence.",
+  "improvement": "One concrete thing to do differently next time. Be specific to their ICP and product. 1-2 sentences.",
+  "coachable_moment": "The single most important insight from this session. Could be about their message, their mindset, or a pattern. 1 sentence — make it stick.",
+  "message_score": <integer 1-10>,
+  "would_real_prospect_engage": <true|false>
+}`;
+
+  const FALLBACK = {
+    strength:                   'You completed the session — that\'s the starting point. Every rep builds the pattern.',
+    improvement:                'Next time, try opening with a direct reference to something specific from their post before mentioning your product.',
+    coachable_moment:           'The founders who get replies are the ones who sound like they actually read what the prospect wrote.',
+    message_score:              5,
+    would_real_prospect_engage: false,
+  };
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.5,
+      maxTokens:   400,
+      modelName:   PRO_MODEL
+    });
+    const clean  = content.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+    if (!parsed.strength || !parsed.improvement) return FALLBACK;
+    return { ...FALLBACK, ...parsed };
+  } catch (err) {
+    console.error('[Groq] generateSessionDebrief FAILED:', err.message);
+    return FALLBACK;
+  }
+};
+
+// ──────────────────────────────────────────
+// AI COACH (General Chat)
+// IMPROVED: Now injects main_objection, objection_reframe, mood_score, check_in_streak
+// into the full context block for richer personalization.
+// ──────────────────────────────────────────
+export const getCoachResponse = async (user, question, conversationHistory = [], performanceProfile = null, attachments = [], extraContext = {}) => {
+  const vp           = user.voice_profile || {};
+  const msgCount     = conversationHistory.length + 1;
+  const isFullContext = msgCount === 1 || msgCount % 10 === 0;
+
+  // ── Full context block (every 10 messages) ───────────────────────────────
+  const moodLine = extraContext.recentCheckIn?.mood_score
+    ? `Their mood today (1-5): ${extraContext.recentCheckIn.mood_score}/5${extraContext.recentCheckIn.mood_score <= 2 ? ' — they may be feeling stuck or low energy, be extra supportive' : extraContext.recentCheckIn.mood_score >= 4 ? ' — they\'re in a good place, push for bold action' : ''}`
+    : '';
+
+  const streakLine = user.check_in_streak > 0
+    ? `Check-in streak: ${user.check_in_streak} days — acknowledge this momentum if it comes up naturally`
+    : '';
+
+  const fullContextBlock = `YOU KNOW THIS FOUNDER DEEPLY:
+Business: ${user.business_name || 'Not specified'} — ${user.product_description || 'No description'}
+Archetype: ${user.archetype || 'seller'}
+Industry: ${user.industry || 'not specified'} | Role: ${user.role || 'founder'}
+Their ICP: ${vp.target_customer_description || user.target_audience || 'not specified'}
+Their differentiator: ${vp.unique_value_prop || 'not specified'}
+Their ICP trigger: ${vp.icp_trigger || 'not specified'}
+Their top objection they face: ${vp.main_objection || 'not specified'}
+How to handle that objection: ${vp.objection_reframe || 'not specified'}
+Their best proof point: ${vp.best_proof_point || 'not specified'}
+Their voice style: ${vp.voice_style || 'not specified'}
+Their outreach persona: ${vp.outreach_persona || 'not specified'}
+Preferred platforms: ${(user.preferred_platforms || []).join(', ') || 'not specified'}
+${performanceProfile?.learned_patterns ? `What works for them: ${performanceProfile.learned_patterns}` : ''}
+${performanceProfile ? `Outreach stats: ${performanceProfile.total_sent || 0} sent, ${Math.round((performanceProfile.positive_rate || 0) * 100)}% positive rate` : 'No outreach data yet.'}
+${extraContext.activeGoals?.length ? `Active goal: "${extraContext.activeGoals[0]?.goal_text}"${extraContext.activeGoals[0]?.target_value ? ` (target: ${extraContext.activeGoals[0].target_value} ${extraContext.activeGoals[0].target_unit}, current: ${extraContext.activeGoals[0].current_value || 0})` : ''}` : ''}
+${extraContext.recentCheckIn ? `Recent check-in answers: ${JSON.stringify(extraContext.recentCheckIn.answers || {}).slice(0, 300)}` : ''}
+${moodLine}
+${streakLine}
+${extraContext.memoryFacts?.length ? `KEY FACTS ABOUT THEM (from memory):\n${extraContext.memoryFacts.map(f => `- ${f.fact}`).join('\n')}` : ''}`;
+
+  // ── Minimal context block (messages 2-9, 11-19, etc.) ───────────────────
+  const minimalContextBlock = `[Context: ${user.business_name || 'Founder'} — ${user.product_description?.slice(0, 80) || 'building a product'}. Archetype: ${user.archetype || 'seller'}. ICP: ${user.target_audience?.slice(0, 60) || 'not specified'}. Differentiator: ${vp.unique_value_prop?.slice(0, 60) || 'not specified'}.]`;
+
+  const contextBlock     = isFullContext ? fullContextBlock : minimalContextBlock;
+  const attachmentContext = attachments.length > 0
+    ? `\nThey shared ${attachments.length} file(s): ${attachments.map(a => a.original_filename).join(', ')}`
+    : '';
+
+  const history = conversationHistory.slice(-8).map(m => ({ role: m.role, content: m.content }));
+
+  return {
+    systemPrompt: `${SYSTEM_PROMPTS.GROWTH_STRATEGIST}\n\n${contextBlock}${attachmentContext}`,
+    messages:     [...history, { role: 'user', content: question }],
+    contextMode:  isFullContext ? 'full' : 'minimal',
+  };
+};
+
+// ──────────────────────────────────────────
+// PERFORMANCE SUMMARIZATION
+// ──────────────────────────────────────────
+export const summarizePerformancePatterns = async (user, sentOpps, feedbackData) => {
+  if (!sentOpps?.length || sentOpps.length < 5) return null;
+
+  const positive = feedbackData.filter(f => f.outcome === 'positive').length;
+  const total    = feedbackData.length;
+  if (total === 0) return null;
+
+  const platformStats = {}, styleStats = {}, lengthStats = {};
+
+  for (const opp of sentOpps) {
+    const fb         = feedbackData.find(f => f.opportunity_id === opp.id);
+    if (!fb) continue;
+    const isPositive = fb.outcome === 'positive' ? 1 : 0;
+
+    if (!platformStats[opp.platform]) platformStats[opp.platform] = { sent: 0, positive: 0 };
+    platformStats[opp.platform].sent++;
+    platformStats[opp.platform].positive += isPositive;
+
+    if (opp.message_style) {
+      if (!styleStats[opp.message_style]) styleStats[opp.message_style] = { sent: 0, positive: 0 };
+      styleStats[opp.message_style].sent++;
+      styleStats[opp.message_style].positive += isPositive;
+    }
+
+    if (opp.message_length) {
+      const bucket = opp.message_length < 60 ? 'short' : opp.message_length < 120 ? 'medium' : 'long';
+      if (!lengthStats[bucket]) lengthStats[bucket] = { sent: 0, positive: 0 };
+      lengthStats[bucket].sent++;
+      lengthStats[bucket].positive += isPositive;
+    }
+  }
+
+  const systemPrompt = `You are a battle-tested sales mentor analyzing outreach performance data. Be specific and data-driven.`;
+  const userPrompt   = `Analyze this founder's outreach data and write a 2-sentence insight summary.
+
+Overall: ${total} sent, ${positive} positive (${Math.round(positive / total * 100)}%)
+By platform: ${JSON.stringify(platformStats)}
+By style:    ${JSON.stringify(styleStats)}
+By length:   ${JSON.stringify(lengthStats)}
+
+Return ONLY the 2-sentence summary. No JSON. No preamble.`;
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: userPrompt }],
+      systemPrompt,
+      temperature: 0.3,
+      maxTokens:   200,
+      modelName:   PRO_MODEL
+    });
+    return parseTextResponse(content, null);
+  } catch (err) {
+    console.error('[Groq] summarizePerformancePatterns FAILED:', err.message);
+    return null;
+  }
+};
+
+// ──────────────────────────────────────────
+// CALENDAR / EVENT PREP
+// ──────────────────────────────────────────
+export const generateEventPrep = async (user, event) => {
+  const vp = user.voice_profile || {};
+
+  const prompt = `${SYSTEM_PROMPTS.SALES_COACH}
+
+Prepare this founder for an upcoming business event.
+
+FOUNDER: ${user.business_name} — ${user.product_description}
+Their differentiator: ${vp.unique_value_prop || 'unique in their market'}
+Their top proof point: ${vp.best_proof_point || 'growing customer base'}
+Their main objection: ${vp.main_objection || 'not specified'}
+Their objection reframe: ${vp.objection_reframe || 'focus on specific value'}
+
+EVENT:
+Title: ${event.title}
+Type: ${event.event_type}
+Date: ${event.event_date}
+${event.attendee_name    ? `Person/Audience: ${event.attendee_name}` : ''}
+${event.attendee_context ? `Context: ${event.attendee_context}`     : ''}
+${event.notes            ? `Notes: ${event.notes}`                  : ''}
+
+Return JSON with this structure:
+{
+  "talking_points": ["3-5 specific, punchy talking points — not generic"],
+  "opening_line": "A strong, specific opening line for this exact event",
+  "key_question_to_ask": "The ONE most valuable question to ask the other party",
+  "anticipate_objection": "The most likely pushback and how to handle it",
+  "pre_outreach": "A 2-sentence message to send BEFORE the event (if applicable)",
+  "follow_up_template": "A natural follow-up message to send within 24h after"
+}
+
+Return ONLY valid JSON.`;
+
+  const FALLBACK = {
+    talking_points:      ['What you do and who you help', 'Your best customer result', 'Why now is the right time'],
+    opening_line:        `I build ${user.product_description} — I work with ${user.target_audience}.`,
+    key_question_to_ask: "What's the biggest challenge you're facing right now with this?",
+    anticipate_objection:'They may ask about ROI — have a specific example ready.',
+    pre_outreach:        `Looking forward to connecting at ${event.title}. I have something relevant to share.`,
+    follow_up_template:  `Great meeting you at ${event.title}. As promised — here's that thing I mentioned. Worth a quick look?`
+  };
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.6,
+      maxTokens:   800
+    });
+    const parsed = parseJSONObject(content, FALLBACK);
+    return validateAndFill(parsed, FALLBACK);
+  } catch (err) {
+    console.error('[Groq] generateEventPrep FAILED:', err.message);
+    return FALLBACK;
+  }
+};
+
+// ──────────────────────────────────────────
+// ARCHETYPE DETECTION
+// ──────────────────────────────────────────
+export const detectUserArchetype = async (basicInfo, onboardingAnswers = {}) => {
+  const answersText = Object.entries(onboardingAnswers)
+    .slice(0, 5)
+    .map(([q, a]) => `Q: ${q}\nA: ${a}`)
+    .join('\n\n');
+
+  const prompt = `Analyze this user's profile and classify them into exactly ONE archetype.
+
+PROFILE:
+Product/Offering: ${basicInfo.product_description || 'not provided'}
+Target Audience: ${basicInfo.target_audience || 'not provided'}
+Role: ${basicInfo.role || 'not provided'}
+Industry: ${basicInfo.industry || 'not provided'}
+Bio: ${basicInfo.bio || 'not provided'}
+
+THEIR OWN WORDS (onboarding):
+${answersText || 'No answers provided yet'}
+
+ARCHETYPES:
+- seller: Has a product/service and primary goal is finding and closing customers
+- builder: Pre-revenue or very early stage, focused on validation and finding first users
+- freelancer: Offers skills/services to clients, wants to land projects and grow client base
+- creator: Makes content, art, or media — wants to grow audience or monetize their creativity
+- professional: Growing career, reputation, or network — not necessarily selling a product
+- learner: Developing new skills, career transition, or just getting started in business/sales
+
+Return ONLY this JSON (no markdown):
+{"archetype": "seller", "confidence": 0.9, "reasoning": "One sentence explanation"}`;
+
+  const FALLBACK = { archetype: 'seller', confidence: 0.5, reasoning: 'Default based on profile' };
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.2,
+      maxTokens:   120,
+      modelName:   PRO_MODEL
+    });
+    const clean  = content.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+    const validArchetypes = ['seller', 'builder', 'freelancer', 'creator', 'professional', 'learner'];
+    if (!validArchetypes.includes(parsed.archetype)) return FALLBACK;
+    return parsed;
+  } catch (err) {
+    console.error('[Groq] detectUserArchetype FAILED:', err.message);
+    return FALLBACK;
+  }
+};
+
+// ──────────────────────────────────────────
+// DAILY TIPS
+// IMPROVED: Now uses mood_score to adapt tone and card content
+// ──────────────────────────────────────────
+export const generateDailyTips = async (user, archetype, activeGoals = [], recentCheckIns = []) => {
+  const vp = user.voice_profile || {};
+
+  const goalsContext = activeGoals.length
+    ? `Active goal: "${activeGoals[0]?.goal_text}"${activeGoals[0]?.target_value ? ` (target: ${activeGoals[0].target_value} ${activeGoals[0].target_unit}, current: ${activeGoals[0].current_value || 0})` : ''}`
+    : 'No specific goal set yet';
+
+  const checkInContext = recentCheckIns.length
+    ? `Recent check-in context: ${JSON.stringify(recentCheckIns[0]?.answers || {}).slice(0, 300)}`
+    : '';
+
+  // NEW: Mood-aware tone adaptation
+  const moodScore = recentCheckIns[0]?.mood_score;
+  const moodInstruction = moodScore
+    ? moodScore <= 2
+      ? 'IMPORTANT: User is feeling low (mood 1-2/5). Their cards should be: supportive, low-pressure, focus on small wins. Avoid challenge cards. Normalize slow days. One easy action.'
+      : moodScore >= 4
+      ? 'User is feeling great (mood 4-5/5). Go bolder — bigger challenges, bigger asks. Push them to make a move they\'ve been putting off.'
+      : 'User is feeling neutral. Balance encouragement with practical action.'
+    : '';
+
+  const archetypeFocus = {
+    seller:       'finding customers, improving outreach, closing deals, and growing revenue',
+    builder:      'validating ideas, getting first users, improving product-market fit',
+    freelancer:   'landing clients, pricing services, improving proposals, building reputation',
+    creator:      'growing audience, improving content, monetizing, building community',
+    professional: 'building network, improving visibility, growing career, personal branding',
+    learner:      'developing skills, applying learning, building confidence, taking action',
+  };
+
+  const prompt = `${SYSTEM_PROMPTS.GROWTH_STRATEGIST}
+
+Generate exactly 3 personalized daily growth cards for this user. Each card must feel DISTINCT — different card types, different focus areas, no overlap.
+
+USER CONTEXT:
+Business: ${user.business_name || 'Not specified'} — ${user.product_description}
+Audience: ${user.target_audience}
+Archetype: ${archetype} (focused on: ${archetypeFocus[archetype] || archetypeFocus.seller})
+Their differentiator: ${vp.unique_value_prop || 'not specified'}
+${goalsContext}
+${checkInContext}
+${moodInstruction}
+
+RULES FOR ALL 3 CARDS:
+- Each must be actionable TODAY, not "over the next few weeks"
+- Each must reference something concrete from their specific situation
+- Each must have a measurable output (e.g. "send 3 DMs" not "do outreach")
+- Body: 2-4 sentences max — punchy, specific, zero fluff
+- action_type must ALWAYS be "internal_chat" — all actions open a Clutch AI conversation
+
+CARD TYPE DISTRIBUTION (use each once):
+- Card 1 — card_type: "tip" — A quick, high-leverage action they can do in under 15 minutes
+- Card 2 — card_type: "challenge" — A stretch goal or experiment to do within 24 hours (skip if mood is low, use "tip" instead)
+- Card 3 — card_type: "reflection" — A sharp question or reframe that shifts their thinking
+
+Return ONLY a JSON array of exactly 3 objects (no markdown):
+[
+  {
+    "card_type": "tip",
+    "title": "Short punchy title under 8 words",
+    "body": "2-4 sentence actionable body specific to their situation",
+    "action_label": "Explore this with Clutch AI",
+    "action_type": "internal_chat",
+    "metadata": {"estimated_time": "10 minutes", "difficulty": "easy"}
+  },
+  { ... },
+  { ... }
+]`;
+
+  const FALLBACK = [
+    {
+      card_type:    'tip',
+      title:        'Your most important move today',
+      body:         `Based on your profile, the highest-leverage thing you can do right now is reach out to ${user.target_audience}. Pick one person. Send one message. Real progress beats perfect planning every time.`,
+      action_label: 'Explore this with Clutch AI',
+      action_type:  'internal_chat',
+      metadata:     { estimated_time: '15 minutes', difficulty: 'medium' }
+    },
+    {
+      card_type:    'challenge',
+      title:        '24-hour outreach challenge',
+      body:         `Send 3 cold messages before tomorrow. Don't wait until they're perfect. Your job right now is to collect data on what resonates with ${user.target_audience}, not to close deals.`,
+      action_label: 'Start with Clutch AI',
+      action_type:  'internal_chat',
+      metadata:     { estimated_time: '30 minutes', difficulty: 'medium' }
+    },
+    {
+      card_type:    'reflection',
+      title:        "What's actually stopping you?",
+      body:         `If you could only do one thing today to move your business forward, what would it be — and what's the real reason you haven't done it yet? Identifying that blocker is half the battle.`,
+      action_label: 'Think this through with Clutch',
+      action_type:  'internal_chat',
+      metadata:     { estimated_time: '5 minutes', difficulty: 'easy' }
+    }
+  ];
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.78,
+      maxTokens:   800,
+      modelName:   PRO_MODEL
+    });
+    const clean  = content.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+    if (!Array.isArray(parsed) || parsed.length === 0) return FALLBACK;
+
+    return parsed.slice(0, 3).map((tip, i) => {
+      if (!tip.title || !tip.body) return FALLBACK[i];
+      // Enforce consistent action routing
+      return {
+        ...FALLBACK[i],
+        ...tip,
+        action_type:  'internal_chat',
+        action_label: tip.action_label || 'Explore with Clutch AI',
+      };
+    });
+  } catch (err) {
+    console.error('[Groq] generateDailyTips FAILED:', err.message);
+    return FALLBACK;
+  }
+};
+
+export const generateDailyTip = async (...args) => {
+  const tips = await generateDailyTips(...args);
+  return tips[0];
+};
+
+// ──────────────────────────────────────────
+// CHECK-IN QUESTIONS
+// ──────────────────────────────────────────
+export const generateCheckInQuestions = async (user, archetype, chatContext = '', activeGoals = []) => {
+  const vp = user.voice_profile || {};
+
+  const goalContext = activeGoals.length
+    ? `Their active goal: "${activeGoals[0]?.goal_text}"${activeGoals[0]?.target_value ? ` (${activeGoals[0].current_value || 0}/${activeGoals[0].target_value} ${activeGoals[0].target_unit})` : ''}`
+    : '';
+
+  const chatSummary = chatContext
+    ? `Recent AI coach discussion covered: ${chatContext.slice(0, 400)}`
+    : '';
+
+  const archetypeQuestions = {
+    seller:       ['How many outreach messages did you send today?', 'Any positive replies or leads to follow up on?'],
+    builder:      ['Did you talk to any potential customers today?', 'What did you learn or test today?'],
+    freelancer:   ['Did you reach out to any potential clients today?', 'Any proposals or projects in progress?'],
+    creator:      ['Did you create or publish anything today?', 'How is your audience engagement looking?'],
+    professional: ['Did you connect with anyone valuable today?', 'Any career progress or opportunities this week?'],
+    learner:      ['What did you practice or learn today?', 'Are you applying what you\'ve been learning?'],
+  };
+
+  const prompt = `${SYSTEM_PROMPTS.GROWTH_STRATEGIST}
+
+Generate 3 personalized check-in questions for this user's afternoon reflection.
+
+USER CONTEXT:
+Business: ${user.product_description}
+Archetype: ${archetype}
+${goalContext}
+${chatSummary}
+
+RULES:
+1. Question 1: Ask directly about what the AI coach recently discussed or advised. If there's chat context, reference a SPECIFIC topic from it. If no context, ask about their most important archetype activity.
+2. Question 2: Ask about their goal progress (if they have one) OR about a specific win or challenge today.
+3. Question 3: Ask one forward-looking question about tomorrow or this week.
+
+Each question should feel like it's from a coach who actually remembers your last conversation.
+Questions should be 1 sentence, conversational, specific.
+
+Return ONLY a JSON array of 3 question strings:
+["Question 1?", "Question 2?", "Question 3?"]`;
+
+  const defaultQuestions = archetypeQuestions[archetype] || archetypeQuestions.seller;
+  const FALLBACK = [
+    defaultQuestions[0],
+    defaultQuestions[1] || 'What was your biggest win or challenge today?',
+    'What\'s your most important move tomorrow?'
+  ];
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.65,
+      maxTokens:   200,
+      modelName:   PRO_MODEL
+    });
+    const clean     = content.replace(/```json|```/g, '').trim();
+    const questions = JSON.parse(clean);
+    if (!Array.isArray(questions) || questions.length < 2) return FALLBACK;
+    return questions.slice(0, 3);
+  } catch (err) {
+    console.error('[Groq] generateCheckInQuestions FAILED:', err.message);
+    return FALLBACK;
+  }
+};
+
+// IMPROVED: Now cross-references mood with goal progress for intervention triggers
+export const generateCheckInResponse = async (user, archetype, questions, answers, activeGoals = [], moodScore = null) => {
+  const vp = user.voice_profile || {};
+
+  const qaText = Array.isArray(questions)
+    ? questions.map((q, i) => `Q: ${q}\nA: ${answers[q] || answers[i] || '(no answer)'}`).join('\n\n')
+    : Object.entries(answers).map(([q, a]) => `Q: ${q}\nA: ${a}`).join('\n\n');
+
+  const goalContext = activeGoals.length
+    ? activeGoals.map(g => `- "${g.goal_text}"${g.target_value ? ` (${g.current_value || 0}/${g.target_value} ${g.target_unit || ''})` : ''}`).join('\n')
+    : 'No active goals';
+
+  // Cross-reference mood + goal progress
+  let interventionNote = '';
+  if (moodScore !== null && moodScore <= 2) {
+    interventionNote = 'IMPORTANT: User has low mood today (score: ' + moodScore + '/5). Acknowledge the difficulty first. Be warm and supportive. Do NOT give a task list. Give one small, easy action and affirm that slow days are part of the process.';
+  } else if (activeGoals.length > 0 && activeGoals[0]?.target_value) {
+    const progress = (activeGoals[0].current_value || 0) / activeGoals[0].target_value;
+    if (progress < 0.3 && activeGoals[0].target_date) {
+      interventionNote = `Note: Their goal "${activeGoals[0].goal_text}" is at ${Math.round(progress * 100)}% with a deadline approaching. Gently surface this — ask what's blocking progress, don't just affirm.`;
+    }
+  }
+
+  const prompt = `${SYSTEM_PROMPTS.GROWTH_STRATEGIST}
+
+A user just completed their daily check-in. Respond as their AI co-founder companion.
+
+USER: ${user.business_name || ''} — ${user.product_description}
+Archetype: ${archetype}
+Active goals:
+${goalContext}
+${moodScore ? `Mood today: ${moodScore}/5` : ''}
+${interventionNote}
+
+CHECK-IN Q&A:
+${qaText}
+
+YOUR RESPONSE RULES:
+- 3-4 sentences MAX.
+- Acknowledge something SPECIFIC from their answers — show you were listening
+- If they had a win: celebrate it concretely, then give one momentum-building nudge
+- If they struggled: normalize it briefly, then give ONE specific thing to try tomorrow
+- If goal is behind: surface it gently once, ask what's blocking, don't lecture
+- End with a forward-looking note that feels encouraging, not pressuring
+- Do NOT give a list of 5 things to do. Give ONE thing.
+
+Also generate a next_tip_seed: a 1-sentence brief that will seed tomorrow's tip generation
+(e.g. "User is struggling with pricing objections, hasn't tried the reframe approach yet")
+
+Return ONLY this JSON:
+{"response_text": "Your 3-4 sentence response here", "next_tip_seed": "Seed for tomorrow's tip"}`;
+
+  const FALLBACK = {
+    response_text: `Thanks for checking in. Every day you show up is progress, even when it doesn't feel like it. Tomorrow, focus on just one thing: the most important move for your business right now.`,
+    next_tip_seed: `User completed daily check-in for ${archetype} archetype`
+  };
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.7,
+      maxTokens:   300,
+      modelName:   PRO_MODEL
+    });
+    const clean  = content.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+    if (!parsed.response_text) return FALLBACK;
+    return parsed;
+  } catch (err) {
+    console.error('[Groq] generateCheckInResponse FAILED:', err.message);
+    return FALLBACK;
+  }
+};
+
+// ──────────────────────────────────────────
+// WEEKLY PLAN
+// ──────────────────────────────────────────
+export const generateWeeklyPlan = async (user, archetype, metrics, activeGoals = []) => {
+  const vp = user.voice_profile || {};
+
+  const metricsText = metrics
+    ? `Performance: ${metrics.total_sent || 0} messages sent, ${Math.round((metrics.positive_rate || 0) * 100)}% positive rate`
+    : 'No performance data yet — user is early stage';
+
+  const goalsText = activeGoals.length
+    ? activeGoals.map(g => `- "${g.goal_text}"${g.target_date ? ` (by ${g.target_date})` : ''}`).join('\n')
+    : 'No specific goals set';
+
+  const prompt = `${SYSTEM_PROMPTS.GROWTH_STRATEGIST}
+
+Generate a weekly growth plan for this user.
+
+USER: ${user.business_name || ''} — ${user.product_description}
+Archetype: ${archetype}
+Differentiator: ${vp.unique_value_prop || 'not specified'}
+${metricsText}
+Goals this week:
+${goalsText}
+
+Create a focused weekly plan — not a generic to-do list. A real strategic brief.
+
+Return ONLY this JSON:
+{
+  "title": "This Week: [one sharp focus area, under 8 words]",
+  "body": "3-4 sentences — what the priority is this week, why, and what success looks like. Specific to their situation.",
+  "focus_area": "The ONE thing that matters most this week",
+  "daily_actions": [
+    "Monday: specific action",
+    "Tuesday: specific action",
+    "Wednesday: specific action",
+    "Thursday: specific action",
+    "Friday: specific action"
+  ]
+}`;
+
+  const FALLBACK = {
+    title:        'This Week: Build Your Outreach Habit',
+    body:         `Focus on consistency over perfection this week. Aim to reach out to 2-3 people per day from your target audience. The goal isn't to close deals — it's to collect real feedback and build momentum.`,
+    focus_area:   'Daily outreach consistency',
+    daily_actions: [
+      'Monday: Send 3 messages to your warmest leads',
+      'Tuesday: Follow up with anyone who hasn\'t replied in 48h',
+      'Wednesday: Practice one difficult scenario in practice mode',
+      'Thursday: Review what\'s working and adjust your message',
+      'Friday: Set next week\'s outreach target based on this week\'s data'
+    ]
+  };
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.65,
+      maxTokens:   500,
+      modelName:   PRO_MODEL
+    });
+    const clean  = content.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+    if (!parsed.title || !parsed.body) return FALLBACK;
+    return { ...FALLBACK, ...parsed };
+  } catch (err) {
+    console.error('[Groq] generateWeeklyPlan FAILED:', err.message);
+    return FALLBACK;
+  }
+};
+
+// ──────────────────────────────────────────
+// HELPERS
+// ──────────────────────────────────────────
+const parseScore = (value, opts = { min: 1, max: 10, defaultVal: 5 }) => {
+  if (typeof value === 'number') return Math.min(opts.max, Math.max(opts.min, Math.round(value)));
+  if (typeof value === 'string') {
+    const fraction = value.match(/(\d+)\s*\/\s*\d+/);
+    if (fraction) return Math.min(opts.max, Math.max(opts.min, parseInt(fraction[1])));
+    const num = parseInt(value);
+    if (!isNaN(num)) return Math.min(opts.max, Math.max(opts.min, num));
+  }
+  return opts.defaultVal;
+};
+export const generateBuyerProfile = async (user, scenarioType, bioNote = '') => {
+  const vp = user.voice_profile || {};
+
+  const bioInstruction = bioNote
+    ? `The user has described the prospect they want to practice with:\n"${bioNote}"\nHonor this description — use it to shape the name, role, company, and personality. Fill in any gaps with realistic detail.`
+    : `Generate a contextually appropriate profile for someone the founder is likely to sell to.`;
+
+  const prompt = `You are generating a realistic buyer persona for a sales training simulator.
+
+Founder's product: "${user.product_description}"
+Target audience: "${user.target_audience || 'not specified'}"
+Scenario type: ${scenarioType}
+
+${bioInstruction}
+
+Rules:
+- Make the person feel like a real, specific decision-maker — not a generic archetype
+- Include at least one hidden motivation the founder would need to ask a discovery question to uncover
+- The interest_score should start between 20–45 (they haven't heard a pitch yet)
+- The trust_score should start between 10–30 (they don't know this founder)
+- The patience_remaining is how many more messages before they naturally disengage (5–10)
+- opening_mood reflects how they're feeling when the first message arrives
+
+Return ONLY valid JSON, no markdown, no explanation:
+{
+  "name": "realistic first + last name",
+  "role": "specific job title",
+  "company_size": "e.g. 85 employees",
+  "stage": "e.g. Series A SaaS / bootstrapped / pre-revenue / SMB",
+  "current_tools": ["tool1", "tool2"],
+  "main_pain": "1-2 sentences describing their real, specific problem",
+  "budget_ceiling": number_monthly_in_dollars,
+  "skepticism_about": "what specifically makes them hesitant",
+  "decision_authority": "e.g. recommends, CFO approves / sole decision maker",
+  "time_pressure": "low|medium|high",
+  "hidden_motivations": ["hidden motivation 1 (must be discovered)", "hidden motivation 2"],
+  "competitor_awareness": ["competitor name 1", "competitor name 2"],
+  "personality_base": "3-5 words describing communication style",
+  "opening_mood": "neutral|skeptical|curious|busy",
+  "interest_score": number_20_to_45,
+  "trust_score": number_10_to_30,
+  "confusion_score": 0,
+  "patience_remaining": number_5_to_10
+}`;
+
+  const FALLBACK = {
+    name: 'Alex Morgan',
+    role: 'Head of Operations',
+    company_size: '55 employees',
+    stage: 'Series A SaaS',
+    current_tools: ['Notion', 'Slack', 'Google Sheets'],
+    main_pain: 'Team spends 30% of their week on manual reporting and status updates.',
+    budget_ceiling: 2000,
+    skepticism_about: 'Whether a new tool will actually get adoption from the team',
+    decision_authority: 'recommends, CEO approves',
+    time_pressure: 'medium',
+    hidden_motivations: ['CEO wants a 25% efficiency gain this quarter', 'Their best engineer is threatening to quit over tool overload'],
+    competitor_awareness: [],
+    personality_base: 'direct, data-driven, skeptical of new vendors',
+    opening_mood: 'neutral',
+    interest_score: 30,
+    trust_score: 15,
+    confusion_score: 0,
+    patience_remaining: 7,
+  };
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.85,
+      maxTokens:   600,
+      modelName:   PRO_MODEL,
+    });
+    const clean  = content.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+    if (!parsed.name || !parsed.role || !parsed.main_pain) throw new Error('Invalid structure');
+    return { ...FALLBACK, ...parsed };
+  } catch (err) {
+    console.error('[Groq] generateBuyerProfile FAILED:', err.message);
+    return FALLBACK;
+  }
+};
+
+// ──────────────────────────────────────────
+// FEATURE 2 — BUYER DECISION ENGINE
+// Lightweight call after EVERY founder message.
+// Returns state deltas and the new mood.
+// Uses FLASH_MODEL for speed (runs in parallel with prospect reply).
+// ──────────────────────────────────────────
+export const evaluateBuyerStateChange = async (
+  buyerProfile,
+  currentState,
+  conversationHistory = [],
+  founderMessage
+) => {
+  const last6 = conversationHistory.slice(-6)
+    .map(m => `${m.role === 'user' ? 'Founder' : 'Prospect'}: ${m.content}`)
+    .join('\n');
+
+  const prompt = `You are evaluating how a founder's outreach message affects a buyer's internal state.
+
+Buyer: ${buyerProfile.name || 'the prospect'}, ${buyerProfile.role || 'decision maker'}
+Main pain: ${buyerProfile.main_pain || 'operational challenges'}
+Skeptical about: ${buyerProfile.skepticism_about || 'switching costs'}
+Current state: interest=${currentState.interest_score}/100, trust=${currentState.trust_score}/100, confusion=${currentState.confusion_score}/100, patience=${currentState.patience_remaining}, mood=${currentState.mood || 'neutral'}
+
+Recent conversation:
+${last6 || '(first message)'}
+
+Founder's new message:
+"${founderMessage}"
+
+Scoring criteria:
+- Specific outcome metric → +8–15 interest, +5–10 trust
+- Discovery question before pitching → +5–10 trust, +3–8 interest
+- Vague generic claim → -5–10 interest
+- Price introduced (trust < 40) → -5–15 interest
+- Message too long (>80 words) → -1–2 patience, -3 interest
+- Strong objection handled → +8–12 trust, +5 interest
+- Confusion or unclear → +5–10 confusion, -3 interest
+- Addressed their specific pain → +10–15 interest
+
+Return ONLY valid JSON:
+{
+  "interest_delta": number_between_-15_and_20,
+  "trust_delta": number_between_-10_and_15,
+  "confusion_delta": number_between_-5_and_10,
+  "patience_delta": number_between_-2_and_0,
+  "mood": "neutral|curious|skeptical|confused|frustrated|impressed|losing_interest|ready_to_advance",
+  "reasoning": "one sentence explaining the main driver"
+}`;
+
+  const FALLBACK = {
+    interest_delta:  0,
+    trust_delta:     0,
+    confusion_delta: 0,
+    patience_delta: -1,
+    mood:           'neutral',
+    reasoning:      'Message processed.',
+  };
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.3,
+      maxTokens:   200,
+      modelName:   FLASH_MODEL,
+    });
+    const clean  = content.replace(/```json|```/g, '').trim();
+    return { ...FALLBACK, ...JSON.parse(clean) };
+  } catch (err) {
+    console.error('[Groq] evaluateBuyerStateChange FAILED:', err.message);
+    return FALLBACK;
+  }
+};
+
+// ──────────────────────────────────────────
+// FEATURES 1 + 2 + 3 — PROSPECT REPLY V2
+// Uses full buyer profile + live state + 50-message history.
+// Replaces generatePracticeProspectReply for V2 sessions.
+// ──────────────────────────────────────────
+export const generatePracticeProspectReplyV2 = async (
+  user,
+  founderMessage,
+  session,             // { scenario_type, buyer_profile, buyer_state, session_goal, difficulty_level, drill_type }
+  conversationHistory = [],
+  options = {}
+) => {
+  const { attachmentContext = '' } = options;
+  const vp           = user.voice_profile || {};
+  const buyerProfile = session.buyer_profile || {};
+  const buyerState   = session.buyer_state   || {};
+  const scenarioType = session.scenario_type;
+  const difficulty   = session.difficulty_level || 'standard';
+  const drillType    = session.drill_type || null;
+
+  // Feature 3 — Dynamic Personality Drift thresholds
+  const interest = buyerState.interest_score || 30;
+  const trust    = buyerState.trust_score    || 15;
+  const confusion = buyerState.confusion_score || 0;
+  const patience = buyerState.patience_remaining || 7;
+  const mood     = buyerState.mood || 'neutral';
+
+  // Ghost always ghosts
+  if (scenarioType === 'ghost') return null;
+
+  // Patience hits 0 — polite exit
+  if (patience <= 0) {
+    return `Look, I appreciate the outreach but I have to be straight with you — this isn't the right time. Good luck with it.`;
+  }
+
+  // Interest below 25 — prospect exits naturally (Feature 2 threshold)
+  if (interest < 25) {
+    const exits = [
+      "I don't think the timing is right for us. Thanks anyway.",
+      "Honestly, I'm not seeing the fit here. I'll pass for now.",
+      "I appreciate you reaching out but this isn't something we're looking at.",
+    ];
+    return exits[Math.floor(Math.random() * exits.length)];
+  }
+
+  // Full conversation history (last 50 — Refinement 1)
+  const historyText = conversationHistory.length > 0
+    ? `\n--- Conversation so far ---\n${conversationHistory.slice(-50).map(m =>
+        `${m.role === 'user' ? 'Founder' : 'You (prospect)'}: ${m.content}`
+      ).join('\n')}\n---`
+    : '';
+
+  // Mood instruction map (Feature 3)
+  const moodBehavior = {
+    neutral:          'Respond professionally. Neither warm nor cold.',
+    curious:          'You are engaged. Ask one pointed follow-up question.',
+    skeptical:        'You are not sold. Push back on a specific claim or ask for proof.',
+    confused:         'Something was unclear. Ask a specific clarifying question.',
+    frustrated:       'Keep your response short. Show subtle impatience.',
+    impressed:        'You are genuinely impressed — this is rare. Respond warmly.',
+    losing_interest:  'Give a short, non-committal answer. You are starting to disengage.',
+    ready_to_advance: 'You are interested. Ask about next steps or more details.',
+  };
+
+  // Interest threshold behavior (Feature 2)
+  const thresholdBehavior =
+    interest >= 85 ? 'IMPORTANT: You are very interested. Suggest moving forward or ask about pricing/demo.' :
+    interest >= 70 ? 'You are highly interested. Ask a strong next-step question.' :
+    interest >= 50 ? 'You want more information. Ask something concrete about implementation or results.' :
+    '';
+
+  const difficultyMap = {
+    beginner: 'If the message is OK, be warm and encouraging. If weak, be briefly unclear rather than harsh.',
+    standard: 'Be a realistic busy professional. Push back naturally when warranted.',
+    advanced:  'Be demanding. Probe hard on specifics, ROI, proof points, and alternatives.',
+    expert:    'Only a highly specific, compelling message gets genuine engagement. Be very difficult.',
+  };
+
+  // Drill type overrides
+  const drillOverride = drillType === 'discovery' && !founderMessage.includes('?')
+    ? `No question was asked. Respond with confusion — ask "What are you actually asking me?"`
+    : drillType === 'cta' && !founderMessage.includes('?')
+    ? `No call to action. Respond briefly and don't engage.`
+    : '';
+
+  const contactLabel = getContactLabel(buyerProfile);
+  const editableDetailsText = buyerProfile.editable_details
+    ? Object.entries(buyerProfile.editable_details).map(([k, v]) => `${k}: ${v}`).join('\n') : '';
+
+  const personaIntro = buyerProfile.name
+    ? `You are ${buyerProfile.name}, ${buyerProfile.role}${buyerProfile.stage && buyerProfile.stage !== 'not applicable' ? ` (${buyerProfile.stage})` : ''}.
+Your situation: ${buyerProfile.main_pain}
+You're skeptical about: ${buyerProfile.skepticism_about}
+${buyerProfile.current_tools?.length ? `Currently using: ${buyerProfile.current_tools.join(', ')}` : ''}
+${editableDetailsText}
+Personality: ${buyerProfile.personality_base || 'practical and direct'}`
+    : `You are a realistic ${scenarioType} ${contactLabel.toLowerCase()}.`;
+
+  const prompt = `${SYSTEM_PROMPTS.PRACTICE_PROSPECT}
+
+${personaIntro}
+
+They offer: "${user.product_description}" to "${user.target_audience || 'their target audience'}"
+${historyText}
+
+Their new message:
+"${founderMessage}${attachmentContext}"
+
+Interest: ${interest}/100, Trust: ${trust}/100
+Difficulty: ${difficultyMap[difficulty] || difficultyMap.standard}
+${thresholdBehavior ? `Note: ${thresholdBehavior}` : ''}
+${drillOverride ? `Drill override: ${drillOverride}` : ''}
+
+REPLY RULES:
+- 1–3 sentences MAXIMUM. Real human texting on their phone.
+- No sign-offs, no bullet points, no structure.
+- Stay in character as ${buyerProfile.name || `this ${contactLabel.toLowerCase()}`} completely.
+
+Also return coaching tip and state delta in same response.
+
+STATE DELTA — how this message shifted your state:
+- interest_delta: -15 to +15
+- trust_delta: -10 to +10
+- confusion_delta: -5 to +5
+
+COACHING TIP — as the sales coach analyzing their message:
+- what_worked: 1 specific sentence or "N/A"
+- what_didnt: 1-2 specific sentences
+- improvement: 1-2 sentences with a rewrite example
+- needs_reflection: true if rejection or skepticism is particularly instructive
+
+Return ONLY valid JSON:
+{
+  "reply": "response text",
+  "state_delta": { "interest_delta": 0, "trust_delta": 0, "confusion_delta": 0, "reasoning": "..." },
+  "coaching_tip": { "what_worked": "...", "what_didnt": "...", "improvement": "...", "needs_reflection": false }
+}`;
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.88,
+      maxTokens:   500,
+      modelName:   PRO_MODEL,
+    });
+    try {
+      const clean  = content.replace(/```json|```/g, '').trim();
+      const parsed = JSON.parse(clean);
+      return {
+        reply:        parsed.reply || "Not right now, but appreciate the message.",
+        state_delta:  parsed.state_delta  || { interest_delta: 0, trust_delta: 0, confusion_delta: 0, reasoning: '' },
+        coaching_tip: parsed.coaching_tip || null,
+      };
+    } catch {
+      // If JSON fails, extract text reply
+      return {
+        reply:        parseTextResponse(content, "Not right now, but appreciate the message."),
+        state_delta:  { interest_delta: 0, trust_delta: 0, confusion_delta: 0, reasoning: '' },
+        coaching_tip: null,
+      };
+    }
+  } catch (err) {
+    console.error('[Groq] generatePracticeProspectReplyV2 FAILED:', err.message);
+    return { reply: "Not right now, but appreciate the message.", state_delta: { interest_delta: 0, trust_delta: 0, confusion_delta: 0, reasoning: '' }, coaching_tip: null };
+  }
+};
+
+// ──────────────────────────────────────────
+// FEATURES 4 + 5 — SESSION COACHING ANNOTATIONS (with word highlights)
+// Background job: called after session completes (5s delay).
+// Processes full conversation + state history.
+// Returns array of timestamped coaching annotations.
+// ──────────────────────────────────────────
+export const generateCoachingAnnotations = async (user, messages, stateHistory = [], buyerProfile = {}) => {
+  const vp = user.voice_profile || {};
+
+  const founderMessages = messages.filter(m => m.role === 'user');
+  if (founderMessages.length === 0) return [];
+
+  const sessionStart = messages[0] ? new Date(messages[0].created_at).getTime() : Date.now();
+
+  const transcript = messages
+    .filter(m => m.role !== 'system')
+    .map(m => ({
+      id:      m.id,
+      role:    m.role,
+      content: m.content,
+      seconds: Math.round((new Date(m.created_at).getTime() - sessionStart) / 1000),
+    }));
+
+  const stateHistoryContext = stateHistory.length > 0
+    ? `Buyer state changes during session:\n${JSON.stringify(stateHistory.slice(0, 30), null, 1)}`
+    : '';
+
+  const prompt = `You are generating coaching annotations for a completed sales practice session.
+
+Buyer: ${buyerProfile.name || 'the prospect'}, ${buyerProfile.role || 'decision maker'}
+Buyer pain: ${buyerProfile.main_pain || 'not specified'}
+Founder sells: "${user.product_description}"
+ICP: "${vp.target_customer_description || user.target_audience || 'not specified'}"
+
+Full conversation:
+${transcript.map(m => `[${m.seconds}s] [${m.role}] [id:${m.id}]: ${m.content}`).join('\n')}
+
+${stateHistoryContext}
+
+For each FOUNDER message that deserves coaching, generate an annotation.
+Only annotate when it adds real value. Skip unremarkable messages.
+
+Prioritize annotating:
+- Missed discovery questions (pitching before diagnosing)  → severity: critical
+- Vague value claims with no metrics or specifics          → severity: warning
+- Price introduced before trust was established           → severity: critical
+- Messages over 80 words (too long)                       → severity: warning
+- No question / weak CTA                                  → severity: warning
+- Filler language ("basically," "kind of," "you guys")    → severity: warning
+- Strong discovery question asked                         → severity: positive
+- Specific metric or outcome cited                        → severity: positive
+- Objection handled well                                  → severity: positive
+
+Return ONLY a JSON array. Each item:
+{
+  "message_id": "the id string from [id:xxx]",
+  "timestamp_seconds": number,
+  "severity": "critical|warning|positive",
+  "type": "missed_discovery|weak_value|price_too_early|vague_claim|filler_language|no_cta|strong_discovery|specific_metric|good_objection_handle",
+  "issue": "one sentence describing what happened",
+  "better_approach": "one sentence describing what to do instead",
+  "example_rewrite": "concrete rewrite of the actual message",
+  "word_highlights": [
+    {"phrase": "exact phrase from the message", "issue": "why it's weak", "type": "filler|vague|informal|overlong|strong"}
+  ],
+  "interest_delta_caused": estimated_number
+}
+
+Only return the JSON array. No explanation, no markdown.`;
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.35,
+      maxTokens:   2500,
+      modelName:   PRO_MODEL,
+    });
+    const clean  = content.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (err) {
+    console.error('[Groq] generateCoachingAnnotations FAILED:', err.message);
+    return [];
+  }
+};
+
+// ──────────────────────────────────────────
+// FEATURE 7 — MULTI-AXIS SKILL SCORING
+// Background job: called after session completes (2s delay).
+// Returns 6-axis scores + overall session score.
+// ──────────────────────────────────────────
+export const generateMultiAxisScores = async (user, messages, buyerProfile = {}) => {
+  const vp = user.voice_profile || {};
+
+  const founderMessages = messages.filter(m => m.role === 'user');
+  if (founderMessages.length === 0) {
+    return {
+      session_score: 0,
+      axes: { clarity: 0, value: 0, discovery: 0, objection_handling: 0, brevity: 0, cta_strength: 0 },
+      weakest_axis: 'discovery',
+      strongest_axis: 'clarity',
+      one_line_verdict: 'No messages to score.'
+    };
+  }
+
+  const fullConversation = messages
+    .filter(m => m.role !== 'system')
+    .map(m => `${m.role === 'user' ? 'Founder' : 'Prospect'}: ${m.content}`)
+    .join('\n');
+
+  const prompt = `Score this completed sales practice session across 6 axes.
+
+Product being sold: "${user.product_description}"
+Target audience: "${user.target_audience || vp.target_customer_description || 'not specified'}"
+Buyer profile: ${JSON.stringify(buyerProfile)}
+
+Full conversation:
+${fullConversation}
+
+Score each axis 0–100 based on the ENTIRE conversation:
+- clarity: Were messages easy to understand in one read?
+- value: Were specific outcomes or metrics communicated?
+- discovery: Did the founder ask diagnostic questions before pitching?
+- objection_handling: Were pushbacks addressed thoughtfully with specifics?
+- brevity: Were messages appropriately concise (not over-explained)?
+- cta_strength: Did messages end with clear next steps or questions?
+
+Scoring notes:
+- discovery is the most commonly weak axis — score it critically
+- brevity: >80 words per message = significant deduction
+- cta_strength: score 0 if the founder never asked a question
+
+Return ONLY this JSON:
+{
+  "session_score": weighted_average_0_to_100,
+  "axes": {
+    "clarity": 0-100,
+    "value": 0-100,
+    "discovery": 0-100,
+    "objection_handling": 0-100,
+    "brevity": 0-100,
+    "cta_strength": 0-100
+  },
+  "weakest_axis": "axis_name",
+  "strongest_axis": "axis_name",
+  "one_line_verdict": "one honest, specific sentence summarizing overall performance"
+}`;
+
+  const FALLBACK = {
+    session_score: 50,
+    axes: { clarity: 55, value: 45, discovery: 40, objection_handling: 50, brevity: 60, cta_strength: 45 },
+    weakest_axis: 'discovery',
+    strongest_axis: 'brevity',
+    one_line_verdict: 'Decent attempt — focus on asking discovery questions before pitching.'
+  };
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.3,
+      maxTokens:   400,
+      modelName:   PRO_MODEL,
+    });
+    const clean  = content.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+    if (!parsed.axes || parsed.session_score == null) return FALLBACK;
+    return { ...FALLBACK, ...parsed };
+  } catch (err) {
+    console.error('[Groq] generateMultiAxisScores FAILED:', err.message);
+    return FALLBACK;
+  }
+};
+
+export const generateAdaptiveCurriculum = async (user, skillProfileRows = [], recentSessions = []) => {
+  const vp = user.voice_profile || {};
+  const axes = ['clarity', 'value', 'discovery', 'objection_handling', 'brevity', 'cta_strength'];
+
+  // Compute averages from recent skill profile rows
+  const averages = {};
+  for (const axis of axes) {
+    const colMap = {
+      clarity: 'clarity_avg', value: 'value_avg', discovery: 'discovery_avg',
+      objection_handling: 'objection_avg', brevity: 'brevity_avg', cta_strength: 'cta_avg',
+    };
+    const col  = colMap[axis];
+    const vals = skillProfileRows.filter(r => r[col] != null).map(r => parseFloat(r[col]));
+    averages[axis] = vals.length > 0
+      ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length)
+      : 50;
+  }
+
+  const weakest  = Object.entries(averages).sort((a, b) => a[1] - b[1]);
+  const strongest = Object.entries(averages).sort((a, b) => b[1] - a[1]);
+  const recentTypes = recentSessions.slice(0, 10).map(s => s.scenario_type).join(', ') || 'none';
+
+  const prompt = `Generate a personalized 3-session practice plan for a sales founder.
+
+Founder: "${user.product_description}"
+Audience: "${user.target_audience || vp.target_customer_description || 'not specified'}"
+
+Their current skill averages:
+${axes.map(a => `${a}: ${averages[a]}/100`).join('\n')}
+
+Weakest axis: ${weakest[0][0]} (${weakest[0][1]}/100)
+Strongest axis: ${strongest[0][0]} (${strongest[0][1]}/100)
+Recently practiced scenarios: ${recentTypes}
+
+Generate a targeted 3-session weekly plan. Session 1 should target the weakest axis directly.
+Session 2 should combine weakest + second weakest. Session 3 should be a full scenario.
+
+Return ONLY this JSON:
+{
+  "weakness_identified": "axis_name",
+  "weakness_score": number,
+  "goal_description": "what they should achieve by end of week (specific and actionable)",
+  "sessions": [
+    {
+      "session_number": 1,
+      "title": "short punchy title",
+      "type": "drill",
+      "drill_type": "discovery|brevity|value|cta",
+      "scenario_type": "interested|skeptical|price_objection|polite_decline|not_right_time",
+      "focus_axis": "axis_name",
+      "description": "1-2 sentences on what to focus on and why",
+      "target_score": number_0_to_100
+    },
+    {
+      "session_number": 2,
+      "title": "short punchy title",
+      "type": "drill",
+      "drill_type": "discovery|brevity|value|cta",
+      "scenario_type": "interested|skeptical|price_objection|polite_decline|not_right_time",
+      "focus_axis": "axis_name",
+      "description": "1-2 sentences",
+      "target_score": number
+    },
+    {
+      "session_number": 3,
+      "title": "short punchy title",
+      "type": "full_scenario",
+      "drill_type": null,
+      "scenario_type": "interested|skeptical|price_objection|polite_decline|not_right_time",
+      "focus_axis": "axis_name",
+      "description": "1-2 sentences",
+      "target_score": number
+    }
+  ]
+}`;
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.5,
+      maxTokens:   700,
+      modelName:   PRO_MODEL,
+    });
+    const clean  = content.replace(/```json|```/g, '').trim();
+    return JSON.parse(clean);
+  } catch (err) {
+    console.error('[Groq] generateAdaptiveCurriculum FAILED:', err.message);
+    return null;
+  }
+};
+
+// ──────────────────────────────────────────
+// FEATURE 11 — PLAYBOOK GENERATION
+// Background job: 2 hours after session completes.
+// Only for sessions with score > 60 or meaningful content.
+// ──────────────────────────────────────────
+export const generatePlaybook = async (user, messages, buyerProfile = {}, annotations = [], scenarioType = '') => {
+  const vp = user.voice_profile || {};
+
+  const transcript = messages
+    .filter(m => m.role !== 'system')
+    .map(m => `${m.role === 'user' ? 'Founder' : 'Prospect'}: ${m.content}`)
+    .join('\n');
+
+  const positiveAnnotations = annotations
+    .filter(a => a.severity === 'positive')
+    .map(a => a.issue)
+    .join('; ');
+
+  const prompt = `Generate a personalized sales playbook based on a completed practice session.
+
+Founder's product: "${user.product_description}"
+Target audience: "${user.target_audience || vp.target_customer_description || 'not specified'}"
+Their differentiator: "${vp.unique_value_prop || 'not specified'}"
+Their best proof point: "${vp.best_proof_point || 'not specified'}"
+Their main objection: "${vp.main_objection || 'not specified'}"
+Their objection reframe: "${vp.objection_reframe || 'not specified'}"
+Scenario practiced: ${scenarioType}
+Buyer type: ${buyerProfile.role || 'decision maker'} at ${buyerProfile.stage || 'a company'}
+
+What worked in this session: ${positiveAnnotations || 'general engagement'}
+
+Practice conversation:
+${transcript.slice(0, 2500)}
+
+Generate a practical, reusable playbook for this specific buyer type. Be specific — use their actual product, audience, proof points.
+
+Return ONLY this JSON:
+{
+  "opening_message": "best opening message template (50-80 words, ready to use)",
+  "discovery_questions": [
+    "discovery question 1",
+    "discovery question 2",
+    "discovery question 3"
+  ],
+  "objection_responses": [
+    {"objection": "specific objection", "response": "how to handle it concisely"},
+    {"objection": "specific objection 2", "response": "how to handle it"},
+    {"objection": "specific objection 3", "response": "how to handle it"}
+  ],
+  "closing_cta": "best closing call to action for this buyer type",
+  "key_insight": "the single most important thing to remember with this buyer type"
+}`;
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.55,
+      maxTokens:   900,
+      modelName:   PRO_MODEL,
+    });
+    const clean  = content.replace(/```json|```/g, '').trim();
+    return JSON.parse(clean);
+  } catch (err) {
+    console.error('[Groq] generatePlaybook FAILED:', err.message);
+    return null;
+  }
+};
+
+// ──────────────────────────────────────────
+// FEATURE 13 — GROQ FALLBACK COMPETITOR CONTEXT
+// Used when Perplexity is unavailable.
+// ──────────────────────────────────────────
+export const generateCompetitorContext = async (competitor, productDescription) => {
+  const prompt = `You are generating realistic competitor context for a sales training simulation.
+
+The prospect's current tool: "${competitor}"
+The product the founder is selling: "${productDescription}"
+
+In 2-3 sentences from the prospect's perspective, describe:
+1. What they like about ${competitor}
+2. One specific reason that makes it hard to switch
+
+Be realistic and specific. Sound like a real user of ${competitor}. Return only plain text.`;
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.7,
+      maxTokens:   150,
+    });
+    return parseTextResponse(content, `${competitor} has been working fine for our needs.`);
+  } catch {
+    return `We've been using ${competitor} for a while and the team is used to it.`;
+  }
+};
+
+// ──────────────────────────────────────────
+// FEATURE 6 — RETRY COMPARISON
+// Called from skill-scores job when retry_of_session_id is set.
+// Generates structured diff between original and retry attempt.
+// ──────────────────────────────────────────
+export const generateRetryComparison = async (
+  user, originalMessages, retryMessages, originalScore, retryScore
+) => {
+  const origMsgs  = (originalMessages || []).filter(m => m.role === 'user').map(m => m.content);
+  const retryMsgs = (retryMessages    || []).filter(m => m.role === 'user').map(m => m.content);
+
+  if (!origMsgs.length || !retryMsgs.length) return null;
+
+  const prompt = `Compare two attempts at a sales practice session.
+
+Attempt 1 (session score: ${originalScore || '?'}/100):
+${origMsgs.slice(0, 5).join('\n---\n')}
+
+Attempt 2 (session score: ${retryScore || '?'}/100):
+${retryMsgs.slice(0, 5).join('\n---\n')}
+
+Generate a precise side-by-side comparison showing what changed and why it worked or didn't.
+
+Return ONLY this JSON:
+{
+  "score_improvement": ${(retryScore || 0) - (originalScore || 0)},
+  "improved": ${(retryScore || 0) > (originalScore || 0)},
+  "key_improvements": ["specific improvement 1", "specific improvement 2"],
+  "still_needs_work": ["specific thing still weak"],
+  "best_new_phrase": "the single strongest new phrase or approach in attempt 2",
+  "verdict": "one honest sentence summarizing whether the retry was meaningfully better"
+}`;
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.4,
+      maxTokens:   500,
+      modelName:   PRO_MODEL,
+    });
+    const clean  = content.replace(/```json|```/g, '').trim();
+    return JSON.parse(clean);
+  } catch (err) {
+    console.error('[Groq] generateRetryComparison FAILED:', err.message);
+    return null;
+  }
+};
+
+export const parseV3Reply = (content) => {
+  const FALLBACK_V3 = {
+    reply: "Not right now, but appreciate the message.",
+    internal_monologue: "I didn't have enough information to decide.",
+    monologue_severity: "neutral",
+    conversation_outcome: { type: 'continuing', reason: null, internal_reaction: null },
+    goal_achieved: false,
+    state_delta: { interest_delta: 0, trust_delta: 0, confusion_delta: 0, reasoning: '' },
+    coaching_tip: null,
+    needs_search: false,
+  };
+
+  try {
+    const clean  = content.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+
+    return {
+      reply:               parsed.reply              || FALLBACK_V3.reply,
+      internal_monologue:  parsed.internal_monologue || null,
+      monologue_severity:  parsed.monologue_severity || 'neutral',
+      conversation_outcome: {
+        type:              parsed.conversation_outcome?.type             || 'continuing',
+        reason:            parsed.conversation_outcome?.reason           || null,
+        internal_reaction: parsed.conversation_outcome?.internal_reaction || null,
+      },
+      goal_achieved: typeof parsed.goal_achieved === 'boolean' ? parsed.goal_achieved : false,
+      state_delta: {
+        interest_delta:  parsed.state_delta?.interest_delta  ?? 0,
+        trust_delta:     parsed.state_delta?.trust_delta     ?? 0,
+        confusion_delta: parsed.state_delta?.confusion_delta ?? 0,
+        reasoning:       parsed.state_delta?.reasoning       || '',
+      },
+      coaching_tip: parsed.coaching_tip || null,
+      needs_search: parsed.needs_search === true,
+    };
+  } catch {
+    const textOnly = content.split('{')[0].trim();
+    return {
+      ...FALLBACK_V3,
+      reply: textOnly || FALLBACK_V3.reply,
+    };
+  }
+};
+
+// ──────────────────────────────────────────
+// PRESSURE MODIFIER PROMPT BLOCKS
+// Injected into V3 system prompt when pressure_modifier is set
+// ──────────────────────────────────────────
+const PRESSURE_MODIFIER_BLOCKS = {
+  investor_present: `
+PRESSURE MODIFIER — investor_present:
+A senior investor is sitting in on this call today.
+You are more guarded than usual. You want to look sharp in front of them.
+This means:
+- You ask harder ROI questions than you normally would
+- You reference "our investors" or "the board" when discussing budget
+- You are less casual and more formal in your language
+- You will not commit to anything without a number to justify it`,
+
+  aggressive_buyer: `
+PRESSURE MODIFIER — aggressive_buyer:
+You are having a particularly bad week.
+You're impatient with vendors right now.
+This means:
+- Your replies are shorter and more blunt
+- You push back on claims immediately, even reasonable ones
+- You express skepticism directly ("I don't buy that")
+- You will end the conversation early if you sense fluff`,
+
+  competitor_mentioned: `
+PRESSURE MODIFIER — competitor_mentioned:
+You have been actively evaluating a competing product for the past 2 weeks.
+This means:
+- You compare everything to what you've seen from the competitor
+- You will ask "how is this different?" at some point
+- If the founder doesn't address the competitor, your interest drops
+- You already have a benchmark — vague claims don't move you`,
+
+  security_audit: `
+PRESSURE MODIFIER — security_audit:
+Your company is currently undergoing a SOC 2 audit.
+This means:
+- You will raise data handling and compliance questions
+- You cannot adopt any new vendor without security review approval
+- You may derail the sales conversation with compliance questions
+- However, if the founder handles this smoothly, your trust increases significantly`,
+};
+
+// ──────────────────────────────────────────
+// V3 CORE FUNCTION — generatePracticeProspectReplyV3
+//
+// KEY DESIGN:
+//  - ONE Groq call returns: reply + internal_monologue + conversation_outcome + goal_achieved
+//  - Outcome is 100% AI-determined — no hard overrides based on patience/interest scores
+//  - Outcome type is free-form — AI uses natural language (not a constrained enum)
+//  - Full conversation history passed in (not just last message)
+//  - session_goal passed in; AI returns goal_achieved boolean
+// ──────────────────────────────────────────
+export const generatePracticeProspectReplyV3 = async (
+  user,
+  founderMessage,
+  session,              // { scenario_type, buyer_profile, buyer_state, session_goal, difficulty_level, drill_type, pressure_modifier }
+  conversationHistory = [],
+  options = {}
+) => {
+  const { attachmentContext = '' } = options;
+  const vp             = user.voice_profile || {};
+  const buyerProfile   = session.buyer_profile   || {};
+  const buyerState     = session.buyer_state     || {};
+  const scenarioType   = session.scenario_type;
+  const difficulty     = session.difficulty_level || 'standard';
+  const drillType      = session.drill_type        || null;
+  const pressureModifier = session.pressure_modifier || null;
+  const sessionGoal    = session.session_goal || null;
+
+  // Ghost always ghosts — no reply generated
+  if (scenarioType === 'ghost') return null;
+
+  const interest  = buyerState.interest_score    || 30;
+  const trust     = buyerState.trust_score       || 15;
+  const confusion = buyerState.confusion_score   || 0;
+  const patience  = buyerState.patience_remaining || 7;
+  const mood      = buyerState.mood              || 'neutral';
+
+  // ── Full conversation history (all messages, not just last) ──────────────
+  const historyText = conversationHistory.length > 0
+    ? `\n--- Full conversation so far ---\n${conversationHistory.map(m =>
+        `${m.role === 'user' ? 'Founder' : 'You (prospect)'}: ${m.content}`
+      ).join('\n')}\n---`
+    : '';
+
+  // ── Mood behavior map ─────────────────────────────────────────────────────
+  const moodBehavior = {
+    neutral:          'Respond professionally. Neither warm nor cold.',
+    curious:          'You are engaged. Ask one pointed follow-up question.',
+    skeptical:        'You are not sold. Push back on a specific claim or ask for proof.',
+    confused:         'Something was unclear. Ask a specific clarifying question.',
+    frustrated:       'Keep your response short. Show subtle impatience.',
+    impressed:        'You are genuinely impressed — this is rare. Respond warmly.',
+    losing_interest:  'Give a short, non-committal answer. You are starting to disengage.',
+    ready_to_advance: 'You are interested. Ask about next steps or more details.',
+  };
+
+  // ── Interest threshold behavior ───────────────────────────────────────────
+  const thresholdBehavior =
+    interest >= 85 ? 'IMPORTANT: You are very interested. This conversation may be reaching a natural positive conclusion — consider suggesting next steps or asking about pricing/demo.' :
+    interest >= 70 ? 'You are highly interested. Ask a strong next-step question.' :
+    interest >= 50 ? 'You want more information. Ask something concrete about implementation or results.' :
+    '';
+
+  // ── Difficulty map ────────────────────────────────────────────────────────
+  const difficultyMap = {
+    beginner: 'If the message is OK, be warm and encouraging. If weak, be briefly unclear rather than harsh.',
+    standard: 'Be a realistic busy professional. Push back naturally when warranted.',
+    advanced:  'Be demanding. Probe hard on specifics, ROI, proof points, and alternatives.',
+    expert:    'Only a highly specific, compelling message gets genuine engagement. Be very difficult.',
+  };
+
+  // ── Drill type override ───────────────────────────────────────────────────
+  const drillOverride = drillType === 'discovery' && !founderMessage.includes('?')
+    ? `The founder did not ask a question. Respond with confusion or ask "What are you actually asking me?" because there was no clear question.`
+    : drillType === 'cta' && !founderMessage.includes('?')
+    ? `The message had no call to action. Respond briefly and don't engage further.`
+    : '';
+
+  // ── Buyer persona intro ───────────────────────────────────────────────────
+  const prospectIntro = buyerProfile.name
+    ? `You are ${buyerProfile.name}, ${buyerProfile.role} at a company with ${buyerProfile.company_size} (${buyerProfile.stage}).
+Your main pain: ${buyerProfile.main_pain}
+You're skeptical about: ${buyerProfile.skepticism_about}
+Your current tools: ${(buyerProfile.current_tools || []).join(', ')}
+Your personality: ${buyerProfile.personality_base || 'professional and direct'}`
+    : `You are a realistic ${scenarioType} prospect.`;
+
+  // ── Pressure modifier block ───────────────────────────────────────────────
+  const pressureBlock = pressureModifier && PRESSURE_MODIFIER_BLOCKS[pressureModifier]
+    ? PRESSURE_MODIFIER_BLOCKS[pressureModifier]
+    : '';
+
+  // ── Session goal context ──────────────────────────────────────────────────
+  const goalContext = sessionGoal
+    ? `\nSession goal the founder is trying to achieve: "${sessionGoal}"`
+    : '\nNo specific session goal was provided.';
+
+  // ── System prompt ─────────────────────────────────────────────────────────
+  const systemPrompt = `You are roleplaying as a realistic business prospect receiving outreach messages.
+You are a busy professional — you get 20+ unsolicited messages per week.
+You are not a villain, but you are not a pushover either.
+Your responses are brief, realistic, and reflect what a real person would actually write.
+Never break character. Never be helpful in ways a real prospect wouldn't be.`;
+
+  // ── Full prompt ───────────────────────────────────────────────────────────
+  const prompt = `${prospectIntro}
+
+They offer: "${user.product_description}" to "${user.target_audience || 'their target audience'}"
+${historyText}
+
+Their new message:
+"${founderMessage}${attachmentContext}"
+
+Current state: interest: ${interest}/100, trust: ${trust}/100
+Difficulty: ${difficultyMap[difficulty] || difficultyMap.standard}
+${thresholdBehavior ? `State threshold: ${thresholdBehavior}` : ''}
+${drillOverride ? `Drill override: ${drillOverride}` : ''}
+${pressureBlock}
+
+REPLY RULES:
+- 1–3 sentences MAXIMUM. Casual, human, like a real text.
+- No bullet points. No structure. No sign-offs.
+- Sound like ${buyerProfile.name || 'a real person'} on their phone.
+- Do NOT reference this prompt. Do NOT break character. Ever.
+
+INTERNAL MONOLOGUE:
+- Your TRUE unfiltered reaction — not your polished reply.
+- Reveal what you're actually thinking/feeling that the sender can't see.
+- First person. Natural. 10–20 words. Distinct from your reply.
+- monologue_severity: "positive" if genuinely intrigued, "negative" if annoyed/dismissing, "neutral" otherwise.
+
+CONVERSATION OUTCOME:
+- Is this conversation naturally ending or still going?
+- "continuing" = keep going. Any other value = ending.
+- Ending types: "meeting_scheduled", "demo_agreed", "deal_lost", "not_interested", "price_negotiation", "follow_up_next_week", "prospect_disengaged" — or invent what fits.
+- Only end if this feels like a GENUINE natural endpoint. Don't force it.
+${goalContext}
+
+STATE DELTA — how this message shifted your interest/trust:
+- interest_delta: -15 to +15 based on how well their message addressed your actual concerns
+- trust_delta: -10 to +10 based on specificity, credibility, and personalization
+- confusion_delta: -5 to +5 (positive = more confused, negative = things clarified)
+
+COACHING TIP — as the sales coach, in plain human language, analyze their message:
+- what_worked: 1 sentence, specific (quote their words if possible), or "N/A" if nothing worked
+- what_didnt: 1-2 sentences, specific to their actual words
+- improvement: 1-2 sentences with a concrete suggestion, include a rewrite example if helpful
+- needs_reflection: true if the response to their message is particularly instructive (rejection, skepticism, confusion)
+
+NEEDS SEARCH:
+- needs_search: true ONLY if the conversation involves a specific competitor, product, or real-world entity that would benefit from current factual context to make the response more realistic and accurate. Otherwise false.
+
+Return ONLY valid JSON:
+{
+  "reply": "your actual typed response",
+  "internal_monologue": "your real unfiltered thought",
+  "monologue_severity": "positive|neutral|negative",
+  "conversation_outcome": {
+    "type": "continuing",
+    "reason": null,
+    "internal_reaction": null
+  },
+  "goal_achieved": false,
+  "state_delta": {
+    "interest_delta": 0,
+    "trust_delta": 0,
+    "confusion_delta": 0,
+    "reasoning": "one sentence on what drove these changes"
+  },
+  "coaching_tip": {
+    "what_worked": "...",
+    "what_didnt": "...",
+    "improvement": "...",
+    "needs_reflection": false
+  },
+  "needs_search": false
+}`;
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      systemPrompt,
+      temperature: 0.88,
+      maxTokens:   700,
+      modelName:   PRO_MODEL,
+    });
+
+    const parsed = parseV3Reply(content);
+    console.log(`[Groq] V3 bundle generated. Outcome: ${parsed.conversation_outcome?.type}. Goal: ${parsed.goal_achieved}. Search needed: ${parsed.needs_search}`);
+    return parsed;
+  } catch (err) {
+    console.error('[Groq] generatePracticeProspectReplyV3 FAILED:', err.message);
+    return {
+      reply: "Not right now, but appreciate the message.",
+      internal_monologue: null,
+      monologue_severity: "neutral",
+      conversation_outcome: { type: 'continuing', reason: null, internal_reaction: null },
+      goal_achieved: false,
+      state_delta: { interest_delta: 0, trust_delta: 0, confusion_delta: 0, reasoning: '' },
+      coaching_tip: null,
+      needs_search: false,
+    };
+  }
+};
+
+// ──────────────────────────────────────────
+// GHOST QUALITY GATE
+// Evaluates if a message is worth a reply in "ghost" scenario.
+// Low quality → ghost. High enough quality → AI actually replies.
+// ──────────────────────────────────────────
+export const evaluateMessageQualityForGhost = async (user, message, conversationHistory = []) => {
+  const isFirstMessage = conversationHistory.filter(m => m.role === 'user').length <= 1;
+
+  const prompt = `You are evaluating the quality of an outreach message.
+Sender's offering: "${user.product_description}"
+Target: "${user.target_audience || 'general audience'}"
+Message: "${message}"
+Is this the first message? ${isFirstMessage ? 'Yes' : 'No'}
+
+Score this message's quality on a scale of 0-100 based on:
+- Specificity (does it reference a real situation or just generic claims?)
+- Value clarity (does the recipient understand what they'd get?)
+- Personalization (does it feel written for this person or copy-pasted?)
+- Ask quality (is there a clear, easy next step?)
+- Length appropriateness (not too long, not too short)
+
+A score below 40 means the message is too generic/weak to deserve a response from a real busy person.
+A score of 40+ means the message has enough quality that a real person MIGHT respond.
+
+Be honest and critical. Most first messages score 20-45.
+
+Return ONLY valid JSON:
+{
+  "quality_score": <0-100>,
+  "reply_worthy": <true if score >= 40>,
+  "weak_because": "1 sentence on the main weakness (even for good messages)",
+  "hint": "one short actionable fix (under 12 words)"
+}`;
+
+  const FALLBACK = { quality_score: 25, reply_worthy: false, weak_because: 'Message needs more specificity.', hint: 'Reference their specific situation.' };
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.3,
+      maxTokens:   200,
+      modelName:   FLASH_MODEL,
+    });
+    const clean  = content.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+    return {
+      quality_score: parsed.quality_score ?? 25,
+      reply_worthy:  parsed.reply_worthy  ?? (parsed.quality_score >= 40),
+      weak_because:  parsed.weak_because  || FALLBACK.weak_because,
+      hint:          parsed.hint          || FALLBACK.hint,
+    };
+  } catch (err) {
+    console.error('[Groq] evaluateMessageQualityForGhost FAILED:', err.message);
+    return FALLBACK;
+  }
+};
+
+// ──────────────────────────────────────────
+// V3: generatePracticeInterruption
+// Lightweight call (FLASH_MODEL) for mid-session buyer interruptions.
+// Called when exchange_index % 3 === 0 AND patience < 5 AND random < 0.30
+// ──────────────────────────────────────────
+export const generatePracticeInterruption = async (
+  buyerProfile,
+  buyerState,
+  lastFounderMessage
+) => {
+  const interest = buyerState.interest_score || 30;
+  const trust    = buyerState.trust_score    || 15;
+
+  const prompt = `You are ${buyerProfile.name || 'a contact'} in the middle of a conversation.
+The other person just sent: "${lastFounderMessage?.slice(0, 200) || '...'}"
+Your current interest: ${interest}/100, trust: ${trust}/100
+
+Before you reply, you have a quick thought that interrupts the flow.
+Write a natural, spontaneous interjection — a question that just popped into your head, a concern that surfaced, or a time constraint.
+
+1-2 sentences. Sound completely human. Return ONLY the text.`;
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.85,
+      maxTokens:   80,
+      modelName:   FLASH_MODEL,
+    });
+    const text = content.trim().replace(/^["']|["']$/g, '');
+    return text.length > 5 ? text : null;
+  } catch (err) {
+    console.error('[Groq] generatePracticeInterruption FAILED:', err.message);
+    return null;
+  }
+};
+export const computeThinkingDelay = (founderMessage, buyerState, outcomeType) => {
+  const wordCount       = (founderMessage || '').split(' ').length;
+  const baseDelay       = wordCount > 50 ? 3000 : wordCount > 25 ? 1500 : 500;
+  const hasMultipleQs   = (founderMessage.match(/\?/g) || []).length > 1;
+  const questionBonus   = hasMultipleQs ? 2000 : 0;
+  const interestPenalty = (buyerState?.interest_score || 50) < 35 ? -1000 : 0;
+  const outcomeBonus    = outcomeType && outcomeType !== 'continuing' ? 3000 : 0;
+  return Math.max(500, baseDelay + questionBonus + interestPenalty + outcomeBonus);
+};
+
+// ──────────────────────────────────────────
+// V3: Split message into chunks for frontend progressive rendering
+// ──────────────────────────────────────────
+export const splitIntoChunks = (text) => {
+  if (!text) return [text];
+
+  // Rule 1: newlines
+  if (text.includes('\n')) {
+    const parts = text.split('\n').filter(Boolean);
+    if (parts.length <= 3) return parts;
+    // Merge to max 3 chunks
+    return [parts.slice(0, -2).join('\n'), parts[parts.length - 2], parts[parts.length - 1]];
+  }
+
+  // Rule 2 + 3: sentences / questions
+  const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
+  if (sentences.length <= 1) return [text];
+
+  // Rule 4: if > 3 chunks, merge shortest adjacent to get 2–3 total
+  if (sentences.length === 2) return sentences;
+  if (sentences.length === 3) return sentences;
+
+  // Merge to 3 chunks: [first, middle..., last]
+  const first  = sentences[0];
+  const last   = sentences[sentences.length - 1];
+  const middle = sentences.slice(1, -1).join(' ');
+  return [first, middle, last].filter(Boolean);
+};
+
+// ──────────────────────────────────────────
+// V3: UPDATED generateMultiAxisScores
+// Adds 7th axis: monologue_alignment (scored post-session using internal monologues)
+// ──────────────────────────────────────────
+export const generateMultiAxisScoresV3 = async (user, messages, buyerProfile = {}, internalMonologues = []) => {
+  const vp = user.voice_profile || {};
+
+  const founderMessages = messages.filter(m => m.role === 'user');
+  if (founderMessages.length === 0) {
+    return {
+      session_score: 0,
+      axes: { clarity: 0, value: 0, discovery: 0, objection_handling: 0, brevity: 0, cta_strength: 0, monologue_alignment: 0 },
+      weakest_axis:   'discovery',
+      strongest_axis: 'clarity',
+      one_line_verdict: 'No messages to score.'
+    };
+  }
+
+  const fullConversation = messages
+    .filter(m => m.role !== 'system')
+    .map(m => `${m.role === 'user' ? 'Founder' : 'Prospect'}: ${m.content}`)
+    .join('\n');
+
+  // Monologue alignment context
+  const monologueContext = internalMonologues.length > 0
+    ? `\nBuyer's hidden thoughts during session (revealed post-session):\n${
+        internalMonologues.map((m, i) => `Exchange ${i + 1}: "${m}"`).join('\n')
+      }`
+    : '';
+
+  const prompt = `Score this completed sales practice session across 7 axes.
+
+Product being sold: "${user.product_description}"
+Target audience: "${user.target_audience || vp.target_customer_description || 'not specified'}"
+Buyer profile: ${JSON.stringify({ name: buyerProfile.name, role: buyerProfile.role, main_pain: buyerProfile.main_pain })}
+
+Full conversation:
+${fullConversation}
+${monologueContext}
+
+Score each axis 0–100 based on the ENTIRE conversation:
+- clarity: Were messages easy to understand in one read?
+- value: Were specific outcomes or metrics communicated?
+- discovery: Did the founder ask diagnostic questions before pitching?
+- objection_handling: Were pushbacks addressed thoughtfully with specifics?
+- brevity: Were messages appropriately concise (not over-explained)?
+- cta_strength: Did messages end with clear next steps or questions?
+- monologue_alignment: How well did the founder's responses address what the buyer was ACTUALLY thinking (internal monologues)?${internalMonologues.length === 0 ? ' Score 50 if no monologue data available.' : ' Score based on the hidden thoughts revealed above.'}
+
+Scoring notes:
+- discovery is the most commonly weak axis — score it critically
+- brevity: >80 words per message = significant deduction
+- cta_strength: score 0 if the founder never asked a question
+- monologue_alignment: 0–40 = consistently missed real concerns, 41–70 = partial, 71–100 = strong alignment
+
+Return ONLY this JSON:
+{
+  "session_score": weighted_average_0_to_100,
+  "axes": {
+    "clarity": 0-100,
+    "value": 0-100,
+    "discovery": 0-100,
+    "objection_handling": 0-100,
+    "brevity": 0-100,
+    "cta_strength": 0-100,
+    "monologue_alignment": 0-100
+  },
+  "weakest_axis": "axis_name",
+  "strongest_axis": "axis_name",
+  "one_line_verdict": "one honest, specific sentence summarizing overall performance"
+}`;
+
+  const FALLBACK = {
+    session_score: 50,
+    axes: { clarity: 55, value: 45, discovery: 40, objection_handling: 50, brevity: 60, cta_strength: 45, monologue_alignment: 50 },
+    weakest_axis:   'discovery',
+    strongest_axis: 'brevity',
+    one_line_verdict: 'Decent attempt — focus on asking discovery questions before pitching.'
+  };
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.3,
+      maxTokens:   450,
+      modelName:   PRO_MODEL,
+    });
+    const clean  = content.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+    if (!parsed.axes || parsed.session_score == null) return FALLBACK;
+    return { ...FALLBACK, ...parsed };
+  } catch (err) {
+    console.error('[Groq] generateMultiAxisScoresV3 FAILED:', err.message);
+    return FALLBACK;
+  }
+};
+
+// ──────────────────────────────────────────
+// V3: UPDATED generateSessionDebrief
+// Adds monologue_insights field using internal monologues from session
+// ──────────────────────────────────────────
+export const generateSessionDebriefV3 = async (
+  user,
+  messages,
+  scenarioType,
+  difficulty = 'standard',
+  internalMonologues = []
+) => {
+  // (Same as existing generateSessionDebrief but adds monologue_insights)
+  // This is the V3 version that includes buyer thoughts as context
+  const vp = user.voice_profile || {};
+
+  const founderMessages = messages.filter(m => m.role === 'user');
+  const prospectMsgs    = messages.filter(m => m.role === 'assistant');
+
+  if (founderMessages.length === 0) {
+    return {
+      strength:                'Not enough data.',
+      improvement:             'Send at least one message to get feedback.',
+      coachable_moment:        '',
+      example_rewrite:         '',
+      message_score:           0,
+      would_real_prospect_engage: false,
+      monologue_insights:      [],
+    };
+  }
+
+  const transcript = messages
+    .filter(m => m.role !== 'system')
+    .map(m => `${m.role === 'user' ? 'Founder' : 'Prospect'}: ${m.content}`)
+    .join('\n');
+
+  // Top 3 most revealing monologue moments
+  const monologueContext = internalMonologues.length > 0
+    ? `\nINTERNAL MONOLOGUE INSIGHTS:\nThe following are the buyer's hidden thoughts at key moments. Use these to identify the exact moments where trust was built or lost.\n${
+        internalMonologues.slice(0, 5).map((m, i) => `Exchange ${i + 1}: "${m.thought}" (founder said: "${m.founder_summary}")`).join('\n')
+      }`
+    : '';
+
+  const prompt = `You are a brutally honest but empathetic sales coach reviewing a practice session.
+
+Product: "${user.product_description}"
+Audience: "${user.target_audience || vp.target_customer_description || 'not specified'}"
+Scenario: ${scenarioType} | Difficulty: ${difficulty}
+
+Full transcript:
+${transcript}
+${monologueContext}
+
+Evaluate the founder's messages.
+
+Return ONLY this JSON:
+{
+  "strength": "1-2 sentences: what specifically worked (quote from message if possible)",
+  "improvement": "1-2 sentences: the single most important thing to fix",
+  "coachable_moment": "the key insight from this session in one sentence",
+  "example_rewrite": "a concrete rewrite of the weakest message",
+  "message_score": number_0_to_10,
+  "would_real_prospect_engage": true_or_false,
+  "monologue_insights": [
+    {
+      "moment": exchange_number,
+      "founder_message_summary": "brief description of what founder said",
+      "buyer_thought": "the actual internal monologue text",
+      "coaching_takeaway": "one sentence: what this reveals and what to do differently"
+    }
+  ]
+}`;
+
+  const FALLBACK = {
+    strength:                'You sent a message — that\'s the most important step.',
+    improvement:             'Try opening with a specific reference to the prospect\'s situation before mentioning your product.',
+    coachable_moment:        'The founders who get replies are the ones who sound like they actually read what the prospect wrote.',
+    example_rewrite:         '',
+    message_score:           5,
+    would_real_prospect_engage: false,
+    monologue_insights:      [],
+  };
+
+  try {
+    const { content } = await callGroq({
+      messages:    [{ role: 'user', content: prompt }],
+      temperature: 0.5,
+      maxTokens:   600,
+      modelName:   PRO_MODEL,
+    });
+    const clean  = content.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+    if (!parsed.strength || !parsed.improvement) return FALLBACK;
+    return { ...FALLBACK, ...parsed, monologue_insights: parsed.monologue_insights || [] };
+  } catch (err) {
+    console.error('[Groq] generateSessionDebriefV3 FAILED:', err.message);
+    return FALLBACK;
+  }
+};
+
+      
+      
+export default {
+  callGroq, callGemini,
+  streamGroq, streamGemini,
+  generateBurst1Questions, generateNextBurst,
+  generateOnboardingQuestions,   // legacy alias
+  buildVoiceProfile,
+  seedMemoryFromOnboarding,
+  generateSampleOutreachMessage,
+  generateOutreachMessage, scoreOpportunities,
+  generatePracticeScenarioPrompt, generatePracticeScenarioFromOpportunity,
+  generatePracticeProspectReply, generateCoachingTip, generateReflectionContext,
+  generateSessionDebrief, evaluateMessageStrength,
+  getCoachResponse, summarizePerformancePatterns, generateEventPrep,
+  detectUserArchetype,
+  generateDailyTips, generateDailyTip,
+  generateCheckInQuestions, generateCheckInResponse,
+  generateWeeklyPlan,
+  PRIMARY_MODEL, PRO_MODEL, FLASH_MODEL,
+  generateBuyerProfile, evaluateBuyerStateChange, evaluateMessageQualityForGhost,
+  getUserLabel, getContactLabel,
+  generatePracticeProspectReplyV2, generateCoachingAnnotations,generateMultiAxisScores, generateAdaptiveCurriculum,generatePlaybook,generateCompetitorContext,
+  parseV3Reply,generatePracticeProspectReplyV3,generatePracticeInterruption,computeThinkingDelay,splitIntoChunks,generateMultiAxisScoresV3,
+generateSessionDebriefV3,generateRetryComparison     
+};

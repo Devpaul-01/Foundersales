@@ -22,7 +22,6 @@
 import supabaseAdmin from '../config/supabase.js';
 import groqService from '../services/groq.js';
 import { notifyUser } from '../services/notifications.js';
-import { recordTokenUsage } from '../services/tokenTracker.js';
 import { sleep } from '../utils/jobHelpers.js';
 
 const chunk = (arr, size) => Array.from(

@@ -26,6 +26,10 @@ const cookieConfig = {
   maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
 };
 
+// Same as cookieConfig but without maxAge — use this with res.clearCookie(),
+// since Express deprecates passing maxAge there (it now always expires immediately).
+const { maxAge: _unusedMaxAge, ...clearCookieConfig } = cookieConfig;
+
 const registerSchema = z.object({
   email: z.string().email('Invalid email format').max(255),
   password: z.string().min(8, 'Password must be at least 8 characters').max(128),
@@ -244,6 +248,7 @@ router.post('/login', validate(loginSchema), asyncHandler(async (req, res) => {
 
   // Set refresh_token as HTTP-only cookie
   res.cookie('refresh_token', data.session.refresh_token, cookieConfig);
+  console.log(data.session.refresh_token);
 
   const userId = data.user?.id;
   
@@ -325,18 +330,23 @@ router.post('/refresh', asyncHandler(async (req, res) => {
       error: 'REFRESH_FAILED', 
       message: 'No refresh token found' 
     });
+    console.log("rwfredh token not found");
   }
+
 
   const { data, error } = await supabaseAdmin.auth.refreshSession({ refresh_token });
   
   if (error) {
     // Clear the invalid cookie
-    res.clearCookie('refresh_token', cookieConfig);
+    res.clearCookie('refresh_token', clearCookieConfig);
     return res.status(401).json({ 
       error: 'REFRESH_FAILED', 
       message: error.message 
     });
+    console.log("erroe refreshing token");
+
   }
+
 
   // Set the new refresh_token as HTTP-only cookie
   if (data.session?.refresh_token) {
@@ -362,13 +372,7 @@ router.post('/logout', asyncHandler(async (req, res) => {
   log('LOGOUT Request', { ip: clientIp, hasToken: !!authHeader });
 
   // Clear the refresh token cookie first
-  res.clearCookie('refresh_token', {
-  httpOnly: true,
-  secure: process.env.NODE_ENV === 'production',
-  sameSite: 'strict',
-  path: '/api/auth/refresh',
-  // Remove maxAge — it's not needed for clearing
-});
+  res.clearCookie('refresh_token', clearCookieConfig);
   
 
   // Invalidate the access token if present

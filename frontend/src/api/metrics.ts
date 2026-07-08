@@ -61,17 +61,133 @@ export const metricsApi = {
   getIntelligence: () =>
     apiClient.get<{
       insights: Array<{
-        type:         'pattern' | 'opportunity' | 'warning';
-        icon:         string;
-        title:        string;
-        body:         string;
-        action:       string | null;
-        action_label?: string;
-        action_url?:   string;
+        type:    'pattern' | 'opportunity' | 'warning' | 'coaching';
+        icon:    string;
+        title:   string;
+        body:    string;
+        action:  string | null;
       }>;
       cached:    boolean;
       fallback?: boolean;
     }>('/api/metrics/intelligence'),
+
+  getAlerts: () =>
+    apiClient.get<{
+      alerts: Array<{
+        type:     string;
+        icon:     string;
+        priority: 'high' | 'medium' | 'low';
+        title:    string;
+        body:     string;
+        action:   string | null;
+      }>;
+      count: number;
+    }>('/api/metrics/alerts'),
+
+  getPracticeRecommendations: () =>
+    apiClient.get<{
+      recommendations: Array<{
+        priority:    'high' | 'medium' | 'low';
+        scenario:    string;
+        title:       string;
+        description: string;
+      }>;
+    }>('/api/metrics/practice-recommendations'),
+
+  getProspectsHealth: () =>
+    apiClient.get<{
+      has_data:           boolean;
+      total_prospects?:   number;
+      avg_health_score?:  number | null;
+      at_risk?: Array<{
+        id: string; name: string; company: string | null; stage: string | null;
+        relationship_health_score: number | null; last_contact_at: string | null; total_interactions: number | null;
+      }>;
+      top_relationships?: Array<{
+        id: string; name: string; company: string | null; relationship_health_score: number | null;
+      }>;
+      stale_count?:        number;
+      stage_distribution?: Record<string, number>;
+    }>('/api/metrics/prospects-health'),
+
+  getCalendarPrep: () =>
+    apiClient.get<{
+      has_data:      boolean;
+      needs_prep?:    Array<{ id: string; title: string; event_date: string; event_type: string | null; attendee_name: string | null }>;
+      needs_debrief?: Array<{ id: string; title: string; event_date: string; outcome: string | null; attendee_name: string | null }>;
+      avg_energy_score?:     number | null;
+      outcome_distribution?: Record<string, number>;
+    }>('/api/metrics/calendar-prep'),
+
+  getPracticeSkillProfile: () =>
+    apiClient.get<{
+      has_data: boolean;
+      period?:  { start: string; end: string };
+      axes?: {
+        clarity: number | null; value: number | null; discovery: number | null;
+        objection: number | null; brevity: number | null; cta: number | null;
+      };
+      overall_avg?:   number | null;
+      overall_delta?: number | null;
+      weakest_axis?:   string | null;
+      strongest_axis?: string | null;
+      sessions_count?: number | null;
+      weekly_monologue_score?: number | null;
+      outcome_distribution?:   Record<string, number>;
+      pressure_scores?:        Record<string, number>;
+    }>('/api/metrics/practice-skill-profile'),
+
+  getAchievements: () =>
+    apiClient.get<{
+      badges: Array<{
+        badge_type: string; badge_label: string; badge_description: string | null; earned_at: string;
+      }>;
+      recent_drills: Array<{
+        drill_type: string; target_axis: string; score_before: number; score_after: number; completed_at: string;
+      }>;
+      drill_improvements: Array<{ axis: string; avg_improvement: number; drills_completed: number }>;
+    }>('/api/metrics/achievements'),
+
+  getPracticeSummary: (period: '7d' | '30d' | '90d' = '30d') =>
+    apiClient.get<{
+      has_data:  boolean;
+      period:    string;
+      total_sessions?:     number;
+      completed_sessions?: number;
+      goal_achieved_rate?:  number;
+      avg_session_score?:   number | null;
+      avg_exchanges?:       number | null;
+      reply_received_rate?: number;
+      ai_ended_rate?:       number;
+      retry_rate?:          number;
+      by_scenario?: Record<string, { count: number; avg_score: number | null; goal_achieved_rate: number }>;
+      pressure_modifier_performance?: Record<string, number>;
+      badges_earned?: number;
+    }>('/api/metrics/practice/summary', { params: { period } }),
+
+  getObjections: () =>
+    apiClient.get<{
+      has_data: boolean;
+      objections: Array<{
+        type: string; occurrence_count: number; first_seen_at: string; last_seen_at: string;
+        best_response: string | null; response_score: number | null; practice_score: number | null;
+        outcome_after: string | null; has_market_intel: boolean; sample_phrase: string;
+      }>;
+      total_unique_types: number;
+    }>('/api/metrics/objections'),
+
+  getMeetingsSummary: (period: '30d' | '90d' = '30d') =>
+    apiClient.get<{
+      has_data: boolean;
+      period:   string;
+      total_meetings?:  number;
+      debriefed?:       number;
+      debrief_completion_rate?: number;
+      outcomes?: { positive: number; negative: number; pending: number };
+      avg_energy_score?:  number | null;
+      meetings_with_prep_generated?: number;
+      follow_up_options_generated?:  number;
+    }>('/api/metrics/meetings/summary', { params: { period } }),
 
   getConversationAnalyses: () =>
     apiClient.get<{

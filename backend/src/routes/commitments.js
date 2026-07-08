@@ -3,7 +3,7 @@ import { Router }            from 'express';
 import { asyncHandler }      from '../middleware/errorHandler.js';
 import { requirePermission, buildUserContext } from '../middleware/workspace.js';
 import { createLogger }      from '../utils/logger.js';
-import { callWithFallback as cwf } from '../services/multiProvider.js';
+import { callWithFallbackGroq } from '../services/multiProvider.js';
 import supabaseAdmin         from '../config/supabase.js';
 
 const router = Router();
@@ -108,7 +108,7 @@ router.post('/:id/generate-message', requirePermission('member'), asyncHandler(a
   const prospectName = commitment.prospects?.name || 'there';
   const company      = commitment.prospects?.company ? ` at ${commitment.prospects.company}` : '';
 
-  const { content } = await cwf({
+  const { content } = await callWithFallbackGroq({
     systemPrompt: 'You are generating a short, human follow-up message. Under 60 words. No formal sign-offs.',
     messages: [{
       role:    'user',
@@ -116,6 +116,9 @@ router.post('/:id/generate-message', requirePermission('member'), asyncHandler(a
     }],
     temperature: 0.7,
     maxTokens:   150,
+    userId:      req.user.id,
+    workspaceId: req.workspace.id,
+    sourceJob:   'generate_commitment_message',
   });
 
   await supabaseAdmin

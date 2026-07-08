@@ -29,7 +29,8 @@ import {
 } from '../config/constants.js';
 import groqService               from '../services/groq.js';
 import { preprocessAttachmentsForGrok, buildGrokAttachmentPrompt } from '../utils/attachmentProcessor.js';
-import { checkPerplexityUsage, searchForChat } from '../services/perplexity.js';
+import { searchForChat } from '../services/exa.js';
+import {checkWorkspaceExaUsage} from '../services/tokenTracker.js';
 import supabaseAdmin             from '../config/supabase.js';
 import { enqueueJob }           from '../jobs/practiceWorker.js';
 import { createLogger }          from '../utils/logger.js';

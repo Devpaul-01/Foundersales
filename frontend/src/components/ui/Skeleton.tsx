@@ -3,7 +3,7 @@ import { cn } from '@/lib/utils';
 
 interface SkeletonProps {
   className?: string;
-  rounded?:   'none' | 'sm' | 'md' | 'lg' | 'full';
+  rounded?:   'none' | 'sm' | 'md' | 'lg' | 'xl' | 'full';
 }
 
 export function Skeleton({ className, rounded = 'md' }: SkeletonProps) {
@@ -12,6 +12,7 @@ export function Skeleton({ className, rounded = 'md' }: SkeletonProps) {
     sm:   'rounded-sm',
     md:   'rounded',
     lg:   'rounded-lg',
+    xl:   'rounded-xl',
     full: 'rounded-full',
   }[rounded];
 

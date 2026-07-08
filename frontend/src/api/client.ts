@@ -1,6 +1,6 @@
 // src/api/client.ts
 import axios, { type AxiosInstance, type AxiosResponse, type InternalAxiosRequestConfig } from 'axios';
-import { getTokens, setTokens, clearTokens, scheduleRefresh } from '@/lib/auth';
+import { getTokens, performTokenRefresh } from '@/lib/auth';
 import { AppError } from '@/api/types';
 
 const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
@@ -48,96 +48,65 @@ apiClient.interceptors.request.use(
   (error) => Promise.reject(error),
 );
 
+// Build a clean AppError out of any axios error. This is now done for
+// EVERY failure path (including public/auth-endpoint failures), so that
+// `err instanceof AppError` checks in components (e.g. LoginPage) always
+// see the real server-provided message instead of a raw Axios error.
+function buildAppError(error: any): AppError {
+  const data = error?.response?.data;
+  const code = (data?.error as string) ?? 'UNKNOWN';
+  const message =
+    (data?.message as string) ?? ERROR_MESSAGES[code] ?? error?.message ?? 'Something went wrong.';
+  const status = error?.response?.status ?? 0;
+  const details = data?.details as Record<string, string[]> | undefined;
+  return new AppError(ERROR_MESSAGES[code] ?? message, code, status, details);
+}
+
 // ✅ Response interceptor — handles token refresh
-let isRefreshing = false;
-let refreshQueue: Array<(token: string) => void> = [];
-
-// src/api/client.ts — Complete response interceptor
-
 apiClient.interceptors.response.use(
   (response: AxiosResponse) => response,
   async (error) => {
     const originalRequest = error.config as InternalAxiosRequestConfig & { _retry?: boolean };
 
-    // ✅ Skip refresh for public routes (no token needed)
-    const isPublicRequest = originalRequest.url?.includes('/login') ||
-                           originalRequest.url?.includes('/register') ||
-                           originalRequest.url?.includes('/forgot-password') ||
-                           originalRequest.url?.includes('/reset-password') ||
-                           originalRequest.url?.includes('/google/url') ||
-                           originalRequest.url?.includes('/google/callback') ||
-                           originalRequest.url?.includes('/health') ||
-                           originalRequest.url?.includes('/refresh');
+    // Routes that never need a refresh-and-retry attempt: either they're
+    // unauthenticated by design (login/register/forgot-password/etc.), or
+    // they're the refresh endpoint itself (retrying that would loop).
+    const isAuthEndpoint =
+      originalRequest.url?.includes('/login') ||
+      originalRequest.url?.includes('/register') ||
+      originalRequest.url?.includes('/forgot-password') ||
+      originalRequest.url?.includes('/reset-password') ||
+      originalRequest.url?.includes('/google/url') ||
+      originalRequest.url?.includes('/google/callback') ||
+      originalRequest.url?.includes('/health') ||
+      originalRequest.url?.includes('/refresh');
 
-    if (isPublicRequest) {
-      return Promise.reject(error);
-    }
-
-    // Only attempt refresh on 401 and not already retried
-    if (error.response?.status === 401 && !originalRequest._retry) {
-      if (isRefreshing) {
-        // Queue this request to retry after refresh completes
-        return new Promise<AxiosResponse>((resolve) => {
-          refreshQueue.push((token: string) => {
-            if (originalRequest.headers) {
-              originalRequest.headers['Authorization'] = `Bearer ${token}`;
-            }
-            resolve(apiClient(originalRequest));
-          });
-        });
-      }
-
+    // Only attempt refresh on 401s from real authenticated endpoints, and
+    // only once per request.
+    if (!isAuthEndpoint && error.response?.status === 401 && !originalRequest._retry) {
       originalRequest._retry = true;
-      isRefreshing = true;
 
       try {
-        // Refresh token — cookie is sent automatically with withCredentials: true
-        const res = await axios.post(`${BASE_URL}/api/auth/refresh`, {}, {
-          withCredentials: true,
-        });
+        // performTokenRefresh() dedupes concurrent calls within this tab
+        // AND serializes calls across tabs (Web Locks API), so this is
+        // safe to call from many simultaneous failing requests at once —
+        // only one real network call to /api/auth/refresh will happen.
+        const { access_token } = await performTokenRefresh();
 
-        const { access_token, expires_in } = res.data;
-        
-        // Update stored tokens (memory only)
-        setTokens(access_token, '', expires_in);
-        scheduleRefresh(expires_in);
-
-        // Retry all queued requests
-        refreshQueue.forEach((cb) => cb(access_token));
-        refreshQueue = [];
-
-        // Retry the original request
         if (originalRequest.headers) {
           originalRequest.headers['Authorization'] = `Bearer ${access_token}`;
         }
         return apiClient(originalRequest);
       } catch (refreshError) {
-        // Refresh failed — clear session
-        clearTokens();
-        refreshQueue = [];
-        
-        // Only redirect if not already on login page
+        // Refresh failed — clear session and bounce to login.
         if (typeof window !== 'undefined' && !window.location.pathname.includes('/login')) {
           window.location.href = '/login';
         }
-        return Promise.reject(refreshError);
-      } finally {
-        isRefreshing = false;
+        return Promise.reject(buildAppError(refreshError));
       }
     }
-    
-    const data = error.response?.data;
-    const code = (data?.error as string) ?? 'UNKNOWN';
-    const message = (data?.message as string) ?? ERROR_MESSAGES[code] ?? 'Something went wrong.';
-    const status = error.response?.status ?? 0;
-    const details = data?.details as Record<string, string[]> | undefined;
 
-    throw new AppError(
-      ERROR_MESSAGES[code] ?? message,
-      code,
-      status,
-      details,
-    );
+    return Promise.reject(buildAppError(error));
   },
 );
 

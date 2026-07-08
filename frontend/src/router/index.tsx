@@ -75,6 +75,7 @@ const TeamAnalyticsPage   = lazy(() => import('@/pages/team/TeamAnalyticsPage'))
 const LeaderboardPage     = lazy(() => import('@/pages/team/LeaderboardPage'));
 const CoachingQueuePage   = lazy(() => import('@/pages/team/CoachingQueuePage'));
 const ActivityFeedPage    = lazy(() => import('@/pages/team/ActivityFeedPage'));
+const TeamMetricsPage = lazy(() => import('@/pages/team/TeamMetricsPage'));
 
 const NotFoundPage = lazy(() => import('@/pages/NotFoundPage'));
 // In your router/index.tsx
@@ -199,6 +200,8 @@ export const router = createBrowserRouter([
               { path: '/team/insights',    element: <RoleRoute minRole="manager"><Page><TeamInsightsPage /></Page></RoleRoute> },
               { path: '/team/analytics',   element: <RoleRoute minRole="manager"><Page><TeamAnalyticsPage /></Page></RoleRoute> },
               { path: '/team/leaderboard', element: <RoleRoute minRole="manager"><Page><LeaderboardPage /></Page></RoleRoute> },
+              { path: '/team/metrics',    element: <RoleRoute minRole="manager"><Page><TeamMetricsPage/></Page></RoleRoute> },
+
               { path: '/team/coaching',    element: <RoleRoute minRole="manager"><Page><CoachingQueuePage /></Page></RoleRoute> },
               { path: '/team/activity',    element: <RoleRoute minRole="manager"><Page><ActivityFeedPage /></Page></RoleRoute> },
             ],

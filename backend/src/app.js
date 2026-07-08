@@ -172,11 +172,20 @@ app.use(errorHandler);
 
 const startServer = async () => {
   initFirebase();
-  await startAllJobs();
+
+  // Start listening FIRST so a Redis/BullMQ outage never takes down the
+  // whole API — only background jobs are affected, not incoming requests.
   app.listen(PORT, () => {
     console.log('\n🚀 Clutch AI Backend v4.2');
     console.log(`   Port: ${PORT} | Mode: ${process.env.NODE_ENV}`);
     console.log('   Bull Board: GET /admin/jobs (x-admin-secret required)\n');
+  });
+
+  // Jobs start after the server is already accepting traffic. If Redis is
+  // unreachable (bad network, DNS failure, etc.) this logs and moves on
+  // instead of blocking/crashing the whole process.
+  startAllJobs().catch(err => {
+    console.error('[Jobs] Failed to start background jobs (non-fatal):', err.message);
   });
 };
 

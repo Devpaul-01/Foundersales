@@ -12,8 +12,7 @@
 //  Token tracking: recordTokenUsage now uses workspaceId.
 
 import supabaseAdmin from '../config/supabase.js';
-import { callWithFallback as cwf } from '../services/multiProvider.js';
-import { recordTokenUsage as rtu }  from '../services/tokenTracker.js';
+import { callWithFallbackGroq as cwf } from '../services/multiProvider.js';
 import { notifyUser as nu }         from '../services/notifications.js';
 import { BATCH_SIZE, FOLLOW_UP_THRESHOLDS }               from '../config/constants.js';
 import { sleep, logJob }            from '../utils/jobHelpers.js';
@@ -161,15 +160,14 @@ Rules:
 
 Return ONLY the message text. No quotes, no explanation.`;
 
-  const { content, tokens_in, tokens_out } = await cwf({
+  const { content } = await cwf({
     systemPrompt: 'You write short, human follow-up messages. Return only the message text.',
     messages:     [{ role: 'user', content: prompt }],
     temperature:  0.7,
     maxTokens:    120,
+    tier:         'fast',
+    workspaceId, userId, sourceJob: 'followup_sequence',
   });
-
-  // Token usage tracked at workspace level
-  await rtu(workspaceId, 'groq', tokens_in, tokens_out);
 
   const followUpMessage = content?.trim();
   if (!followUpMessage) return { generated: false };

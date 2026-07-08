@@ -121,6 +121,13 @@ const handleReply = async ({
   // this path was the only exception, causing un-scoped rows.
   const workspaceId = session.workspace_id || null;
 
+  // The `user` row from `users` carries `active_workspace_id`, not
+  // `workspace_id` — but groq-practice.js's usage-tracking now reads
+  // `user.workspace_id` (matching the convention every other groq-*.js
+  // caller already uses). Merge it in here so tracking actually fires
+  // instead of silently no-op'ing on every practice reply.
+  const userCtx = { ...user, workspace_id: workspaceId };
+
   log('Session and User Loaded', { jobId, sessionId: session_id, userId: user_id, scenarioType: session.scenario_type });
 
   const { data: history } = await supabaseAdmin.from('chat_messages')
@@ -146,7 +153,7 @@ const handleReply = async ({
   });
 
   const bundle = await groqService.generatePracticeProspectReplyV2(
-    user, fullContent,
+    userCtx, fullContent,
     { ...session, buyer_profile: buyerProfile, buyer_state: buyerState, difficulty_level: difficulty, pressure_modifier },
     conversationHistory, {}
   );
@@ -162,26 +169,28 @@ const handleReply = async ({
   const stateDelta  = bundle?.state_delta  || { interest_delta: 0, trust_delta: 0, confusion_delta: 0, reasoning: '' };
   const coachingTip = bundle?.coaching_tip || null;
 
-  if (bundle?.needs_search && replyText && process.env.PERPLEXITY_API_KEY) {
-    log('Real-Time Search Triggered (Perplexity)', { jobId, sessionId: session_id });
+  if (bundle?.needs_search && replyText && process.env.EXA_API_KEY) {
+    log('Real-Time Search Triggered (Exa)', { jobId, sessionId: session_id });
     try {
-      const { searchForChat, checkPerplexityUsage } = await import('../services/perplexity.js');
-      const usage = await checkPerplexityUsage(user_id, user.tier || 'free');
+      const { searchForChat } = await import('../services/exa.js');
+      const { checkWorkspaceExaUsage } = await import('../services/tokenTracker.js');
+      const usage = await checkWorkspaceExaUsage(workspaceId, user.tier || 'free');
       if (usage.allowed) {
         const { content: perpContent } = await searchForChat(
           user_message_content.slice(0, 120),
-          'Answer in 2-3 sentences for realistic conversation context.'
+          'Answer in 2-3 sentences for realistic conversation context.',
+          { workspaceId, userId: user_id, sourceJob: 'practice_reply_search' }
         );
         const enrichedContent = fullContent + `\n[Context: ${perpContent.slice(0, 350)}]`;
         const enriched = await groqService.generatePracticeProspectReplyV2(
-          user, enrichedContent,
+          userCtx, enrichedContent,
           { ...session, buyer_profile: buyerProfile, buyer_state: buyerState, difficulty_level: difficulty, pressure_modifier },
           conversationHistory, {}
         );
         if (enriched?.reply) replyText = enriched.reply;
       }
     } catch (err) {
-      logError('handleReply → perplexitySearch', err, { jobId, sessionId: session_id });
+      logError('handleReply → exaSearch', err, { jobId, sessionId: session_id });
     }
   }
 
@@ -272,11 +281,12 @@ const handleGhost = async ({ session_id, chat_id, message_id, user_id, user_mess
   log('Ghost Handler Start', { jobId, sessionId: session_id, messageId: message_id, userId: user_id });
 
   const { data: session } = await supabaseAdmin.from('practice_sessions')
-    .select('completed').eq('id', session_id).single();
+    .select('completed, workspace_id').eq('id', session_id).single();
   if (!session || session.completed) {
     log('Ghost Aborted', { jobId, sessionId: session_id });
     return;
   }
+  const workspaceId = session.workspace_id || null;
 
   const { data: user } = await supabaseAdmin.from('users').select('*').eq('id', user_id).single();
 
@@ -297,6 +307,7 @@ const handleGhost = async ({ session_id, chat_id, message_id, user_id, user_mess
     .eq('id', message_id);
 
   await supabaseAdmin.from('chat_messages').insert({
+    workspace_id: workspaceId,
     chat_id, user_id, role: 'system',
     content: `👻 No reply.\n\n💡 ${summary}`,
     coaching_tip: coachingTip,

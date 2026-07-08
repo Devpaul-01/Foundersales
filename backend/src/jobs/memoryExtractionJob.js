@@ -13,8 +13,7 @@
 // ============================================================
 
 import supabaseAdmin from '../config/supabase.js';
-import { callWithFallback } from '../services/multiProvider.js';
-import { recordTokenUsage } from '../services/tokenTracker.js';
+import { callWithFallbackGroq } from '../services/multiProvider.js';
 import { sleep, logJob } from '../utils/jobHelpers.js';
 
 const MEMORY_CAP = 30;
@@ -140,16 +139,14 @@ Return format:
   ...
 ]`;
 
-  const { content: extractContent, tokens_in: eIn, tokens_out: eOut } = await callWithFallback({
+  const { content: extractContent } = await callWithFallbackGroq({
     systemPrompt: 'You extract founder facts from conversation history. Return only JSON arrays.',
     messages:     [{ role: 'user', content: extractionPrompt }],
     temperature:  0.2,
     maxTokens:    500,
+    tier:         'fast',
+    workspaceId, userId, sourceJob: 'memory_extraction',
   });
-
-  // FIX MED-10: Use workspaceId (was userId) — token costs must be tracked
-  // at the workspace level for accurate per-workspace cost reporting.
-  await recordTokenUsage(workspaceId, 'groq', eIn, eOut);
 
   let newFacts;
   try {
@@ -200,15 +197,14 @@ Return ONLY a JSON array:
   ...
 ]`;
 
-    const { content: dedupContent, tokens_in: dIn, tokens_out: dOut } = await callWithFallback({
+    const { content: dedupContent } = await callWithFallbackGroq({
       systemPrompt: 'You deduplicate memory facts. Return only JSON arrays.',
       messages:     [{ role: 'user', content: dedupPrompt }],
       temperature:  0.1,
       maxTokens:    400,
+      tier:         'fast',
+      workspaceId, userId, sourceJob: 'memory_dedup',
     });
-
-    // FIX MED-10: Use workspaceId (was userId)
-    await recordTokenUsage(workspaceId, 'groq', dIn, dOut);
 
     try {
       const clean = dedupContent.replace(/```json|```/g, '').trim();

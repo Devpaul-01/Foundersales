@@ -5,7 +5,7 @@
 // ============================================================
 
 import { parseTextResponse, parseJSONObject, validateAndFill } from '../utils/parser.js';
-import { callGroq, PRO_MODEL }  from './groq-client.js';
+import { callWithFallbackGroq } from './multiProvider.js';
 import { SYSTEM_PROMPTS }       from './groq-prompts.js';
 
 // ──────────────────────────────────────────
@@ -41,11 +41,12 @@ Target ~${wordTarget} words. Sound like a real human, not a template.`;
   const fallback = `Saw your post about ${opportunity.target_context?.slice(0, 50) || 'this'}. I'm building something relevant — happy to share context. No pitch.`;
 
   try {
-    const { content, tokens_in, tokens_out } = await callGroq({
+    const { content, tokens_in, tokens_out } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.85,
       maxTokens:   300,
-      modelName:   PRO_MODEL
+      tier:        'quality',
+      workspaceId: user.workspace_id, userId: user.id, sourceJob: 'generate_outreach_message',
     });
 
     let result = parseTextResponse(content, fallback);
@@ -63,33 +64,26 @@ Target ~${wordTarget} words. Sound like a real human, not a template.`;
 
 CRITICAL: The previous attempt contained these forbidden phrases — do NOT use them in any form: ${violatedPhrases.map(p => `"${p}"`).join(', ')}`;
       try {
-        const { content: retryContent, tokens_in: rIn, tokens_out: rOut } = await callGroq({
+        const { content: retryContent } = await callWithFallbackGroq({
           messages:    [{ role: 'user', content: retryPrompt }],
           temperature: 0.75,
           maxTokens:   300,
-          modelName:   PRO_MODEL,
+          tier:        'quality',
+          workspaceId: user.workspace_id, userId: user.id, sourceJob: 'generate_outreach_message',
         });
         const retryResult = parseTextResponse(retryContent, result);
         if (retryResult.length > 20) {
-          return {
-            message:    retryResult,
-            tokens_in:  (tokens_in  || 0) + (rIn  || 0),
-            tokens_out: (tokens_out || 0) + (rOut || 0),
-          };
+          return { message: retryResult };
         }
       } catch (retryErr) {
         console.warn('[Groq] avoid_phrases retry failed, using original:', retryErr.message);
       }
     }
 
-    return {
-      message:    result,
-      tokens_in:  tokens_in  || 0,
-      tokens_out: tokens_out || 0,
-    };
+    return { message: result };
   } catch (err) {
     console.error('[Groq] generateOutreachMessage FAILED:', err.message);
-    return { message: fallback, tokens_in: 0, tokens_out: 0 };
+    return { message: fallback };
   }
 };
 
@@ -129,11 +123,12 @@ ${opportunities.map((o, i) => `${i}. [${o.platform}] ${o.target_context?.slice(0
 Return ONLY: [{"index": 0, "fit_score": 7, "timing_score": 8, "intent_score": 6}, ...]`;
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.2,
       maxTokens:   600,
-      modelName:   PRO_MODEL,
+      tier:        'quality',
+      workspaceId: user.workspace_id, userId: user.id, sourceJob: 'score_opportunities',
     });
     const clean   = content.replace(/```json|```/g, '').trim();
     const scores  = JSON.parse(clean);
@@ -177,10 +172,12 @@ Score it on:
 Return ONLY: {"score": <0-100>, "strongest_element": "<one phrase from the message that's best>", "weakest_element": "<what most hurt the score>"}`;
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.3,
       maxTokens:   150,
+      tier:        'fast',
+      workspaceId: user.workspace_id, userId: user.id, sourceJob: 'evaluate_message_strength',
     });
     const clean  = content.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
@@ -267,12 +264,13 @@ Best length:   ${best_message_length ?? 'insufficient data'}
 Return ONLY the 2-sentence summary. No JSON. No preamble.`;
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: userPrompt }],
       systemPrompt,
       temperature: 0.3,
       maxTokens:   200,
-      modelName:   PRO_MODEL,
+      tier:        'quality',
+      workspaceId: user.workspace_id, userId: user.id, sourceJob: 'summarize_performance_patterns',
     });
 
     const learned_patterns = parseTextResponse(content, null);
@@ -336,10 +334,12 @@ Return ONLY valid JSON.`;
   };
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.6,
-      maxTokens:   800
+      maxTokens:   800,
+      tier:        'fast',
+      workspaceId: user.workspace_id, userId: user.id, sourceJob: 'generate_event_prep',
     });
     const parsed = parseJSONObject(content, FALLBACK);
     return validateAndFill(parsed, FALLBACK);
@@ -365,10 +365,11 @@ In 2-3 sentences from the prospect's perspective, describe:
 Be realistic and specific. Sound like a real user of ${competitor}. Return only plain text.`;
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.7,
       maxTokens:   150,
+      tier:        'fast',
     });
     return parseTextResponse(content, `${competitor} has been working fine for our needs.`);
   } catch {

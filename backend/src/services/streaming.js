@@ -52,8 +52,13 @@ export const endSSE = (res) => {
  * @param {Array}    opts.messages     - Message history array
  * @param {string}   opts.chatId       - Chat DB row ID
  * @param {string}   opts.userId       - User DB row ID
+ * @param {string}   opts.workspaceId  - Workspace DB row ID (required for
+ *                                       both the chat_messages insert and
+ *                                       for token-usage tracking)
  * @param {object}   opts.supabase     - Supabase admin client
  * @param {object}   [opts.metadata]   - Extra fields for the DB row
+ * @param {string}   [opts.tier]       - Workspace plan tier, forwarded to recordGroqUsage
+ * @param {string}   [opts.sourceJob]  - Label forwarded to recordGroqUsage (defaults to 'chat_stream')
  * @param {Function} [opts.streamFn]   - Streaming function to use.
  *                                       Defaults to streamGroq (primary model).
  *                                       Pass streamWithFallback from multiProvider.js
@@ -65,8 +70,11 @@ export const streamAndSave = async ({
   messages,
   chatId,
   userId,
+  workspaceId,
   supabase,
   metadata = {},
+  tier = null,
+  sourceJob = 'chat_stream',
   streamFn = null
 }) => {
   // Default to Groq primary model if no override provided
@@ -76,7 +84,7 @@ export const streamAndSave = async ({
     streamFunction = streamGroq;
   }
 
-  const { recordTokenUsage } = await import('./tokenTracker.js');
+  const { recordGroqUsage } = await import('./tokenTracker.js');
 
   initSSE(res);
 
@@ -86,6 +94,7 @@ export const streamAndSave = async ({
     .insert({
       chat_id:         chatId,
       user_id:         userId,
+      workspace_id:    workspaceId,
       role:            'assistant',
       content:         '',
       delivery_status: 'sent',
@@ -168,7 +177,16 @@ export const streamAndSave = async ({
       }
 
       const tokensOut = usage?.tokens_out || Math.ceil(finalContent.length / 4);
-      await recordTokenUsage(userId, modelUsed, 0, tokensOut);
+      await recordGroqUsage({
+        workspaceId,
+        userId,
+        model:     modelUsed,
+        tier,
+        tokensIn:  usage?.tokens_in || 0,
+        tokensOut,
+        sourceJob,
+        metadata:  { chatId, message_id: messageRow.id },
+      });
 
       if (clientConnected) {
         sendSSE(res, 'complete', {

@@ -5,7 +5,7 @@
 // ============================================================
 
 import { parseTextResponse }                from '../utils/parser.js';
-import { callGroq, PRO_MODEL }              from './groq-client.js';
+import { callWithFallbackGroq }             from './multiProvider.js';
 import {
   SYSTEM_PROMPTS,
   getRoleAwareCoachPrompt,
@@ -185,10 +185,12 @@ Provide coaching in this EXACT JSON format:
 }`;
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.55,
       maxTokens:   2000,
+      tier:        'fast',
+      workspaceId: user.workspace_id, userId: user.id, sourceJob: 'generate_coaching_tip',
     });
     const clean  = content.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
@@ -255,10 +257,12 @@ ${reflectionAnswer === 'not_sure'
 Keep response under 60 words. End with a rewrite in quotes starting with "Try:"`;
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.5,
       maxTokens:   2000,
+      tier:        'fast',
+      workspaceId: user.workspace_id, userId: user.id, sourceJob: 'generate_reflection_context',
     });
     return parseTextResponse(content, 'Good self-awareness. The key is specificity — name the result, reference their situation, and ask one easy question.');
   } catch {
@@ -370,11 +374,12 @@ Return ONLY a JSON array of exactly 3 objects (no markdown):
   ];
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.78,
       maxTokens:   2000,
-      modelName:   PRO_MODEL
+      tier:        'quality',
+      workspaceId: user.workspace_id, userId: user.id, sourceJob: 'generate_daily_tips',
     });
     const clean  = content.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
@@ -452,11 +457,12 @@ Return ONLY a JSON array of 3 question strings:
   ];
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.65,
       maxTokens:   2000,
-      modelName:   PRO_MODEL
+      tier:        'quality',
+      workspaceId: user.workspace_id, userId: user.id, sourceJob: 'generate_check_in_questions',
     });
     const clean     = content.replace(/```json|```/g, '').trim();
     const questions = JSON.parse(clean);
@@ -549,11 +555,12 @@ Return ONLY this JSON:
   };
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.7,
       maxTokens:   2000,
-      modelName:   PRO_MODEL
+      tier:        'quality',
+      workspaceId: user.workspace_id, userId: user.id, sourceJob: 'generate_check_in_response',
     });
     const clean  = content.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
@@ -630,11 +637,12 @@ Return ONLY this JSON:
   };
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.65,
       maxTokens:   2000,
-      modelName:   PRO_MODEL
+      tier:        'quality',
+      workspaceId: user.workspace_id, userId: user.id, sourceJob: 'generate_weekly_plan',
     });
     const clean  = content.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);

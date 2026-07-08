@@ -31,7 +31,7 @@ import {
   generateSignalAnalysis,
   generatePostMeetingFollowUp,
 } from '../services/groqCalendarIntelligence.js';
-import { researchProspectForMeeting } from '../services/perplexityCalendar.js';
+import { researchProspectForMeeting } from '../services/exaCalendar.js';
 import { backgroundQueue }            from '../jobs/queues.js';
 import { BACKGROUND_JOB_TYPES }       from '../config/constants.js';
 import supabaseAdmin from '../config/supabase.js';
@@ -417,43 +417,44 @@ async function upsertProspect(userId, workspaceId, { name, context }) {
 
 async function extractAndSaveCommitmentsSignals(userId, workspaceId, event, rawNotes) {
   const [commitments, signals] = await Promise.all([
-    extractCommitmentsFromText(rawNotes, event.attendee_name),
-    generateSignalAnalysis(rawNotes, event.attendee_name, null),
+    extractCommitmentsFromText(rawNotes, event.attendee_name, { workspaceId, userId }),
+    generateSignalAnalysis(rawNotes, event.attendee_name, null, { workspaceId, userId }),
   ]);
 
   if (commitments?.length) {
-    try {
-      await supabaseAdmin.from('conversation_commitments').insert(
-        commitments.map(c => ({
-          workspace_id:    workspaceId,
-          user_id:         userId,
-          prospect_id:     event.prospect_id || null,
-          event_id:        event.id,
-          commitment_text: c.commitment_text,
-          owner:           c.owner           || 'founder',
-          status:          'pending',
-          due_date:        c.due_date        || null,
-          implicit_timing: c.implicit_timing || null,
-        }))
-      );
-    } catch {}
+    const { error } = await supabaseAdmin.from('conversation_commitments').insert(
+      commitments.map(c => ({
+        workspace_id:    workspaceId,
+        user_id:         userId,
+        prospect_id:     event.prospect_id || null,
+        source_type:     'meeting_debrief',
+        source_id:       event.id,
+        event_id:        event.id,
+        commitment_text: c.commitment_text,
+        owner:           c.owner || 'founder',
+        status:          'pending',
+        due_date:        c.due_date || null,
+      }))
+    );
+    if (error) logError('extractAndSaveCommitmentsSignals/commitments', error, { eventId: event.id });
   }
 
   if (signals?.length) {
-    try {
-      await supabaseAdmin.from('conversation_signals').insert(
-        signals.map(s => ({
-          workspace_id: workspaceId,
-          user_id:      userId,
-          prospect_id:  event.prospect_id || null,
-          detected_at: new Date(),
-          event_id:     event.id,
-          signal_type:  s.signal_type,
-          signal_text:  s.signal_text,
-          confidence:   s.confidence || null,
-        }))
-      );
-    } catch {}
+    const { error } = await supabaseAdmin.from('conversation_signals').insert(
+      signals.map(s => ({
+        workspace_id: workspaceId,
+        user_id:      userId,
+        prospect_id:  event.prospect_id || null,
+        source_type:  'meeting_debrief',
+        source_id:    event.id,
+        detected_at:  new Date(),
+        event_id:     event.id,
+        signal_type:  s.signal_type,
+        signal_text:  s.signal_text,
+        confidence:   s.confidence || null,
+      }))
+    );
+    if (error) logError('extractAndSaveCommitmentsSignals/signals', error, { eventId: event.id });
   }
 }
 

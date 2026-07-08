@@ -13,15 +13,14 @@ import { bullmqConnection }   from '../config/bullmq.js';
 import { BACKGROUND_JOB_TYPES } from '../config/constants.js';
 import { createLogger }       from '../utils/logger.js';
 import supabaseAdmin          from '../config/supabase.js';
-import { callWithFallback }   from '../services/multiProvider.js';
-import { recordTokenUsage }   from '../services/tokenTracker.js';
+import { callWithFallbackGroq } from '../services/multiProvider.js';
 import groqService            from '../services/groq.js';
 import { detectAndSaveArchetype } from './growthIntelligenceScheduler.js';
 import { processUserOpportunities as runOpportunitiesRefreshForUser } from './coreJobs.js';
 
 // Issue 14: imports for calendar prep/research handlers
 import { generateEnrichedEventPrep } from '../services/groqCalendarIntelligence.js';
-import { researchProspectForMeeting } from '../services/perplexityCalendar.js';
+import { researchProspectForMeeting } from '../services/exaCalendar.js';
 
 const { log, logError, logJob } = createLogger('BackgroundWorker');
 
@@ -30,12 +29,12 @@ const handlers = {
   async [BACKGROUND_JOB_TYPES.TIP_CARD_GENERATE](data) {
     const { userId, workspaceId, goalId, tip_context, goal_text, product_description } = data;
     logJob(BACKGROUND_JOB_TYPES.TIP_CARD_GENERATE, { userId, goalId });
-    const { content: tc, tokens_in, tokens_out } = await callWithFallback({
+    const { content: tc } = await callWithFallbackGroq({
       systemPrompt: `Generate a growth tip. Context: ${tip_context}. Goal: ${goal_text}. Product: ${product_description ?? ''}. Respond ONLY as JSON: { "title": "<10 words max>", "body": "<2-3 sentences actionable advice>" }`,
       messages: [{ role: 'user', content: 'Generate the tip.' }],
       temperature: 0.5, maxTokens: 150,
+      tier: 'fast', workspaceId, userId, sourceJob: 'tip_card_generate',
     });
-    await recordTokenUsage(workspaceId, 'groq', tokens_in, tokens_out);
     const tip = JSON.parse(tc.replace(/```json|```/g, '').trim());
     await supabaseAdmin.from('growth_cards').insert({
       workspace_id: workspaceId, user_id: userId, card_type: 'tip',

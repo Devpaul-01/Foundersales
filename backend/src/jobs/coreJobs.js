@@ -4,8 +4,7 @@ import {
   MIN_MESSAGES_FOR_SUMMARY, SUMMARIZE_EVERY_N_MESSAGES,
   CALENDAR_PREP_HOURS_BEFORE, MIN_COMPOSITE_SCORE,
 } from '../config/constants.js';
-import { discoverOpportunities }     from '../services/perplexity.js';
-import { recordTokenUsage }          from '../services/tokenTracker.js';
+import { discoverOpportunities }     from '../services/exa.js';
 import { notifyUser, Notifications } from '../services/notifications.js';
 import groqService                   from '../services/groq.js';
 import supabaseAdmin                 from '../config/supabase.js';
@@ -111,13 +110,15 @@ export const processUserOpportunities = async (userId, workspaceId, userCtx, fcm
 
   let newCount = 0;
   for (const opp of qualifying) {
-    const { message, tokens_in, tokens_out } = await groqService.generateOutreachMessage(
+    const { message } = await groqService.generateOutreachMessage(
       userCtx, opp, perfProfile
     );
 
-    await recordTokenUsage(workspaceId, 'groq', tokens_in || 0, tokens_out || 0);
-
-    const compositeScore = ((opp.fit_score || 0) + (opp.timing_score || 0) + (opp.intent_score || 0)) / 3;
+    // composite_score is a GENERATED ALWAYS STORED column on `opportunities`
+    // (derived from fit_score + timing_score + intent_score) — Postgres
+    // rejects any explicit value for it. This upsert was failing on every
+    // single opportunity, every run, until this line was removed. Do not
+    // re-add an explicit composite_score here.
 
     // Use upsert with the same conflict key as the manual /opportunities/refresh route.
     // Plain .insert() had no onConflict clause — simultaneous job instances (possible
@@ -134,7 +135,6 @@ export const processUserOpportunities = async (userId, workspaceId, userCtx, fcm
       fit_score:        opp.fit_score,
       timing_score:     opp.timing_score,
       intent_score:     opp.intent_score,
-      composite_score:  compositeScore,
       message_style:    perfProfile?.best_message_style || 'empathetic',
       message_length:   message ? message.split(' ').length : 0,
       generated_by:     result.model_used,
@@ -143,6 +143,7 @@ export const processUserOpportunities = async (userId, workspaceId, userCtx, fcm
     }, { onConflict: 'workspace_id,user_id,source_url', ignoreDuplicates: false });
 
     if (!error) newCount++;
+    else console.error(`[OpportunityJob] Upsert failed for user ${userId}, source ${opp.source_url}:`, error.message);
     await sleep(300);
   }
 

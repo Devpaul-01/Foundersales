@@ -10,9 +10,7 @@
 // ============================================================
 
 import supabaseAdmin from '../config/supabase.js';
-import { callWithFallback } from '../services/multiProvider.js';
-import { recordTokenUsage } from '../services/tokenTracker.js';
-import { PRO_MODEL } from '../services/groq.js';
+import { callWithFallbackGroq } from '../services/multiProvider.js';
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -64,13 +62,12 @@ export const runConversationAnalysis = async (feedbackId, userId, workspaceId) =
 
     const prompt = buildAnalysisPrompt(fb, userCtx);
 
-    const { content, tokens_in, tokens_out } = await callWithFallback({
+    const { content } = await callWithFallbackGroq({
       systemPrompt: `You are an elite sales communication analyst. You score outreach messages with surgical precision. Return ONLY valid JSON. Never add markdown fences or explanatory text outside the JSON.`,
       messages: [{ role: 'user', content: prompt }],
-      temperature: 0.15, maxTokens: 1400, modelName: PRO_MODEL,
+      temperature: 0.15, maxTokens: 1400,
+      tier: 'quality', workspaceId, userId, sourceJob: 'conversation_analysis',
     });
-
-    await recordTokenUsage(userId, 'groq', tokens_in, tokens_out);
 
     let analysis;
     try {

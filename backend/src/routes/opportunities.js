@@ -35,15 +35,17 @@ import {
 } from '../config/constants.js';
 import {
   discoverOpportunities,
-  checkWorkspacePerplexityUsage,
-  incrementUsage,
+  
   searchForChat,
-} from '../services/perplexity.js';
-import { incrementWorkspaceUsage } from '../services/perplexity.js';
-import { callWithFallback } from '../services/multiProvider.js';
+} from '../services/exa.js';
+
+import {checkWorkspaceExaUsage} from '../services/tokenTracker.js';
+
+
+import { callWithFallbackGroq } from '../services/multiProvider.js';
 import { notifyUser }       from '../services/notifications.js';
 import supabaseAdmin        from '../config/supabase.js';
-import { PRO_MODEL }        from '../services/groq.js';
+
 
 const router = Router();
 const { log, logError, logDB, logAI } = createLogger('Opportunities');
@@ -192,7 +194,7 @@ router.post('/refresh', requirePermission('member'), refreshRateLimiter, asyncHa
     return res.status(400).json({ error: 'ONBOARDING_REQUIRED', message: 'Complete onboarding first.' });
   }
 
-  const usage = await checkWorkspacePerplexityUsage(workspaceId, userCtx.tier);
+  const usage = await checkWorkspaceExaUsage(workspaceId, userCtx.tier);
   if (!usage.allowed) {
     return res.status(429).json({ error: 'QUOTA_EXCEEDED', message: 'Daily discovery limit reached.' });
   }
@@ -227,7 +229,6 @@ router.post('/refresh', requirePermission('member'), refreshRateLimiter, asyncHa
     .select('id');
   if (insertErr) { logError('REFRESH insert', insertErr, { userId }); throw insertErr; }
 
-  await incrementUsage(userId);
 
   if ((inserted?.length || 0) > 0) {
     try {
@@ -485,8 +486,7 @@ router.get('/:id/intel', requirePermission('member'), asyncHandler(async (req, r
     const [researchResult, outreachResult] = await Promise.all([
 
       // Call 1 — Research: pain points, talking points, risks, confidence
-      callWithFallback({
-        model:        PRO_MODEL,
+      callWithFallbackGroq({
         systemPrompt: 'You generate prospect intelligence for sales outreach. Return only JSON.',
         messages: [{
           role:    'user',
@@ -498,11 +498,11 @@ Return ONLY JSON: {"pain_points":["..."],"talking_points":["..."],"risks":["..."
         }],
         temperature: 0.3,
         maxTokens:   400,
+        workspaceId, userId, sourceJob: 'opportunity_intel_research',
       }),
 
       // Call 2 — Outreach: personalised message details using voice profile
-      callWithFallback({
-        model:        PRO_MODEL,
+      callWithFallbackGroq({
         systemPrompt: 'You craft hyper-personalised outreach details for sales founders. Return only JSON.',
         messages: [{
           role:    'user',
@@ -515,13 +515,9 @@ Return ONLY JSON: {"opening_line":"...","message_suggestion":"...","follow_up_ho
         }],
         temperature: 0.5,
         maxTokens:   450,
+        workspaceId, userId, sourceJob: 'opportunity_intel_outreach',
       }),
     ]);
-
-    // Record combined token usage for both calls at workspace level
-    await incrementWorkspaceUsage(
-      workspaceId
-    );
 
     const intel    = JSON.parse(researchResult.content.replace(/```json|```/g, '').trim());
     const outreach = JSON.parse(outreachResult.content.replace(/```json|```/g, '').trim());

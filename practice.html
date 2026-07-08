@@ -1,0 +1,2319 @@
+// src/pages/practice.jsx
+// ============================================================
+// PRACTICE MODE V3 — Full V3 Feature Frontend
+//
+// V3 additions over V2:
+//  Outcome Announcement Overlay  — full-screen when AI ends session
+//  Pressure Modifier Selector    — in start form; badge in BuyerStatePanel
+//  Message Chunking Renderer     — splits reply into sequential chunks
+//  Typing Indicator Phases       — pause/resume simulation
+//  Interruption Styling          — ⚡ badge on is_interruption messages
+//  Monologue Toggle              — in SessionReplayView (reveal/hide thoughts)
+//  Monologue Moments Panel       — top insights in replay
+//  Conversation Outcome Banner   — in replay header
+//  SkillDashboard V3             — 7th axis, week-over-week bars, next drill card
+//
+// Routes:
+//  /practice               — session list + curriculum
+//  /practice/dashboard     — skill dashboard
+//  /practice/:id           — active session or replay
+//  /practice/:id/replay    — explicit replay route
+// ============================================================
+
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
+import { useParams, useNavigate } from 'react-router-dom'
+import { RadarChart, PolarGrid, PolarAngleAxis, Radar, ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip } from 'recharts'
+import {
+  usePracticeSessions, usePracticeScenarios, useStartPractice,
+  useRatePractice, useCompletePractice, useChatMessages, useRetryPractice,
+  useUploadFile, useDeleteFile,
+} from '../services/queries'
+import { useRealtimeChat } from '../hooks/useRealtimeChat'
+import { usePracticeStore }  from '../stores/practiceStore'
+import { SkeletonCard }      from '../components/ui/Skeleton'
+import Button                from '../components/ui/Button'
+import Modal, { ModalBody, ModalFooter } from '../components/ui/Modal'
+import TopBar                from '../components/layout/TopBar'
+import { PageContent }       from '../components/layout/AppLayout'
+import { ProspectTypingIndicator } from '../components/ui/TypingIndicator'
+import { SCENARIO_LABELS, SCENARIO_COLORS, ALLOWED_FILE_TYPES, MAX_FILE_SIZE } from '../utils/constants'
+import { formatShortDate, timeAgo } from '../utils/formatters'
+import { queryClient }       from '../services/queryClient'
+import { KEYS }              from '../services/queries'
+import api                   from '../services/api'
+import toast                 from 'react-hot-toast'
+
+// ══════════════════════════════════════════
+// V3 HELPERS
+// ══════════════════════════════════════════
+
+// Split a reply into 2-3 chunks for sequential rendering
+function splitIntoChunks(text) {
+  if (!text) return [text]
+  if (text.includes('\n')) {
+    const parts = text.split('\n').map(s => s.trim()).filter(Boolean)
+    if (parts.length <= 3) return parts
+    return [parts[0], parts.slice(1, parts.length - 1).join(' '), parts[parts.length - 1]].filter(Boolean)
+  }
+  const sentences = text.match(/[^.!?]+[.!?]+/g) || [text]
+  if (sentences.length <= 1) return [text]
+  if (sentences.length === 2) return sentences
+  return [
+    sentences[0],
+    sentences.slice(1, sentences.length - 1).join(' '),
+    sentences[sentences.length - 1],
+  ].filter(Boolean)
+}
+
+// monologueSeverity is now returned by the AI in the bundle (monologue_severity field)
+// Frontend helper kept for replay fallback only
+function monologueSeverity(text, aiSeverity) {
+  if (aiSeverity && aiSeverity !== 'neutral') return aiSeverity
+  if (!text) return 'neutral'
+  const lower = text.toLowerCase()
+  if (/impressed|interesting|sounds right|excited|good point/.test(lower)) return 'positive'
+  if (/not convinced|waste|don.t trust|moving on|irrelevant|already tried/.test(lower)) return 'negative'
+  return 'neutral'
+}
+
+const PRESSURE_MODIFIERS = [
+  { key: 'decision_maker_watching', label: '👀 Decision Maker Watching', desc: 'Someone important is observing this conversation' },
+  { key: 'aggressive_buyer',        label: '😤 Aggressive Buyer',        desc: 'Short on time and very direct' },
+  { key: 'competitor_mentioned',    label: '🏁 Competitor Mentioned',    desc: 'They brought up an alternative' },
+  { key: 'compliance_concern',      label: '🔒 Compliance Concern',      desc: 'Rules, approvals, or policies in play' },
+]
+
+const PRESSURE_LABELS = {
+  decision_maker_watching: '👀 Decision Maker Watching',
+  aggressive_buyer:        '😤 Aggressive Buyer',
+  competitor_mentioned:    '🏁 Competitor Mentioned',
+  compliance_concern:      '🔒 Compliance Concern',
+  // legacy keys for old sessions
+  investor_present:   '💼 Investor Present',
+  competitor_present: '🏁 Competitor Mentioned',
+  security_audit:     '🔒 Security Audit',
+}
+
+// Outcome label prettifier
+function outcomeLabel(type) {
+  if (!type) return 'Session Ended'
+  return type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+}
+
+// ══════════════════════════════════════════
+// FEATURE 1 — BUYER PROFILE CARD
+// ══════════════════════════════════════════
+function BuyerProfileCard({ buyer, showHiddenMotivations = false }) {
+  if (!buyer) return null
+
+  const stageColor = buyer.time_pressure === 'high' ? 'text-error' : buyer.time_pressure === 'low' ? 'text-success' : 'text-warning'
+
+  return (
+    <div className="bg-surface-card border border-surface-border rounded-2xl p-5 mb-4">
+      <div className="flex items-start justify-between mb-4">
+        <div>
+          <div className="flex items-center gap-2 mb-1">
+            <div className="w-8 h-8 rounded-full bg-primary/15 flex items-center justify-center text-sm">👤</div>
+            <div>
+              <p className="text-sm font-semibold text-text-primary">{buyer.name}</p>
+              <p className="text-xs text-text-muted">{buyer.role}</p>
+            </div>
+          </div>
+          <p className="text-xs text-text-secondary mt-1">{buyer.company_size} · {buyer.stage}</p>
+        </div>
+        <span className={`text-[10px] font-medium px-2 py-0.5 rounded-full border ${stageColor} border-current/30 bg-current/5`}>
+          {buyer.time_pressure} urgency
+        </span>
+      </div>
+
+      <div className="space-y-2">
+        {buyer.main_pain && (
+          <div className="bg-surface-panel rounded-xl p-3">
+            <p className="text-[10px] font-semibold text-text-muted uppercase tracking-wide mb-0.5">Their pain</p>
+            <p className="text-xs text-text-secondary leading-relaxed">{buyer.main_pain}</p>
+          </div>
+        )}
+        <div className="grid grid-cols-2 gap-2">
+          {buyer.current_tools?.length > 0 && (
+            <div className="bg-surface-panel rounded-xl p-3">
+              <p className="text-[10px] font-semibold text-text-muted uppercase tracking-wide mb-1">Currently using</p>
+              <div className="flex flex-wrap gap-1">
+                {buyer.current_tools.map((t, i) => (
+                  <span key={i} className="text-[10px] bg-surface-card border border-surface-border rounded-md px-1.5 py-0.5 text-text-secondary">{t}</span>
+                ))}
+              </div>
+            </div>
+          )}
+          {buyer.budget_ceiling && (
+            <div className="bg-surface-panel rounded-xl p-3">
+              <p className="text-[10px] font-semibold text-text-muted uppercase tracking-wide mb-0.5">Budget ceiling</p>
+              <p className="text-xs text-text-primary font-semibold">${buyer.budget_ceiling.toLocaleString()}/mo</p>
+            </div>
+          )}
+        </div>
+        {buyer.skepticism_about && (
+          <div className="bg-warning/5 border border-warning/20 rounded-xl p-3">
+            <p className="text-[10px] font-semibold text-warning uppercase tracking-wide mb-0.5">Skeptical about</p>
+            <p className="text-xs text-text-secondary">{buyer.skepticism_about}</p>
+          </div>
+        )}
+        {showHiddenMotivations && buyer.hidden_motivations?.length > 0 ? (
+          <div className="bg-primary/5 border border-primary/20 rounded-xl p-3">
+            <p className="text-[10px] font-semibold text-primary-glow uppercase tracking-wide mb-1">🔓 Hidden motivations (revealed)</p>
+            {buyer.hidden_motivations.map((m, i) => <p key={i} className="text-xs text-text-secondary">• {m}</p>)}
+          </div>
+        ) : !showHiddenMotivations && buyer.hidden_motivations?.length > 0 ? (
+          <div className="bg-surface-panel border border-dashed border-surface-border rounded-xl p-3">
+            <p className="text-[10px] font-semibold text-text-muted uppercase tracking-wide mb-0.5">🔒 Hidden motivation</p>
+            <p className="text-xs text-text-muted">Ask the right discovery questions to uncover this.</p>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
+// ══════════════════════════════════════════
+// FEATURE 2 — BUYER STATE PANEL (V3: pressure modifier badge)
+// ══════════════════════════════════════════
+const MOOD_META = {
+  neutral:          { emoji: '😐', label: 'Neutral' },
+  curious:          { emoji: '🙂', label: 'Warming up' },
+  skeptical:        { emoji: '🤨', label: 'Skeptical' },
+  confused:         { emoji: '😕', label: 'Confused' },
+  frustrated:       { emoji: '😤', label: 'Frustrated' },
+  impressed:        { emoji: '😀', label: 'Impressed' },
+  losing_interest:  { emoji: '😴', label: 'Losing interest' },
+  ready_to_advance: { emoji: '🤝', label: 'Ready to move forward' },
+}
+
+function BuyerStatePanel({ buyerState, buyerProfile, lastDelta = null, pressureModifier = null, onViewProfile }) {
+  if (!buyerState || !buyerProfile) return null
+
+  const { interest_score: interest, trust_score: trust } = buyerState
+
+  const deltaArrow = (delta) => {
+    if (!delta && delta !== 0) return null
+    if (delta > 0) return <span className="text-success text-[10px] font-bold ml-1">↑ +{delta}</span>
+    if (delta < 0) return <span className="text-error text-[10px] font-bold ml-1">↓ {delta}</span>
+    return null
+  }
+
+  const interestColor = interest >= 70 ? 'bg-success' : interest >= 40 ? 'bg-primary' : 'bg-warning'
+  const trustColor    = trust >= 60    ? 'bg-success' : trust >= 30    ? 'bg-primary' : 'bg-warning'
+
+  return (
+    <div className="bg-surface-card border border-surface-border rounded-2xl p-4 mb-3 space-y-3">
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-xs font-semibold text-text-primary">{buyerProfile.name}</p>
+          <p className="text-[10px] text-text-muted">{buyerProfile.role}</p>
+        </div>
+        <div className="flex items-center gap-2">
+          {pressureModifier && PRESSURE_LABELS[pressureModifier] && (
+            <span className="text-[10px] bg-error/10 text-error border border-error/25 rounded-full px-2 py-0.5 font-medium">
+              {PRESSURE_LABELS[pressureModifier]}
+            </span>
+          )}
+          {onViewProfile && (
+            <button onClick={onViewProfile} className="text-[10px] text-primary-glow hover:underline">
+              View profile
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        <div>
+          <div className="flex items-center justify-between mb-1">
+            <p className="text-[10px] text-text-muted">Interest</p>
+            <div className="flex items-center">
+              <span className="text-xs font-bold text-text-primary">{interest}%</span>
+              {lastDelta && deltaArrow(lastDelta.interest_delta)}
+            </div>
+          </div>
+          <div className="h-1.5 bg-surface-panel rounded-full overflow-hidden">
+            <div className={`h-full ${interestColor} rounded-full transition-all duration-700`} style={{ width: `${interest}%` }} />
+          </div>
+        </div>
+        <div>
+          <div className="flex items-center justify-between mb-1">
+            <p className="text-[10px] text-text-muted">Trust</p>
+            <div className="flex items-center">
+              <span className="text-xs font-bold text-text-primary">{trust}%</span>
+              {lastDelta && deltaArrow(lastDelta.trust_delta)}
+            </div>
+          </div>
+          <div className="h-1.5 bg-surface-panel rounded-full overflow-hidden">
+            <div className={`h-full ${trustColor} rounded-full transition-all duration-700`} style={{ width: `${trust}%` }} />
+          </div>
+        </div>
+      </div>
+
+      {buyerState.last_reasoning && (
+        <p className="text-[10px] text-text-muted italic border-t border-surface-border pt-2 leading-relaxed">
+          {buyerState.last_reasoning}
+        </p>
+      )}
+    </div>
+  )
+}
+
+// ══════════════════════════════════════════
+// FEATURE 5 — WORD HIGHLIGHT RENDERER
+// ══════════════════════════════════════════
+function WordHighlight({ content, highlights = [] }) {
+  if (!highlights.length) return <p className="text-sm leading-relaxed">{content}</p>
+
+  const parts = []
+  let remaining = content
+  const sorted = [...highlights].sort((a, b) => (remaining.indexOf(a.phrase) - remaining.indexOf(b.phrase)))
+
+  for (const h of sorted) {
+    const idx = remaining.indexOf(h.phrase)
+    if (idx === -1) continue
+    if (idx > 0) parts.push(<span key={`pre_${idx}`}>{remaining.slice(0, idx)}</span>)
+    const color = h.type === 'strong' ? 'text-success bg-success/10' : 'text-warning bg-warning/10'
+    parts.push(
+      <span key={`hl_${idx}`} className={`${color} rounded px-0.5 relative group cursor-help`}>
+        {h.phrase}
+        <span className="absolute bottom-full left-0 mb-1 hidden group-hover:block bg-surface-card border border-surface-border rounded-lg px-2 py-1 text-[10px] text-text-secondary whitespace-nowrap z-10 shadow-lg max-w-[200px]">
+          {h.issue}
+        </span>
+      </span>
+    )
+    remaining = remaining.slice(idx + h.phrase.length)
+  }
+  if (remaining) parts.push(<span key="tail">{remaining}</span>)
+
+  return <p className="text-sm leading-relaxed">{parts}</p>
+}
+
+// ══════════════════════════════════════════
+// DELIVERY STATUS
+// ══════════════════════════════════════════
+function DeliveryStatus({ status }) {
+  if (!status || status === 'sent')  return <span className="text-text-muted text-[10px]">✓</span>
+  if (status === 'delivered')        return <span className="text-text-muted text-[10px]">✓✓</span>
+  if (status === 'seen')             return <span className="text-primary-glow text-[10px] font-medium">Seen</span>
+  if (status === 'ghosted')          return <span className="text-text-muted text-[10px]">👻 Ghosted</span>
+  return null
+}
+
+// ══════════════════════════════════════════
+// STRUCTURED COACHING CARD — collapsible
+// ══════════════════════════════════════════
+function StructuredCoachingCard({ coaching }) {
+  const [revealed, setRevealed] = useState(false)
+  if (!coaching) return null
+
+  if (typeof coaching === 'string') {
+    return (
+      <div className="mt-2 animate-fade-in-up">
+        <button onClick={() => setRevealed(v => !v)} className="text-[11px] text-primary-glow hover:underline mb-1">
+          {revealed ? 'Hide coaching tip' : 'Show coaching tip'}
+        </button>
+        {revealed && (
+          <div className="bg-warning/8 border border-warning/20 rounded-xl p-3">
+            <p className="text-xs text-text-secondary leading-relaxed">{coaching}</p>
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  const { what_worked, what_didnt, improvement, ghost_quality_score, is_ghost_feedback } = coaching
+  const hasContent = what_worked || what_didnt || improvement
+
+  return (
+    <div className="mt-2 animate-fade-in-up">
+      {is_ghost_feedback ? (
+        // Ghost feedback — always show quality score, hide detail behind toggle
+        <div className="bg-surface-panel border border-surface-border rounded-xl p-3">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2">
+              <span className="text-sm">👻</span>
+              <p className="text-xs font-medium text-text-primary">No reply</p>
+              {ghost_quality_score != null && (
+                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${ghost_quality_score >= 40 ? 'bg-success/10 text-success' : 'bg-warning/10 text-warning'}`}>
+                  Quality: {ghost_quality_score}/100
+                </span>
+              )}
+            </div>
+            <button onClick={() => setRevealed(v => !v)} className="text-[11px] text-primary-glow hover:underline">
+              {revealed ? 'Hide tip' : 'Show coaching tip'}
+            </button>
+          </div>
+          {revealed && what_didnt && (
+            <div className="space-y-1.5 pt-2 border-t border-surface-border">
+              <p className="text-xs text-text-secondary leading-relaxed">{what_didnt}</p>
+              {improvement && <p className="text-xs text-primary-glow leading-relaxed">→ {improvement}</p>}
+            </div>
+          )}
+        </div>
+      ) : hasContent ? (
+        <>
+          <button onClick={() => setRevealed(v => !v)} className="text-[11px] text-primary-glow hover:underline mb-1">
+            {revealed ? 'Hide coaching tip' : 'Show coaching tip'}
+          </button>
+          {revealed && (
+            <div className="rounded-xl border border-surface-border overflow-hidden">
+              {what_worked && !what_worked.startsWith('N/A') && (
+                <div className="bg-success/5 border-b border-surface-border px-3 py-2">
+                  <p className="text-[10px] font-semibold text-success uppercase tracking-wide mb-0.5">✅ What worked</p>
+                  <p className="text-xs text-text-secondary leading-relaxed">{what_worked}</p>
+                </div>
+              )}
+              {what_didnt && (
+                <div className="bg-warning/5 border-b border-surface-border px-3 py-2">
+                  <p className="text-[10px] font-semibold text-warning uppercase tracking-wide mb-0.5">🔧 What to improve</p>
+                  <p className="text-xs text-text-secondary leading-relaxed">{what_didnt}</p>
+                </div>
+              )}
+              {improvement && (
+                <div className="bg-primary/5 px-3 py-2">
+                  <p className="text-[10px] font-semibold text-primary-glow uppercase tracking-wide mb-0.5">💡 Try this</p>
+                  <p className="text-xs text-text-secondary leading-relaxed">{improvement}</p>
+                </div>
+              )}
+            </div>
+          )}
+        </>
+      ) : null}
+    </div>
+  )
+}
+
+// ══════════════════════════════════════════
+// REFLECTION OVERLAY — expanded options
+// ══════════════════════════════════════════
+function ReflectionOverlay({ onAnswer, isLoading }) {
+  const GROUPS = [
+    {
+      label: 'Message quality',
+      options: [
+        { key: 'too_generic',    label: 'Too generic',       icon: '📋' },
+        { key: 'no_value',       label: 'No clear value',    icon: '❓' },
+        { key: 'weak_question',  label: 'Weak question',     icon: '🤔' },
+        { key: 'too_long',       label: 'Too long',          icon: '📝' },
+        { key: 'too_much_pitch', label: 'Too salesy',        icon: '📣' },
+      ]
+    },
+    {
+      label: 'Personalization',
+      options: [
+        { key: 'no_personalization', label: 'Not personalized',  icon: '🎯' },
+        { key: 'missed_pain',        label: 'Missed their pain',  icon: '💭' },
+        { key: 'assumed_too_much',   label: 'Wrong assumptions',  icon: '🔮' },
+      ]
+    },
+    {
+      label: 'Tone & style',
+      options: [
+        { key: 'too_formal',     label: 'Too formal',        icon: '🤵' },
+        { key: 'too_pushy',      label: 'Too pushy',         icon: '🚨' },
+        { key: 'no_credibility', label: 'No credibility',    icon: '🏷️' },
+      ]
+    },
+    {
+      label: 'Not sure',
+      options: [
+        { key: 'not_sure',       label: "I'm not sure",      icon: '🤷' },
+      ]
+    }
+  ]
+
+  return (
+    <div className="mt-2 bg-surface-panel border border-primary/25 rounded-xl p-4 animate-fade-in-up">
+      <p className="text-xs font-semibold text-primary-glow mb-0.5">🧠 Reflect first</p>
+      <p className="text-xs text-text-muted mb-3">Why do you think they responded this way?</p>
+      <div className="space-y-3">
+        {GROUPS.map(g => (
+          <div key={g.label}>
+            <p className="text-[10px] font-semibold text-text-muted uppercase tracking-wide mb-1.5">{g.label}</p>
+            <div className="grid grid-cols-2 gap-1.5">
+              {g.options.map(o => (
+                <button key={o.key} onClick={() => onAnswer(o.key)} disabled={isLoading}
+                  className="flex items-center gap-2 px-3 py-2 rounded-lg bg-surface-card border border-surface-border hover:border-primary/40 hover:bg-primary/5 text-xs text-text-secondary transition-all text-left disabled:opacity-50">
+                  <span>{o.icon}</span><span>{o.label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// ══════════════════════════════════════════
+// PRACTICE MESSAGE BUBBLE
+// V3: interruption styling added
+// ══════════════════════════════════════════
+function PracticeMessage({ msg, deliveryStatus, onRetryFromHere, isBranchPoint, annotation }) {
+  const isUser = msg.role === 'user'
+  const [reflectionDone, setReflectionDone]   = useState(false)
+  const [enrichedCoaching, setEnrichedCoaching] = useState(null)
+  const [reflLoading, setReflLoading]         = useState(false)
+  const [showAnnotation, setShowAnnotation]   = useState(false)
+
+  if (msg.role === 'system') {
+    if (msg.content?.startsWith('💡')) {
+      return (
+        <div className="bg-primary/5 border border-primary/20 rounded-xl p-3 mb-3">
+          <p className="text-xs text-primary-glow leading-relaxed">{msg.content}</p>
+        </div>
+      )
+    }
+    return (
+      <div className="bg-surface-panel border border-surface-border rounded-xl p-4 mb-4">
+        <p className="text-xs text-primary-glow font-medium mb-1">📋 Scenario</p>
+        <p className="text-sm text-text-secondary leading-relaxed">{msg.content}</p>
+      </div>
+    )
+  }
+
+  let parsedCoaching = null
+  if (!isUser && msg.coaching_tip) {
+    try {
+      const c = typeof msg.coaching_tip === 'string' ? JSON.parse(msg.coaching_tip) : msg.coaching_tip
+      parsedCoaching = (c && typeof c === 'object' && c.what_worked) ? c : msg.coaching_tip
+    } catch { parsedCoaching = msg.coaching_tip }
+  }
+
+  const needsReflection = !isUser && parsedCoaching && typeof parsedCoaching === 'object' && parsedCoaching.needs_reflection && !reflectionDone
+
+  const handleReflectionAnswer = async (answer) => {
+    setReflLoading(true)
+    try {
+      const session = window.__practiceSession || {}
+      const { data } = await api.post(`/practice/${session.id}/reflection`, {
+        reflection_answer: answer, user_message: msg._prevUserMessage || '', prospect_response: msg.content,
+      })
+      setEnrichedCoaching(data.coaching)
+    } catch { setEnrichedCoaching('Good self-awareness. Try rewriting with a specific result and one direct question.') }
+    finally { setReflLoading(false); setReflectionDone(true) }
+  }
+
+  const annotationDot = annotation ? (
+    annotation.severity === 'positive' ? '🟢' : annotation.severity === 'critical' ? '🔴' : '🟡'
+  ) : null
+
+  // V3 — Interruption styling
+  const isInterruption = !isUser && msg.is_interruption
+
+  return (
+    <div className={`flex gap-2 ${isUser ? 'flex-row-reverse' : 'flex-row'} items-end mb-2 ${isBranchPoint ? 'opacity-40' : ''}`}>
+      {!isUser && (
+        <div className={`w-7 h-7 rounded-full flex items-center justify-center text-sm shrink-0 ${isInterruption ? 'bg-warning/20' : 'bg-surface-border'}`}>
+          {isInterruption ? '⚡' : '👤'}
+        </div>
+      )}
+      <div className={`max-w-[80%] group`}>
+        {/* V3 — Interruption label */}
+        {isInterruption && (
+          <p className="text-[9px] text-warning font-semibold uppercase tracking-wide mb-0.5 pl-1">Spontaneous thought</p>
+        )}
+        <div className={isUser ? 'bubble-user' : isInterruption ? 'bg-warning/8 border border-warning/20 rounded-2xl rounded-bl-sm px-4 py-3' : 'bubble-ai'}>
+          {isUser && annotation?.word_highlights?.length > 0
+            ? <WordHighlight content={msg.content} highlights={annotation.word_highlights} />
+            : <p className="text-sm leading-relaxed">{msg.content}</p>
+          }
+          {msg.attachments?.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {msg.attachments.map((a, i) => (
+                <a key={i} href={a.url} target="_blank" rel="noopener noreferrer"
+                  className="flex items-center gap-1.5 text-[11px] bg-white/10 rounded-lg px-2 py-1 hover:bg-white/20 transition-colors">
+                  <span>{a.type?.startsWith('image') ? '🖼️' : '📄'}</span>
+                  <span className="max-w-[100px] truncate">{a.name}</span>
+                </a>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {isUser && (
+          <div className="flex justify-end items-center gap-2 mt-0.5 pr-1">
+            {annotationDot && (
+              <button onClick={() => setShowAnnotation(v => !v)} className="text-[10px]">{annotationDot}</button>
+            )}
+            <DeliveryStatus status={deliveryStatus} />
+            {onRetryFromHere && (
+              <button onClick={() => onRetryFromHere(msg)}
+                className="opacity-0 group-hover:opacity-100 text-[10px] text-primary-glow hover:underline transition-all">
+                ↩ Retry from here
+              </button>
+            )}
+          </div>
+        )}
+
+        {isUser && annotation && showAnnotation && (
+          <div className={`mt-2 rounded-xl border p-3 text-xs animate-fade-in-up ${
+            annotation.severity === 'positive' ? 'bg-success/5 border-success/20' :
+            annotation.severity === 'critical' ? 'bg-error/5 border-error/20'    :
+            'bg-warning/5 border-warning/20'
+          }`}>
+            <p className="font-semibold mb-1">{annotation.issue}</p>
+            {annotation.better_approach && <p className="text-text-muted mb-1">{annotation.better_approach}</p>}
+            {annotation.example_rewrite && (
+              <div className="bg-surface-card rounded-lg px-2 py-1.5 mt-1">
+                <p className="text-[10px] text-text-muted mb-0.5">Better:</p>
+                <p className="italic">"{annotation.example_rewrite}"</p>
+              </div>
+            )}
+          </div>
+        )}
+
+        {!isUser && parsedCoaching && (
+          <div>
+            {needsReflection && !reflectionDone
+              ? <ReflectionOverlay onAnswer={handleReflectionAnswer} isLoading={reflLoading} />
+              : <StructuredCoachingCard coaching={enrichedCoaching || parsedCoaching} />
+            }
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ══════════════════════════════════════════
+// FEATURE 9 — DRILL MODE INPUT
+// ══════════════════════════════════════════
+function DrillModeInput({ drillType, content }) {
+  const charLimit = drillType === 'brevity' ? 150 : null
+  const needsQuestion = ['discovery', 'cta'].includes(drillType)
+  const hasQuestion = content.includes('?')
+  const tooLong = charLimit && content.length > charLimit
+
+  const drillMeta = {
+    discovery: { label: '🔍 Discovery Drill', hint: 'Every message must include a question.' },
+    brevity:   { label: '✂️ Brevity Drill',   hint: `Keep messages under ${charLimit} characters.` },
+    value:     { label: '💎 Value Drill',      hint: 'Every message must contain a specific outcome or metric.' },
+    cta:       { label: '🎯 CTA Drill',        hint: 'Every message must end with a question or next step.' },
+  }
+  const meta = drillMeta[drillType] || {}
+
+  return (
+    <div>
+      {meta.label && (
+        <div className="flex items-center justify-between mb-2 px-1">
+          <span className="text-[10px] font-semibold text-primary-glow">{meta.label}</span>
+          <span className="text-[10px] text-text-muted">{meta.hint}</span>
+        </div>
+      )}
+      {tooLong && (
+        <div className="flex items-center gap-1.5 mb-2 text-[10px] text-warning bg-warning/10 border border-warning/20 rounded-lg px-2 py-1">
+          <span>⚠️ Too long</span><span>{content.length}/{charLimit} characters</span>
+        </div>
+      )}
+      {needsQuestion && content.length > 10 && !hasQuestion && (
+        <div className="flex items-center gap-1.5 mb-2 text-[10px] text-warning bg-warning/10 border border-warning/20 rounded-lg px-2 py-1">
+          <span>⚠️ Add a question before sending</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ══════════════════════════════════════════
+// PRACTICE INPUT — GPT pill style, click-only send
+// ══════════════════════════════════════════
+function PracticeInput({ chatId, onSend, disabled, branchHint, drillType, ghostRetry = false }) {
+  const [content, setContent]         = useState('')
+  const [attachments, setAttachments] = useState([])
+  const [uploading, setUploading]     = useState(false)
+  const textareaRef  = useRef()
+  const fileInputRef = useRef()
+  const uploadFile   = useUploadFile()
+  const deleteFile   = useDeleteFile()
+
+  const canSend = !disabled && (content.trim().length > 0 || attachments.length > 0)
+
+  const handleSend = () => {
+    if (!canSend) return
+    onSend(content.trim(), attachments.map(a => a.id))
+    setContent('')
+    setAttachments([])
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto'
+    }
+  }
+
+  const handleFileChange = async (e) => {
+    const file = e.target.files[0]; if (!file) return; e.target.value = ''
+    if (file.size > MAX_FILE_SIZE) { toast.error('File too large (max 10MB)'); return }
+    setUploading(true)
+    try {
+      const { file: up } = await uploadFile.mutateAsync({ file, chatId })
+      setAttachments(p => [...p, { file, id: up.id, url: up.url }])
+    } catch { toast.error('Upload failed') } finally { setUploading(false) }
+  }
+
+  return (
+    <div className="px-4 pb-4 pt-3 bg-surface-panel border-t border-surface-border">
+      {ghostRetry && (
+        <div className="mb-2 flex items-center gap-1.5 text-[11px] text-warning bg-warning/8 border border-warning/20 rounded-xl px-3 py-2">
+          <span>👻</span>
+          <span>They didn't reply — improve your message and try again</span>
+        </div>
+      )}
+      {branchHint && !ghostRetry && (
+        <div className="mb-2 flex items-center gap-1.5 text-[11px] text-primary-glow bg-primary/5 border border-primary/20 rounded-xl px-3 py-2">
+          <span>↩</span><span>Branched — write an improved response</span>
+        </div>
+      )}
+      {drillType && <DrillModeInput drillType={drillType} content={content} />}
+      {attachments.length > 0 && (
+        <div className="flex flex-wrap gap-2 mb-2">
+          {attachments.map((a, i) => (
+            <div key={i} className="flex items-center gap-2 bg-surface-card border border-surface-border rounded-xl px-2.5 py-1.5 text-xs">
+              <span>{a.file?.type?.startsWith('image') ? '🖼️' : '📄'}</span>
+              <span className="text-text-secondary max-w-[100px] truncate">{a.file?.name}</span>
+              <button onClick={() => { if (a.id) deleteFile.mutate(a.id); setAttachments(p => p.filter((_, j) => j !== i)) }}
+                className="text-text-muted hover:text-error transition-colors">×</button>
+            </div>
+          ))}
+        </div>
+      )}
+      {/* GPT-style pill input */}
+      <div className="flex items-end gap-2 bg-surface-card border border-surface-border rounded-[28px] px-3 py-2 focus-within:border-primary/60 focus-within:ring-1 focus-within:ring-primary/20 transition-all">
+        <button onClick={() => fileInputRef.current?.click()} disabled={uploading}
+          className="p-1.5 rounded-full text-text-muted hover:text-text-secondary transition-colors shrink-0 self-end mb-0.5">
+          {uploading
+            ? <div className="w-4 h-4 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
+            : <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+          }
+        </button>
+        <input ref={fileInputRef} type="file" className="hidden" accept={ALLOWED_FILE_TYPES.join(',')} onChange={handleFileChange} />
+        <textarea
+          ref={textareaRef}
+          value={content}
+          onChange={e => {
+            setContent(e.target.value)
+            e.target.style.height = 'auto'
+            e.target.style.height = Math.min(e.target.scrollHeight, 140) + 'px'
+          }}
+          onKeyDown={e => {
+            // Shift+Enter = newline, Enter alone = nothing (click to send)
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault()
+              // Do NOT auto-send — user must click the button
+            }
+          }}
+          disabled={disabled}
+          placeholder="Write your message…"
+          rows={1}
+          className="flex-1 bg-transparent text-sm text-text-primary placeholder:text-text-muted outline-none resize-none py-1"
+          style={{ minHeight: '24px', maxHeight: '140px' }}
+        />
+        <button
+          onClick={handleSend}
+          disabled={!canSend}
+          className="p-2 rounded-full bg-primary text-white hover:bg-primary-dim transition-all shrink-0 self-end disabled:opacity-30 disabled:cursor-not-allowed"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="w-4 h-4 rotate-90">
+            <line x1="22" y1="2" x2="11" y2="13"/>
+            <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+          </svg>
+        </button>
+      </div>
+      <p className="text-[10px] text-text-muted mt-1.5 text-center">Press send to submit · Shift+Enter for new line</p>
+    </div>
+  )
+}
+
+// ══════════════════════════════════════════
+// SESSION DEBRIEF CARD (V3: outcome + monologue_insights)
+// ══════════════════════════════════════════
+function SessionDebriefCard({ debrief, buyerProfile, goalAchieved, sessionGoal, finalBuyerState, hiddenMotivationsReveal, onRetry, onDone, onDiscussWithCoach, isRetrying, skillScores, conversationOutcome, monologueInsights }) {
+  if (!debrief) return null
+  const scoreColor = (debrief.message_score ?? 50) >= 70 ? 'text-success' : (debrief.message_score ?? 50) >= 40 ? 'text-warning' : 'text-error'
+
+  return (
+    <div className="p-5 space-y-4">
+      <div className="text-center">
+        <div className="w-12 h-12 rounded-2xl bg-primary/10 border border-primary/20 flex items-center justify-center mx-auto mb-3">
+          <span className="text-2xl">🎯</span>
+        </div>
+        <h3 className="text-base font-semibold text-text-primary">Session Complete</h3>
+        {sessionGoal && (
+          <div className={`mt-2 inline-flex items-center gap-1.5 text-xs px-3 py-1 rounded-full ${goalAchieved ? 'bg-success/10 text-success border border-success/20' : 'bg-surface-panel text-text-muted border border-surface-border'}`}>
+            {goalAchieved ? '✅' : '⭕'} Goal: "{sessionGoal}"
+          </div>
+        )}
+      </div>
+
+      {/* V3 — Conversation Outcome */}
+      {conversationOutcome?.type && conversationOutcome.type !== 'continuing' && (
+        <div className={`rounded-xl border p-4 ${goalAchieved ? 'bg-success/5 border-success/25' : 'bg-surface-panel border-surface-border'}`}>
+          <p className="text-[10px] font-semibold text-text-muted uppercase tracking-wide mb-1">Outcome</p>
+          <p className="text-sm font-semibold text-text-primary">{outcomeLabel(conversationOutcome.type)}</p>
+          {conversationOutcome.reason && <p className="text-xs text-text-secondary mt-1 leading-relaxed">{conversationOutcome.reason}</p>}
+        </div>
+      )}
+
+      {finalBuyerState && (
+        <div className="bg-surface-panel border border-surface-border rounded-xl p-4">
+          <p className="text-xs font-semibold text-text-muted mb-3">Final Buyer State</p>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="text-center">
+              <p className="text-2xl font-bold text-primary-glow">{finalBuyerState.interest_score}</p>
+              <p className="text-[10px] text-text-muted">Final Interest</p>
+            </div>
+            <div className="text-center">
+              <p className="text-2xl font-bold text-success">{finalBuyerState.trust_score}</p>
+              <p className="text-[10px] text-text-muted">Final Trust</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {debrief.message_score != null && (
+        <div className="bg-surface-panel border border-surface-border rounded-xl p-4 text-center">
+          <p className="text-xs text-text-muted mb-1">Message strength</p>
+          <p className={`text-3xl font-bold font-display ${scoreColor}`}>
+            {debrief.message_score}<span className="text-sm text-text-muted font-normal">/100</span>
+          </p>
+        </div>
+      )}
+
+      {debrief.strength && (
+        <div className="bg-success/5 border border-success/20 rounded-xl p-3">
+          <p className="text-xs font-semibold text-success mb-1">✅ What worked</p>
+          <p className="text-sm text-text-secondary leading-relaxed">{debrief.strength}</p>
+        </div>
+      )}
+      {debrief.improvement && (
+        <div className="bg-warning/5 border border-warning/20 rounded-xl p-3">
+          <p className="text-xs font-semibold text-warning mb-1">🔧 What to improve</p>
+          <p className="text-sm text-text-secondary leading-relaxed">{debrief.improvement}</p>
+        </div>
+      )}
+      {debrief.coachable_moment && (
+        <div className="bg-primary/5 border border-primary/20 rounded-xl p-3">
+          <p className="text-xs font-semibold text-primary-glow mb-1">🧠 Coachable moment</p>
+          <p className="text-sm text-text-secondary leading-relaxed">{debrief.coachable_moment}</p>
+        </div>
+      )}
+
+      {/* V3 — Monologue insights */}
+      {monologueInsights?.length > 0 && (
+        <div className="bg-surface-panel border border-surface-border rounded-xl p-4">
+          <p className="text-xs font-semibold text-text-muted mb-3">🧠 What the buyer was really thinking</p>
+          <div className="space-y-2">
+            {monologueInsights.map((m, i) => (
+              <div key={i} className={`rounded-lg border px-3 py-2 text-xs ${
+                m.sentiment === 'positive' ? 'bg-success/5 border-success/20 text-success' :
+                m.sentiment === 'negative' ? 'bg-error/5 border-error/20 text-error' :
+                'bg-surface-card border-surface-border text-text-secondary'
+              }`}>
+                <p className="font-medium mb-0.5">{m.label || `Exchange ${i + 1}`}</p>
+                <p className="leading-relaxed italic">"{m.thought}"</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {hiddenMotivationsReveal && (
+        <div className="bg-surface-card border border-primary/30 rounded-xl p-4">
+          <p className="text-xs font-semibold text-primary-glow mb-2">🔓 Hidden motivations revealed</p>
+          {hiddenMotivationsReveal.hidden_motivations?.map((m, i) => (
+            <p key={i} className="text-xs text-text-secondary mb-1">• {m}</p>
+          ))}
+          <p className="text-[10px] text-text-muted mt-2 italic">
+            {hiddenMotivationsReveal.hidden_discovered ? '✅ You discovered this through your questions.' : '❌ You didn\'t uncover this. Next time, ask about their leadership\'s priorities.'}
+          </p>
+        </div>
+      )}
+
+      {skillScores?.axes && (
+        <div className="bg-surface-panel border border-surface-border rounded-xl p-4">
+          <p className="text-xs font-semibold text-text-muted mb-3">Skill Scores{skillScores.session_score != null ? ` · ${skillScores.session_score}/100 overall` : ' (generating…)'}</p>
+          <div className="grid grid-cols-3 gap-2">
+            {Object.entries(skillScores.axes).map(([axis, score]) => (
+              <div key={axis} className="text-center">
+                <p className={`text-lg font-bold ${score >= 70 ? 'text-success' : score >= 50 ? 'text-primary-glow' : 'text-warning'}`}>{score}</p>
+                <p className="text-[9px] text-text-muted capitalize">{axis.replace('_', ' ')}</p>
+              </div>
+            ))}
+          </div>
+          {skillScores.one_line_verdict && <p className="text-[10px] text-text-muted mt-2 italic text-center">{skillScores.one_line_verdict}</p>}
+        </div>
+      )}
+
+      <div className="flex gap-2 pt-1">
+        <Button variant="secondary" fullWidth loading={isRetrying} onClick={onRetry}>🔄 Retry</Button>
+        <Button variant="secondary" fullWidth onClick={onDone}>Done</Button>
+      </div>
+      {onDiscussWithCoach && (
+        <Button fullWidth onClick={onDiscussWithCoach} className="bg-primary/10 text-primary-glow border border-primary/20 hover:bg-primary/20">
+          💬 Discuss with Coach →
+        </Button>
+      )}
+    </div>
+  )
+}
+
+// ══════════════════════════════════════════
+// FEATURE 6 — RETRY COMPARISON
+// ══════════════════════════════════════════
+function RetryComparisonCard({ comparison, originalScore, retryScore }) {
+  if (!comparison) return null
+  const improved = comparison.improved || (retryScore > originalScore)
+  const delta    = comparison.score_improvement ?? (retryScore - originalScore)
+
+  return (
+    <div className="bg-surface-card border border-surface-border rounded-2xl p-5 mb-4">
+      <div className="flex items-center justify-between mb-4">
+        <p className="text-sm font-semibold text-text-primary">Retry Comparison</p>
+        <span className={`text-sm font-bold ${improved ? 'text-success' : 'text-error'}`}>
+          {improved ? '↑' : '↓'} {Math.abs(delta)} pts
+        </span>
+      </div>
+      <div className="grid grid-cols-2 gap-3 mb-4">
+        <div className="bg-surface-panel rounded-xl p-3 text-center border border-surface-border">
+          <p className="text-xs text-text-muted mb-1">Attempt 1</p>
+          <p className="text-2xl font-bold text-text-primary">{originalScore || '—'}</p>
+        </div>
+        <div className={`rounded-xl p-3 text-center border ${improved ? 'bg-success/5 border-success/20' : 'bg-error/5 border-error/20'}`}>
+          <p className="text-xs text-text-muted mb-1">Attempt 2</p>
+          <p className={`text-2xl font-bold ${improved ? 'text-success' : 'text-error'}`}>{retryScore || '—'}</p>
+        </div>
+      </div>
+      {comparison.key_improvements?.length > 0 && (
+        <div className="mb-3">
+          <p className="text-[10px] font-semibold text-success uppercase tracking-wide mb-1.5">What improved</p>
+          {comparison.key_improvements.map((imp, i) => <p key={i} className="text-xs text-text-secondary flex items-start gap-1.5"><span className="text-success">✓</span>{imp}</p>)}
+        </div>
+      )}
+      {comparison.still_needs_work?.length > 0 && (
+        <div className="mb-3">
+          <p className="text-[10px] font-semibold text-warning uppercase tracking-wide mb-1.5">Still needs work</p>
+          {comparison.still_needs_work.map((w, i) => <p key={i} className="text-xs text-text-secondary flex items-start gap-1.5"><span className="text-warning">→</span>{w}</p>)}
+        </div>
+      )}
+      {comparison.verdict && <p className="text-xs text-text-muted italic border-t border-surface-border pt-3 mt-3">{comparison.verdict}</p>}
+    </div>
+  )
+}
+
+// ══════════════════════════════════════════
+// FEATURE 9 — CURRICULUM CARD
+// ══════════════════════════════════════════
+function CurriculumCard({ curriculum, onStartDrill }) {
+  if (!curriculum) return null
+
+  return (
+    <div className="bg-surface-card border border-primary/20 rounded-2xl p-5 mb-5">
+      <div className="flex items-start justify-between mb-3">
+        <div>
+          <p className="text-sm font-semibold text-text-primary">Your Practice Plan · This Week</p>
+          <p className="text-xs text-text-muted mt-0.5">Weakness: {curriculum.weakness_identified} ({curriculum.weakness_score}/100)</p>
+        </div>
+        <span className="text-[10px] bg-primary/10 text-primary-glow border border-primary/20 px-2 py-0.5 rounded-full">AI-generated</span>
+      </div>
+      <p className="text-xs text-text-secondary mb-4">Goal: {curriculum.goal_description}</p>
+      <div className="space-y-2">
+        {(curriculum.sessions || []).map((s) => (
+          <button key={s.session_number}
+            onClick={() => onStartDrill(s)}
+            className="w-full flex items-center gap-3 p-3 rounded-xl bg-surface-panel border border-surface-border hover:border-primary/30 transition-all text-left">
+            <div className="w-7 h-7 rounded-lg bg-primary/10 text-primary-glow text-xs font-bold flex items-center justify-center shrink-0">
+              {s.session_number}
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-medium text-text-primary">{s.title}</p>
+              <p className="text-[10px] text-text-muted truncate">{s.description}</p>
+            </div>
+            <span className={`text-[10px] px-2 py-0.5 rounded-full border ${s.type === 'drill' ? 'bg-warning/10 text-warning border-warning/20' : 'bg-success/10 text-success border-success/20'}`}>
+              {s.type === 'drill' ? 'Drill' : 'Full'}
+            </span>
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// ══════════════════════════════════════════
+// V3 — OUTCOME ANNOUNCEMENT OVERLAY
+// Full-screen when AI ends the session
+// ══════════════════════════════════════════
+function OutcomeOverlay({ outcome, onSeeDebrief, onRetry }) {
+  if (!outcome) return null
+
+  const isPositive = /meeting|scheduled|follow|deal|booked|interested/.test(
+    (outcome.type || '').toLowerCase()
+  )
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm animate-fade-in-up">
+      <div className="bg-surface-card border border-surface-border rounded-3xl p-8 mx-4 max-w-sm w-full text-center space-y-5 shadow-2xl">
+        <div className={`w-14 h-14 rounded-2xl mx-auto flex items-center justify-center text-3xl border ${isPositive ? 'bg-success/10 border-success/25' : 'bg-error/10 border-error/25'}`}>
+          {isPositive ? '📞' : '📵'}
+        </div>
+        <div>
+          <p className="text-xs font-semibold text-text-muted uppercase tracking-wide mb-2">The call has ended</p>
+          <p className={`text-lg font-bold font-display mb-2 ${isPositive ? 'text-success' : 'text-error'}`}>
+            {outcomeLabel(outcome.type)}
+          </p>
+          {outcome.reason && (
+            <p className="text-sm text-text-secondary leading-relaxed">"{outcome.reason}"</p>
+          )}
+        </div>
+        <div className="flex flex-col gap-2">
+          <Button fullWidth onClick={onSeeDebrief}>See full debrief →</Button>
+          <Button variant="secondary" fullWidth onClick={onRetry}>🔄 Retry this scenario</Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ══════════════════════════════════════════
+// FEATURE 4 — SESSION REPLAY VIEW (video playback)
+// ══════════════════════════════════════════
+function SessionReplayView({ sessionId }) {
+  const [data, setData]               = useState(null)
+  const [loading, setLoading]         = useState(true)
+  const [selectedAnnotation, setSelectedAnnotation] = useState(null)
+  const [activeMessageId, setActiveMessageId]       = useState(null)
+  const [showMonologue, setShowMonologue]            = useState(false)
+  // Video playback state
+  const [isPlaying, setIsPlaying]     = useState(false)
+  const [playIndex, setPlayIndex]     = useState(-1)   // which message is currently "revealing"
+  const [visibleCount, setVisibleCount] = useState(0)  // messages shown so far
+  const [playSpeed, setPlaySpeed]     = useState(1)    // 1x, 1.5x, 2x
+  const playRef                       = useRef(null)
+  const navigate = useNavigate()
+
+  useEffect(() => {
+    api.get(`/practice/${sessionId}/replay`)
+      .then(r => setData(r.data))
+      .catch(() => toast.error('Could not load replay'))
+      .finally(() => setLoading(false))
+  }, [sessionId])
+
+  // Video playback engine
+  const allMessages = data?.messages?.filter(m => m.role !== 'system') || []
+
+  useEffect(() => {
+    if (!isPlaying || visibleCount >= allMessages.length) {
+      if (visibleCount >= allMessages.length) setIsPlaying(false)
+      return
+    }
+    const msg   = allMessages[visibleCount]
+    const words = (msg?.content || '').split(' ').length
+    // Simulate reading time: ~100ms per word, min 600ms, max 3000ms
+    const delay = Math.max(600, Math.min(3000, words * 100)) / playSpeed
+
+    playRef.current = setTimeout(() => {
+      setVisibleCount(v => v + 1)
+      setActiveMessageId(msg?.id)
+    }, delay)
+
+    return () => clearTimeout(playRef.current)
+  }, [isPlaying, visibleCount, allMessages, playSpeed])
+
+  const handlePlay = () => {
+    if (visibleCount >= allMessages.length) {
+      // Reset and replay
+      setVisibleCount(0)
+      setActiveMessageId(null)
+    }
+    setIsPlaying(true)
+  }
+  const handlePause = () => { setIsPlaying(false); clearTimeout(playRef.current) }
+  const handleReset = () => { setIsPlaying(false); setVisibleCount(0); setActiveMessageId(null) }
+  const handleShowAll = () => { setIsPlaying(false); setVisibleCount(allMessages.length) }
+
+  if (loading) return <div className="flex-1 flex items-center justify-center"><div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" /></div>
+  if (!data)   return <div className="flex-1 flex items-center justify-center text-text-muted">Replay not available</div>
+
+  const {
+    messages, annotations, annotations_by_message_id: byId,
+    buyer_profile, skill_scores, session_debrief, retry_comparison,
+    monologue_available, monologue_moments, conversation_outcome, pressure_modifier,
+  } = data
+
+  const userMessages = messages.filter(m => m.role === 'user')
+
+  const timelineDots = userMessages.map(m => {
+    const color = m.timeline_color === 'green' ? 'bg-success' : m.timeline_color === 'red' ? 'bg-error' : 'bg-warning/60'
+    return { id: m.id, color, label: `${m.timestamp_seconds}s` }
+  })
+
+  const keyMoments = (annotations || [])
+    .filter(a => a.severity !== 'warning' || a.type === 'missed_discovery')
+    .sort((a, b) => (a.timestamp_seconds || 0) - (b.timestamp_seconds || 0))
+
+  return (
+    <div className="flex flex-col h-full">
+      <div className="flex items-center justify-between px-5 h-14 border-b border-surface-border shrink-0">
+        <button onClick={() => navigate(`/practice/${sessionId}`)} className="text-xs text-text-muted hover:text-text-secondary">← Back</button>
+        <span className="text-sm font-semibold text-text-primary">Session Replay</span>
+        {buyer_profile && <span className="text-xs text-text-muted">{buyer_profile.name}</span>}
+      </div>
+
+      {/* Video playback controls */}
+      <div className="flex items-center gap-2 px-4 py-2.5 border-b border-surface-border bg-surface-panel shrink-0">
+        {!isPlaying ? (
+          <button onClick={handlePlay}
+            className="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 bg-primary text-white rounded-full hover:bg-primary-dim transition-colors">
+            <svg viewBox="0 0 24 24" fill="currentColor" className="w-3.5 h-3.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            {visibleCount === 0 ? 'Play' : visibleCount >= allMessages.length ? 'Replay' : 'Resume'}
+          </button>
+        ) : (
+          <button onClick={handlePause}
+            className="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 bg-surface-card border border-surface-border text-text-primary rounded-full hover:bg-surface-hover transition-colors">
+            <svg viewBox="0 0 24 24" fill="currentColor" className="w-3.5 h-3.5"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+            Pause
+          </button>
+        )}
+        <button onClick={handleReset} className="text-[11px] text-text-muted hover:text-text-secondary transition-colors">↺ Reset</button>
+        <button onClick={handleShowAll} className="text-[11px] text-text-muted hover:text-text-secondary transition-colors">Show all</button>
+        <div className="ml-auto flex items-center gap-1">
+          {[1, 1.5, 2].map(s => (
+            <button key={s} onClick={() => setPlaySpeed(s)}
+              className={`text-[10px] px-2 py-0.5 rounded-full transition-colors ${playSpeed === s ? 'bg-primary text-white' : 'bg-surface-card text-text-muted hover:bg-surface-hover'}`}>
+              {s}×
+            </button>
+          ))}
+        </div>
+        {allMessages.length > 0 && (
+          <span className="text-[10px] text-text-muted ml-2">{Math.min(visibleCount, allMessages.length)}/{allMessages.length}</span>
+        )}
+      </div>
+
+      <div className="flex-1 overflow-y-auto scroll-container">
+        <div className="p-4 space-y-4">
+
+          {/* V3 — Conversation outcome banner */}
+          {conversation_outcome?.type && conversation_outcome.type !== 'continuing' && (
+            <div className={`rounded-xl border p-3 flex items-start gap-3 ${
+              /meeting|scheduled|follow|booked/.test(conversation_outcome.type)
+                ? 'bg-success/5 border-success/25'
+                : 'bg-surface-panel border-surface-border'
+            }`}>
+              <span className="text-lg shrink-0">{/meeting|scheduled|booked/.test(conversation_outcome.type) ? '✅' : '📋'}</span>
+              <div>
+                <p className="text-xs font-semibold text-text-primary">{outcomeLabel(conversation_outcome.type)}</p>
+                {conversation_outcome.reason && <p className="text-[10px] text-text-muted mt-0.5 leading-relaxed">{conversation_outcome.reason}</p>}
+              </div>
+              {pressure_modifier && (
+                <span className="ml-auto text-[10px] bg-error/10 text-error border border-error/25 rounded-full px-2 py-0.5 shrink-0">
+                  {PRESSURE_LABELS[pressure_modifier] || pressure_modifier}
+                </span>
+              )}
+            </div>
+          )}
+
+          {/* V3 — Monologue toggle */}
+          {monologue_available && (
+            <div className="flex items-center justify-between bg-surface-panel border border-surface-border rounded-xl px-4 py-3">
+              <div>
+                <p className="text-xs font-semibold text-text-primary">Buyer's internal thoughts</p>
+                <p className="text-[10px] text-text-muted">See what the buyer was really thinking</p>
+              </div>
+              <button
+                onClick={() => setShowMonologue(v => !v)}
+                className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${showMonologue ? 'bg-primary' : 'bg-surface-border'}`}
+              >
+                <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${showMonologue ? 'translate-x-4' : 'translate-x-0.5'}`} />
+              </button>
+            </div>
+          )}
+
+          {/* V3 — Monologue key moments */}
+          {showMonologue && monologue_moments?.length > 0 && (
+            <div className="bg-surface-panel border border-surface-border rounded-xl p-4">
+              <p className="text-[10px] font-semibold text-text-muted uppercase tracking-wide mb-3">Key Buyer Moments</p>
+              <div className="space-y-2">
+                {monologue_moments.slice(0, 5).map((m, i) => {
+                  const sev = m.severity || monologueSeverity(m.thought)
+                  return (
+                    <div key={i} className={`rounded-lg border px-3 py-2 ${
+                      sev === 'positive' ? 'bg-success/5 border-success/25' :
+                      sev === 'negative' ? 'bg-error/5 border-error/25' :
+                      'bg-surface-card border-surface-border'
+                    }`}>
+                      <div className="flex items-center justify-between mb-0.5">
+                        <span className={`text-[9px] font-bold uppercase tracking-wide ${
+                          sev === 'positive' ? 'text-success' : sev === 'negative' ? 'text-error' : 'text-warning'
+                        }`}>
+                          {sev === 'positive' ? '🟢' : sev === 'negative' ? '🔴' : '🟡'} Exchange {m.exchange_index || i + 1}
+                          {m.label ? ` — ${m.label}` : ''}
+                        </span>
+                      </div>
+                      <p className="text-xs text-text-secondary italic">"{m.thought}"</p>
+                      {m.coaching_note && <p className="text-[10px] text-text-muted mt-1">→ {m.coaching_note}</p>}
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Timeline bar */}
+          {timelineDots.length > 1 && (
+            <div className="bg-surface-panel border border-surface-border rounded-xl p-4">
+              <p className="text-[10px] font-semibold text-text-muted uppercase tracking-wide mb-3">Timeline</p>
+              <div className="flex items-center gap-1.5 flex-wrap">
+                {timelineDots.map((d) => (
+                  <button key={d.id} onClick={() => setActiveMessageId(d.id)}
+                    className={`w-3 h-3 rounded-full ${d.color} ${activeMessageId === d.id ? 'ring-2 ring-primary ring-offset-1' : ''} hover:scale-125 transition-transform`}
+                    title={d.label} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Key moments (annotations) */}
+          {keyMoments.length > 0 && (
+            <div className="bg-surface-panel border border-surface-border rounded-xl p-4">
+              <p className="text-[10px] font-semibold text-text-muted uppercase tracking-wide mb-2">Key Moments</p>
+              <div className="space-y-1.5">
+                {keyMoments.map((a, i) => (
+                  <button key={i} onClick={() => { setSelectedAnnotation(a); setActiveMessageId(a.message_id) }}
+                    className="w-full flex items-start gap-2 text-left hover:bg-surface-card rounded-lg p-1.5 transition-colors">
+                    <span>{a.severity === 'positive' ? '🟢' : a.severity === 'critical' ? '🔴' : '🟡'}</span>
+                    <div>
+                      <p className="text-[10px] font-medium text-text-primary">{a.type?.replace(/_/g, ' ')}</p>
+                      <p className="text-[10px] text-text-muted">{a.issue}</p>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {selectedAnnotation && (
+            <div className={`rounded-xl border p-4 ${selectedAnnotation.severity === 'positive' ? 'bg-success/5 border-success/20' : selectedAnnotation.severity === 'critical' ? 'bg-error/5 border-error/20' : 'bg-warning/5 border-warning/20'}`}>
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs font-semibold text-text-primary capitalize">{selectedAnnotation.type?.replace(/_/g, ' ')}</p>
+                <button onClick={() => setSelectedAnnotation(null)} className="text-text-muted text-xs">×</button>
+              </div>
+              <p className="text-xs text-text-secondary mb-2">{selectedAnnotation.issue}</p>
+              {selectedAnnotation.better_approach && <p className="text-xs text-text-muted mb-2 border-t border-surface-border pt-2">Better: {selectedAnnotation.better_approach}</p>}
+              {selectedAnnotation.example_rewrite && (
+                <div className="bg-surface-card rounded-lg px-3 py-2">
+                  <p className="text-[10px] text-text-muted mb-1">Example rewrite:</p>
+                  <p className="text-xs italic">"{selectedAnnotation.example_rewrite}"</p>
+                </div>
+              )}
+              {selectedAnnotation.word_highlights?.length > 0 && (
+                <div className="mt-2 border-t border-surface-border pt-2">
+                  <p className="text-[10px] text-text-muted mb-1">Flagged phrases:</p>
+                  {selectedAnnotation.word_highlights.map((h, i) => (
+                    <p key={i} className="text-xs text-text-secondary">• "<span className="text-warning">{h.phrase}</span>" — {h.issue}</p>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {retry_comparison && (
+            <RetryComparisonCard comparison={retry_comparison} originalScore={null} retryScore={skill_scores?.session_score} />
+          )}
+
+          {/* Message timeline with video playback */}
+          <div className="space-y-3">
+            {allMessages.slice(0, visibleCount === 0 && !isPlaying ? allMessages.length : visibleCount).map((msg) => {
+              const ann = byId?.[msg.id]
+              const isActive = msg.id === activeMessageId
+              const sev = msg.monologue_severity || monologueSeverity(msg.internal_monologue)
+              return (
+                <div key={msg.id} ref={isActive ? el => el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }) : null}
+                  className={`rounded-xl border p-3 transition-all ${isActive ? 'border-primary bg-primary/5' : 'border-surface-border bg-surface-panel'}`}>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className={`text-[10px] font-semibold ${msg.role === 'user' ? 'text-primary-glow' : 'text-text-muted'}`}>
+                      {msg.role === 'user' ? 'You' : msg.is_interruption ? '⚡ Buyer (spontaneous)' : 'Prospect'} · {msg.timestamp_seconds}s
+                    </span>
+                    {ann && (
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded border ${ann.severity === 'positive' ? 'border-success/30 text-success' : ann.severity === 'critical' ? 'border-error/30 text-error' : 'border-warning/30 text-warning'}`}>
+                        {ann.type?.replace(/_/g, ' ')}
+                      </span>
+                    )}
+                  </div>
+                  {msg.role === 'user' && ann?.word_highlights?.length > 0
+                    ? <WordHighlight content={msg.content} highlights={ann.word_highlights} />
+                    : <p className="text-sm text-text-secondary leading-relaxed">{msg.content}</p>
+                  }
+                  {/* V3 — Internal monologue (revealed in replay) */}
+                  {showMonologue && msg.role === 'assistant' && msg.internal_monologue && (
+                    <div className={`mt-2 rounded-lg border px-3 py-2 text-xs ${
+                      sev === 'positive' ? 'bg-success/5 border-success/25' :
+                      sev === 'negative' ? 'bg-error/5 border-error/25' :
+                      sev === 'warning'  ? 'bg-warning/5 border-warning/25' :
+                      'bg-surface-card border-surface-border'
+                    }`}>
+                      <p className="text-[9px] font-semibold text-text-muted uppercase tracking-wide mb-0.5">🧠 Internal thought</p>
+                      <p className="text-text-secondary leading-relaxed italic">"{msg.internal_monologue}"</p>
+                    </div>
+                  )}
+                  {ann && ann.severity !== 'positive' && (
+                    <button onClick={() => setSelectedAnnotation(ann)} className="mt-2 text-[10px] text-primary-glow hover:underline">
+                      View coaching →
+                    </button>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+
+          {data.playbook && (
+            <div className="bg-primary/5 border border-primary/20 rounded-2xl p-4">
+              <p className="text-xs font-semibold text-primary-glow mb-2">📋 Your Playbook</p>
+              <p className="text-xs text-text-secondary mb-3 leading-relaxed">{data.playbook.key_insight}</p>
+              <div>
+                <p className="text-[10px] font-semibold text-text-muted uppercase tracking-wide mb-1.5">Opening message</p>
+                <div className="bg-surface-card rounded-xl p-3">
+                  <p className="text-xs text-text-secondary italic leading-relaxed">"{data.playbook.opening_message}"</p>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ══════════════════════════════════════════
+// ACTIVE PRACTICE SESSION (V3)
+// V3: outcome overlay, chunk rendering, typing phases, AI-ended detection
+// ══════════════════════════════════════════
+function ActivePracticeSession({ session }) {
+  const [messages, setMessages]         = useState([])
+  const [sending, setSending]           = useState(false)
+  const [showRating, setShowRating]     = useState(false)
+  const [showDebrief, setShowDebrief]   = useState(false)
+  const [debrief, setDebrief]           = useState(null)
+  const [debriefMeta, setDebriefMeta]   = useState({})
+  const [rating, setRating]             = useState(0)
+  const [ghostFeedback, setGhostFeedback] = useState(null)   // ghost quality gate feedback
+  const [showProfileSheet, setShowProfileSheet] = useState(false)  // read-only buyer profile view
+  const [showDiscussChat, setShowDiscussChat]   = useState(false)  // session discussion chat
+  const [buyerState, setBuyerState]     = useState(session.buyer_state || null)
+  const [lastDelta, setLastDelta]       = useState(null)
+  const [branchPoint, setBranchPoint]   = useState(null)
+  const [branchId, setBranchId]         = useState(null)
+  const [archivedBranch, setArchivedBranch] = useState([])
+  const [annotations, setAnnotations]   = useState({})
+  const [coachChatLoading, setCoachChatLoading] = useState(false)
+
+  // V3 state
+  const [outcomeOverlay, setOutcomeOverlay]   = useState(null) // holds outcome object
+  const [chunkBuffers, setChunkBuffers]       = useState({})   // msgId → chunks already shown
+  const [estimatedTypingMs, setEstimatedTypingMs] = useState(null)
+
+  const bottomRef = useRef()
+  const typingTimerRef = useRef()
+
+  const { deliveryStatuses, updateDelivery, isProspectTyping, setProspectTyping } = usePracticeStore()
+  const { data } = useChatMessages(session.chat_id)
+  const ratePractice     = useRatePractice()
+  const completePractice = useCompletePractice()
+  const retryPractice    = useRetryPractice()
+  const navigate         = useNavigate()
+
+  useEffect(() => { window.__practiceSession = session }, [session])
+
+  useEffect(() => {
+    if (data?.messages) {
+      setMessages(data.messages)
+      setAnnotations(data.annotations_by_message_id || {})
+    }
+    // V3 — If session was AI-ended and we're loading into it, show outcome overlay
+    if (data?.ai_ended_session && data?.conversation_outcome && !showDebrief) {
+      setOutcomeOverlay(data.conversation_outcome)
+    }
+  }, [data?.messages])
+
+  // Poll for skill scores after debrief shows
+  useEffect(() => {
+    if (!showDebrief || !session.id) return
+    const interval = setInterval(async () => {
+      try {
+        const r = await api.get(`/practice/${session.id}/messages`)
+        if (r.data?.skill_scores?.session_score != null) {
+          setDebriefMeta(prev => ({ ...prev, skill_scores: r.data.skill_scores, annotations: r.data.coaching_annotations }))
+          clearInterval(interval)
+        }
+      } catch {}
+    }, 3000)
+    return () => clearInterval(interval)
+  }, [showDebrief, session.id])
+
+  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages.length, isProspectTyping])
+
+  // V3 — Sophisticated typing phases (pause/resume simulation)
+  const startTypingPhases = useCallback((durationMs) => {
+    setProspectTyping(true)
+    if (typingTimerRef.current) clearTimeout(typingTimerRef.current)
+
+    const phases = [
+      { typing: true,  duration: 800 + Math.random() * 1200 },
+      { typing: false, duration: 400 + Math.random() * 600  },
+      { typing: true,  duration: 1200 + Math.random() * 1600 },
+      { typing: false, duration: 200 + Math.random() * 400  },
+      { typing: true,  duration: Infinity },
+    ]
+
+    const totalPhaseMs = phases.slice(0, 4).reduce((s, p) => s + p.duration, 0)
+    const maxPhases = durationMs && durationMs < totalPhaseMs ? 1 : phases.length
+
+    let elapsed = 0
+    const runPhase = (idx) => {
+      if (idx >= maxPhases) { setProspectTyping(true); return }
+      const { typing, duration } = phases[idx]
+      setProspectTyping(typing)
+      if (duration === Infinity) return
+      typingTimerRef.current = setTimeout(() => { elapsed += duration; runPhase(idx + 1) }, duration)
+    }
+    runPhase(0)
+  }, [setProspectTyping])
+
+  // V3 — Chunk rendering for new assistant messages
+  const renderChunks = useCallback((msg) => {
+    const chunks = splitIntoChunks(msg.content)
+    if (chunks.length <= 1) {
+      setMessages(prev => prev.find(m => m.id === msg.id) ? prev : [...prev, msg])
+      return
+    }
+
+    // Show first chunk immediately
+    const firstChunk = { ...msg, content: chunks[0], _is_chunk: true, _chunk_total: chunks.length }
+    setMessages(prev => prev.find(m => m.id === msg.id) ? prev : [...prev, firstChunk])
+
+    // Deliver subsequent chunks with delays
+    const DELAYS = [800, 1800]
+    chunks.slice(1).forEach((chunk, i) => {
+      const delay = DELAYS[i] || 1800 + i * 800
+      setTimeout(() => {
+        setMessages(prev => prev.map(m => {
+          if (m.id === msg.id) {
+            const joined = m.content + ' ' + chunk
+            return { ...m, content: joined.trim(), _chunk_done: i + 2 >= chunks.length }
+          }
+          return m
+        }))
+      }, delay)
+    })
+  }, [])
+
+  useRealtimeChat(session.chat_id, (newMsg) => {
+    if (newMsg.role === 'assistant') {
+      setProspectTyping(false)
+      if (typingTimerRef.current) clearTimeout(typingTimerRef.current)
+      // V3 — Chunk rendering
+      renderChunks(newMsg)
+    } else {
+      setMessages(prev => prev.find(m => m.id === newMsg.id) ? prev : [...prev, newMsg])
+    }
+
+    // V3 — Detect AI-ended session from message metadata
+    if (newMsg.ai_ended_session && newMsg.conversation_outcome) {
+      setTimeout(() => setOutcomeOverlay(newMsg.conversation_outcome), 500)
+    }
+  }, (updatedMsg) => {
+    updateDelivery(updatedMsg.id, updatedMsg.delivery_status)
+    if (updatedMsg.delivery_status === 'seen') {
+      startTypingPhases(estimatedTypingMs)
+    }
+  })
+
+  const handleSend = async (text, attachmentIds = []) => {
+    if (!text && !attachmentIds.length) return
+    setSending(true)
+    setProspectTyping(true)
+    setGhostFeedback(null)
+
+    const optimistic = { id: `opt_${Date.now()}`, role: 'user', content: text, created_at: new Date().toISOString(), delivery_status: 'sent', attachments: [] }
+    setMessages(prev => [...prev, optimistic])
+
+    try {
+      const payload = { content: text, attachment_ids: attachmentIds }
+      if (branchId) payload.branch_id = branchId
+
+      const { data: res } = await api.post(`/practice/${session.id}/message`, payload)
+      updateDelivery(res.message_id, res.delivery_status || 'sent')
+
+      if (res.buyer_state) setBuyerState(res.buyer_state)
+      if (res.buyer_state_delta) setLastDelta(res.buyer_state_delta)
+      if (res.estimated_typing_ms) setEstimatedTypingMs(res.estimated_typing_ms)
+
+      // Ghost quality gate — show inline feedback, allow retry
+      if (res.delivery_status === 'ghosted' && res.ghost_feedback) {
+        setProspectTyping(false)
+        setGhostFeedback(res.ghost_feedback)
+        // Update optimistic message to show ghosted status
+        setMessages(prev => prev.map(m =>
+          m.id === `opt_${optimistic.id.split('_')[1]}` || m.role === 'user' && m.content === text
+            ? { ...m, delivery_status: 'ghosted', coaching_tip: { what_didnt: res.ghost_feedback.weak_because, improvement: res.ghost_feedback.hint, is_ghost_feedback: true, ghost_quality_score: res.ghost_feedback.quality_score } }
+            : m
+        ))
+        return
+      }
+
+      if (res.session_ended && res.conversation_outcome) {
+        setTimeout(() => setOutcomeOverlay(res.conversation_outcome), 300)
+      }
+
+      // Chunked messages — each chunk is a separate message from server
+      if (res.instant_chunks?.length > 0) {
+        setProspectTyping(false)
+        const CHUNK_DELAYS = [0, 900, 1900]
+        res.instant_chunks.forEach((chunk, i) => {
+          setTimeout(() => {
+            setMessages(prev => prev.find(m => m.id === chunk.id) ? prev : [...prev, {
+              id: chunk.id,
+              role: 'assistant',
+              content: chunk.content,
+              coaching_tip: chunk.coaching_tip,
+              delivery_status: 'replied',
+              created_at: new Date().toISOString(),
+              chunk_index: chunk.chunk_index,
+              _prevUserMessage: text,
+            }])
+          }, CHUNK_DELAYS[i] || i * 1000)
+        })
+      } else if (!res.typing_signal) {
+        setProspectTyping(false)
+      }
+    } catch {
+      toast.error('Failed to send message')
+      setProspectTyping(false)
+    } finally { setSending(false) }
+  }
+
+  const handleRetryFromHere = async (msg) => {
+    try {
+      const { data } = await api.post(`/practice/${session.id}/branch`, { message_id: msg.id })
+      const kept     = data.messages || []
+      const archived = messages.filter(m => !kept.find(k => k.id === m.id))
+      setArchivedBranch(archived); setMessages(kept); setBranchPoint(msg.id); setBranchId(data.branch_id)
+      toast('Branched — write your improved response ↩', { icon: '🔀' })
+    } catch { toast.error('Could not create branch') }
+  }
+
+  const handleComplete = async () => {
+    try {
+      const result = await completePractice.mutateAsync(session.id)
+      const meta = {
+        goal_achieved:            result?.goal_achieved,
+        buyer_profile:            result?.buyer_profile || session.buyer_profile,
+        final_buyer_state:        result?.final_buyer_state,
+        hidden_motivations_reveal: result?.hidden_motivations_reveal,
+        conversation_outcome:     result?.conversation_outcome,
+        monologue_insights:       result?.monologue_insights,
+      }
+      setDebriefMeta(meta)
+      if (result?.session_debrief) { setDebrief(result.session_debrief); setShowDebrief(true) }
+      else setShowRating(true)
+    } catch { setShowRating(true) }
+  }
+
+  const handleRetry = async () => {
+    try {
+      const result = await retryPractice.mutateAsync(session.id)
+      toast.success('New session started with coaching context')
+      navigate(`/practice/${result.session_id}`)
+    } catch { toast.error('Could not start retry session') }
+  }
+
+  const handleDiscussWithCoach = async () => {
+    setCoachChatLoading(true)
+    try {
+      const { data: res } = await api.post(`/practice/${session.id}/open-coaching-chat`)
+      if (res.coaching_chat_id) navigate(`/chat/${res.coaching_chat_id}`)
+    } catch { toast.error('Could not open coaching chat') }
+    finally { setCoachChatLoading(false) }
+  }
+
+  // V3 — When user dismisses outcome overlay → go to debrief
+  const handleOutcomeToDebrief = async () => {
+    setOutcomeOverlay(null)
+    try {
+      const result = await completePractice.mutateAsync(session.id)
+      const meta = {
+        goal_achieved:           result?.goal_achieved,
+        buyer_profile:           result?.buyer_profile || session.buyer_profile,
+        final_buyer_state:       result?.final_buyer_state,
+        hidden_motivations_reveal: result?.hidden_motivations_reveal,
+        conversation_outcome:    outcomeOverlay,
+        monologue_insights:      result?.monologue_insights,
+      }
+      setDebriefMeta(meta)
+      if (result?.session_debrief) { setDebrief(result.session_debrief); setShowDebrief(true) }
+      else setShowRating(true)
+    } catch { setShowRating(true) }
+  }
+
+  const scenarioColor = SCENARIO_COLORS[session.scenario_type] || '#64748B'
+  const scenarioLabel = SCENARIO_LABELS[session.scenario_type] || session.scenario_type
+  const branchIdx     = branchPoint ? messages.findIndex(m => m.id === branchPoint) : -1
+
+  // V3 — Outcome overlay (full-screen)
+  if (outcomeOverlay) {
+    return (
+      <OutcomeOverlay
+        outcome={outcomeOverlay}
+        onSeeDebrief={handleOutcomeToDebrief}
+        onRetry={() => { setOutcomeOverlay(null); handleRetry() }}
+      />
+    )
+  }
+
+  if (showDebrief && debrief) {
+    return (
+      <div className="flex flex-col h-full">
+        <div className="flex items-center justify-between px-5 h-14 border-b border-surface-border shrink-0">
+          <span className="text-xs font-medium px-2.5 py-1 rounded-lg" style={{ color: scenarioColor, background: `${scenarioColor}18` }}>{scenarioLabel}</span>
+          <button onClick={() => navigate(`/practice/${session.id}/replay`)} className="text-xs text-primary-glow hover:underline">View replay →</button>
+        </div>
+        <div className="flex-1 overflow-y-auto scroll-container">
+          <SessionDebriefCard
+            debrief={debrief}
+            buyerProfile={debriefMeta.buyer_profile}
+            goalAchieved={debriefMeta.goal_achieved}
+            sessionGoal={session.session_goal}
+            finalBuyerState={debriefMeta.final_buyer_state}
+            hiddenMotivationsReveal={debriefMeta.hidden_motivations_reveal}
+            skillScores={debriefMeta.skill_scores}
+            conversationOutcome={debriefMeta.conversation_outcome}
+            monologueInsights={debriefMeta.monologue_insights}
+            onRetry={handleRetry}
+            onDone={() => { setShowDebrief(false); setShowRating(true) }}
+            onDiscussWithCoach={handleDiscussWithCoach}
+            isRetrying={retryPractice.isPending}
+          />
+        </div>
+        <Modal open={showRating} onClose={() => setShowRating(false)} title="Rate this session">
+          <ModalBody>
+            <p className="text-sm text-text-secondary mb-4 text-center">How useful was this practice session?</p>
+            <div className="flex gap-2 justify-center">
+              {[1,2,3,4,5].map(star => (
+                <button key={star} onClick={() => setRating(star)} className="text-2xl transition-transform hover:scale-110">
+                  {star <= rating ? '⭐' : '☆'}
+                </button>
+              ))}
+            </div>
+          </ModalBody>
+          <ModalFooter>
+            <Button fullWidth disabled={!rating} onClick={async () => {
+              await ratePractice.mutateAsync({ sessionId: session.id, rating })
+              queryClient.invalidateQueries({ queryKey: KEYS.practiceSessions })
+              toast.success('Session rated! Great practice.')
+              setShowRating(false)
+            }}>Submit rating</Button>
+          </ModalFooter>
+        </Modal>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Header */}
+      <div className="flex items-center justify-between px-5 h-14 border-b border-surface-border shrink-0">
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-medium px-2.5 py-1 rounded-lg" style={{ color: scenarioColor, background: `${scenarioColor}18` }}>{scenarioLabel}</span>
+          {branchPoint && <span className="text-[10px] bg-primary/10 text-primary-glow border border-primary/20 px-2 py-0.5 rounded-full">🔀 Branch active</span>}
+          {session.session_goal && <span className="text-[10px] text-text-muted hidden sm:block">Goal: {session.session_goal.slice(0, 30)}</span>}
+        </div>
+        <div className="flex items-center gap-2">
+          {branchPoint && <button onClick={() => { const combined = [...messages, ...archivedBranch].sort((a, b) => a.created_at > b.created_at ? 1 : -1); setMessages(combined); setBranchPoint(null); setBranchId(null); setArchivedBranch([]) }} className="text-xs text-text-muted hover:text-text-secondary">View original</button>}
+          {/* Session discussion chat icon */}
+          {!session.completed && (
+            <button onClick={() => setShowDiscussChat(v => !v)}
+              title="Discuss this session with Coach"
+              className="p-1.5 rounded-xl text-text-muted hover:text-primary-glow hover:bg-primary/5 transition-colors relative">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4">
+                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+              </svg>
+            </button>
+          )}
+          {!session.completed && <Button size="sm" variant="secondary" loading={completePractice.isPending} onClick={handleComplete}>Complete ✓</Button>}
+        </div>
+      </div>
+
+      {/* Session discussion panel (slides in from top) */}
+      {showDiscussChat && !session.completed && (
+        <div className="bg-surface-panel border-b border-surface-border px-4 py-3 animate-fade-in-up shrink-0">
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-xs font-semibold text-text-primary">💬 Discuss with Coach</p>
+            <button onClick={() => setShowDiscussChat(false)} className="text-text-muted hover:text-text-secondary text-xs">✕</button>
+          </div>
+          <p className="text-xs text-text-muted mb-3">Ask your coach a question about this session while it's still active.</p>
+          <Button size="sm" fullWidth loading={coachChatLoading} onClick={handleDiscussWithCoach}>
+            Open coaching chat →
+          </Button>
+        </div>
+      )}
+
+      {/* Messages */}
+      <div className="flex-1 overflow-y-auto scroll-container p-4">
+        {/* V3 — Buyer State Panel with pressure_modifier */}
+        {session.buyer_profile && (
+          <BuyerStatePanel
+            buyerState={buyerState}
+            buyerProfile={session.buyer_profile}
+            lastDelta={lastDelta}
+            pressureModifier={session.pressure_modifier}
+            onViewProfile={() => setShowProfileSheet(true)}
+          />
+        )}
+
+        {/* Ghost quality feedback inline banner */}
+        {ghostFeedback && (
+          <div className="bg-warning/5 border border-warning/20 rounded-xl p-4 mb-3 animate-fade-in-up">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2">
+                <span>👻</span>
+                <p className="text-xs font-semibold text-text-primary">They didn't reply</p>
+                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${ghostFeedback.quality_score >= 40 ? 'bg-success/10 text-success' : 'bg-warning/10 text-warning'}`}>
+                  Quality: {ghostFeedback.quality_score}/100
+                </span>
+              </div>
+              <button onClick={() => setGhostFeedback(null)} className="text-text-muted text-xs hover:text-text-secondary">✕</button>
+            </div>
+            <p className="text-xs text-text-secondary mb-2 leading-relaxed">{ghostFeedback.weak_because}</p>
+            {ghostFeedback.hint && (
+              <p className="text-xs text-primary-glow font-medium">→ {ghostFeedback.hint}</p>
+            )}
+            {ghostFeedback.can_retry && (
+              <p className="text-[11px] text-text-muted mt-2 italic">Improve your message and send again to see if they reply.</p>
+            )}
+          </div>
+        )}
+
+        {/* Read-only buyer profile sheet */}
+        {showProfileSheet && session.buyer_profile && (
+          <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-end" onClick={() => setShowProfileSheet(false)}>
+            <div className="bg-surface-card rounded-t-3xl w-full max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+              <div className="flex items-center justify-between px-5 pt-5 pb-3 border-b border-surface-border">
+                <p className="text-sm font-semibold text-text-primary">Contact Profile</p>
+                <button onClick={() => setShowProfileSheet(false)} className="text-text-muted hover:text-text-secondary text-sm">✕</button>
+              </div>
+              <div className="p-5">
+                <BuyerProfileCard buyer={session.buyer_profile} showHiddenMotivations={false} />
+                <p className="text-[10px] text-text-muted text-center mt-2 italic">Profile is read-only during an active session.</p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {messages.map((msg, i) => {
+          const isBranchPoint = branchIdx >= 0 && i < branchIdx
+          const ann = annotations[msg.id] || null
+          return (
+            <PracticeMessage
+              key={msg.id}
+              msg={msg}
+              deliveryStatus={deliveryStatuses[msg.id] || msg.delivery_status}
+              onRetryFromHere={msg.role === 'user' && !session.completed ? handleRetryFromHere : null}
+              isBranchPoint={isBranchPoint}
+              annotation={ann}
+            />
+          )
+        })}
+        {isProspectTyping && <ProspectTypingIndicator />}
+        <div ref={bottomRef} />
+      </div>
+
+      {/* Input */}
+      {!session.completed && (
+        <PracticeInput
+          chatId={session.chat_id}
+          onSend={handleSend}
+          disabled={sending}
+          branchHint={!!branchPoint}
+          drillType={session.drill_type}
+          ghostRetry={!!ghostFeedback}
+        />
+      )}
+
+      {session.completed && (
+        <div className="border-t border-surface-border bg-surface-panel p-3 flex gap-2">
+          <Button variant="secondary" fullWidth onClick={handleRetry} loading={retryPractice.isPending}>🔄 Retry</Button>
+          <Button variant="secondary" fullWidth onClick={() => navigate(`/practice/${session.id}/replay`)}>📽 Replay</Button>
+          <Button fullWidth loading={coachChatLoading} onClick={handleDiscussWithCoach}>💬 Discuss</Button>
+        </div>
+      )}
+
+      <Modal open={showRating} onClose={() => setShowRating(false)} title="Rate this session">
+        <ModalBody>
+          <p className="text-sm text-text-secondary mb-4 text-center">How useful was this practice session?</p>
+          <div className="flex gap-2 justify-center">
+            {[1,2,3,4,5].map(star => <button key={star} onClick={() => setRating(star)} className="text-2xl transition-transform hover:scale-110">{star <= rating ? '⭐' : '☆'}</button>)}
+          </div>
+        </ModalBody>
+        <ModalFooter>
+          <Button fullWidth disabled={!rating} onClick={async () => {
+            await ratePractice.mutateAsync({ sessionId: session.id, rating })
+            queryClient.invalidateQueries({ queryKey: KEYS.practiceSessions })
+            toast.success('Session rated!')
+            setShowRating(false)
+          }}>Submit</Button>
+        </ModalFooter>
+      </Modal>
+    </div>
+  )
+}
+
+// ══════════════════════════════════════════
+// SESSION LIST VIEW (V3: pressure modifier selector)
+// ══════════════════════════════════════════
+function SessionListView() {
+  const { data, isLoading }                              = usePracticeSessions()
+  const { data: scenarios = [], isLoading: scenLoading } = usePracticeScenarios()
+  const startPractice = useStartPractice()
+  const navigate      = useNavigate()
+
+  const [selectedType, setSelectedType]         = useState(null)
+  const [scenarioText, setScenarioText]         = useState('')
+  const [sessionGoal, setSessionGoal]           = useState('')
+  const [bioNote, setBioNote]                   = useState('')
+  const [showBioNote, setShowBioNote]           = useState(false)
+  const [pressureModifier, setPressureModifier] = useState(null) // V3
+  const [starting, setStarting]                 = useState(false)
+
+  const ICONS = { interested: '✨', polite_decline: '🙅', ghost: '👻', skeptical: '🤨', price_objection: '💰', not_right_time: '⏰' }
+
+  // V3 — Disable pressure modifier for ghost/interested
+  const modifierDisabled = ['ghost', 'interested'].includes(selectedType)
+  useEffect(() => {
+    if (modifierDisabled) setPressureModifier(null)
+  }, [selectedType, modifierDisabled])
+
+  const handleStart = async () => {
+    if (!selectedType) { toast('Pick a scenario type first'); return }
+    setStarting(true)
+    try {
+      const res = await startPractice.mutateAsync({
+        scenario_type:     selectedType,
+        scenario_text:     scenarioText.trim() || undefined,
+        session_goal:      sessionGoal.trim()  || undefined,
+        bio_note:          bioNote.trim()      || undefined,
+        pressure_modifier: pressureModifier    || undefined,  // V3
+      })
+      navigate(`/practice/${res.session_id}`)
+    } catch { toast.error('Failed to start session') }
+    finally { setStarting(false) }
+  }
+
+  const handleStartDrill = async (drillSession) => {
+    setStarting(true)
+    try {
+      const res = await startPractice.mutateAsync({
+        scenario_type: drillSession.scenario_type,
+        drill_type:    drillSession.drill_type || undefined,
+        session_goal:  `Improve ${drillSession.focus_axis} to ${drillSession.target_score}`,
+      })
+      navigate(`/practice/${res.session_id}`)
+    } catch { toast.error('Failed to start drill') }
+    finally { setStarting(false) }
+  }
+
+  return (
+    <>
+      <TopBar title="Practice" rightAction={
+        <div className="flex items-center gap-3">
+          <button onClick={() => navigate('/practice/dashboard')} className="text-xs text-primary-glow font-medium">Skills →</button>
+        </div>
+      } />
+      <PageContent>
+        {/* Stats */}
+        {data?.stats && (
+          <div className="grid grid-cols-3 gap-3 mb-5">
+            <div className="bg-surface-card border border-surface-border rounded-xl p-4 text-center">
+              <p className="text-xl font-bold font-display text-text-primary">{data.stats.completed}</p>
+              <p className="text-xs text-text-muted">Done</p>
+            </div>
+            <div className="bg-surface-card border border-surface-border rounded-xl p-4 text-center">
+              <p className="text-xl font-bold font-display text-warning">{data.stats.streak || 0}d</p>
+              <p className="text-xs text-text-muted">Streak 🔥</p>
+            </div>
+            <div className="bg-surface-card border border-surface-border rounded-xl p-4 text-center">
+              <p className="text-xl font-bold font-display text-success">{data.stats.reply_rate}%</p>
+              <p className="text-xs text-text-muted">Reply rate</p>
+            </div>
+          </div>
+        )}
+
+        {data?.curriculum && (
+          <CurriculumCard curriculum={data.curriculum.curriculum} onStartDrill={handleStartDrill} />
+        )}
+
+        {data?.badges?.length > 0 && (
+          <div className="mb-5">
+            <p className="text-xs text-text-muted font-medium mb-2">Badges</p>
+            <div className="flex flex-wrap gap-2">
+              {data.badges.map((b, i) => (
+                <div key={i} className="flex items-center gap-1.5 bg-surface-card border border-surface-border rounded-xl px-3 py-1.5">
+                  <span className="text-sm">🏆</span>
+                  <span className="text-xs text-text-secondary font-medium">{b.badge_label}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Start session */}
+        <div className="mb-6 bg-surface-card border border-surface-border rounded-2xl p-5 space-y-4">
+          <div>
+            <p className="text-sm font-semibold text-text-primary mb-0.5">Start a practice session</p>
+            <p className="text-xs text-text-muted">Pick a scenario type and practice with a realistic AI buyer.</p>
+          </div>
+
+          {/* Scenario type */}
+          {scenLoading ? (
+            <div className="grid grid-cols-2 gap-2">{[...Array(4)].map((_, i) => <div key={i} className="h-12 skeleton rounded-xl" />)}</div>
+          ) : (
+            <div className="grid grid-cols-2 gap-2">
+              {scenarios.map(s => (
+                <button key={s.type} onClick={() => setSelectedType(s.type)}
+                  className={`flex items-center gap-2.5 p-3 rounded-xl border transition-all text-left ${selectedType === s.type ? 'border-primary bg-primary/10' : 'border-surface-border bg-surface-panel hover:border-surface-mid'}`}>
+                  <span className="w-7 h-7 rounded-lg flex items-center justify-center text-sm shrink-0" style={{ background: `${SCENARIO_COLORS[s.type]}18`, color: SCENARIO_COLORS[s.type] }}>{ICONS[s.type] || '💬'}</span>
+                  <div className="min-w-0">
+                    <p className="text-xs font-medium text-text-primary truncate">{SCENARIO_LABELS[s.type]}</p>
+                    <p className="text-[10px] text-text-muted">{s.times_practiced}× {s.avg_score ? `· ${s.avg_score}/100 avg` : ''}</p>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* V3 — Pressure modifier selector */}
+          {selectedType && !modifierDisabled && (
+            <div>
+              <label className="block text-xs font-medium text-text-muted mb-2">
+                Add difficulty modifier <span className="font-normal">(optional)</span>
+              </label>
+              <div className="space-y-1.5">
+                <button
+                  onClick={() => setPressureModifier(null)}
+                  className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl border text-left transition-all ${!pressureModifier ? 'border-primary bg-primary/8' : 'border-surface-border bg-surface-panel hover:border-surface-mid'}`}
+                >
+                  <span className={`w-4 h-4 rounded-full border-2 flex items-center justify-center shrink-0 ${!pressureModifier ? 'border-primary' : 'border-surface-border'}`}>
+                    {!pressureModifier && <span className="w-2 h-2 rounded-full bg-primary" />}
+                  </span>
+                  <span className="text-xs text-text-secondary">None — standard difficulty</span>
+                </button>
+                {PRESSURE_MODIFIERS.map(mod => (
+                  <button key={mod.key}
+                    onClick={() => setPressureModifier(mod.key)}
+                    className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl border text-left transition-all ${pressureModifier === mod.key ? 'border-error/50 bg-error/8' : 'border-surface-border bg-surface-panel hover:border-surface-mid'}`}
+                  >
+                    <span className={`w-4 h-4 rounded-full border-2 flex items-center justify-center shrink-0 ${pressureModifier === mod.key ? 'border-error' : 'border-surface-border'}`}>
+                      {pressureModifier === mod.key && <span className="w-2 h-2 rounded-full bg-error" />}
+                    </span>
+                    <div className="min-w-0">
+                      <p className="text-xs font-medium text-text-primary">{mod.label}</p>
+                      <p className="text-[10px] text-text-muted">{mod.desc}</p>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Prospect context */}
+          <div>
+            <label className="block text-xs font-medium text-text-muted mb-1.5">Prospect context <span className="text-text-muted font-normal">(optional)</span></label>
+            <textarea rows={3} value={scenarioText} onChange={e => setScenarioText(e.target.value)}
+              placeholder="Paste a LinkedIn post, tweet, or any prospect message to base the scenario on…"
+              className="w-full px-3 py-2.5 text-sm bg-surface-panel border border-surface-border rounded-xl text-text-primary placeholder:text-text-muted focus:outline-none focus:border-primary/60 resize-none transition-all" />
+          </div>
+
+          {/* Session goal */}
+          <div>
+            <label className="block text-xs font-medium text-text-muted mb-1.5">Session goal <span className="text-text-muted font-normal">(optional)</span></label>
+            <input type="text" value={sessionGoal} onChange={e => setSessionGoal(e.target.value)}
+              placeholder="e.g. Get the prospect to ask about pricing"
+              className="w-full px-3 py-2.5 text-sm bg-surface-panel border border-surface-border rounded-xl text-text-primary placeholder:text-text-muted focus:outline-none focus:border-primary/60 transition-all" />
+          </div>
+
+          {/* Bio note */}
+          <div>
+            <button onClick={() => setShowBioNote(v => !v)} className="text-xs text-primary-glow hover:underline flex items-center gap-1">
+              <span>🎭</span> {showBioNote ? 'Hide' : 'Customize your prospect'} (optional)
+            </button>
+            {showBioNote && (
+              <div className="mt-2">
+                <textarea rows={3} value={bioNote} onChange={e => setBioNote(e.target.value)}
+                  placeholder='e.g. "Make them a woman named Sarah, Head of Ops at a Series A startup. She is skeptical about pricing and already looked at two competitors."'
+                  className="w-full px-3 py-2.5 text-sm bg-surface-panel border border-surface-border rounded-xl text-text-primary placeholder:text-text-muted focus:outline-none focus:border-primary/60 resize-none transition-all" />
+                <p className="text-[10px] text-text-muted mt-1">Groq will generate a realistic buyer profile from your description.</p>
+              </div>
+            )}
+          </div>
+
+          <Button fullWidth loading={starting} onClick={handleStart} disabled={!selectedType}>
+            {starting ? 'Generating your buyer…' : 'Start practice →'}
+          </Button>
+        </div>
+
+        {/* Recent sessions */}
+        {data?.sessions?.length > 0 && (
+          <div>
+            <p className="text-sm font-semibold text-text-primary mb-3">Recent sessions</p>
+            <div className="space-y-2">
+              {data.sessions.slice(0, 8).map(s => (
+                <button key={s.id} onClick={() => navigate(`/practice/${s.id}`)}
+                  className="w-full flex items-center justify-between p-3 bg-surface-card border border-surface-border rounded-xl hover:border-surface-mid transition-all text-left">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs font-medium px-2 py-0.5 rounded-md" style={{ color: SCENARIO_COLORS[s.scenario_type], background: `${SCENARIO_COLORS[s.scenario_type]}18` }}>
+                      {SCENARIO_LABELS[s.scenario_type] || s.scenario_type}
+                    </span>
+                    {/* V3 — Pressure modifier badge on session list */}
+                    {s.pressure_modifier && (
+                      <span className="text-[9px] bg-error/10 text-error border border-error/20 rounded-md px-1.5 py-0.5">
+                        {PRESSURE_LABELS[s.pressure_modifier] || s.pressure_modifier}
+                      </span>
+                    )}
+                    {s.buyer_profile?.name && <span className="text-[10px] text-text-muted">{s.buyer_profile.name}</span>}
+                    <span className="text-[10px] text-text-muted">{timeAgo(s.created_at)}</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {s.skill_scores?.session_score != null && (
+                      <span className={`text-[10px] font-bold ${s.skill_scores.session_score >= 70 ? 'text-success' : s.skill_scores.session_score >= 50 ? 'text-primary-glow' : 'text-warning'}`}>{s.skill_scores.session_score}</span>
+                    )}
+                    {s.goal_achieved && <span className="text-[10px]">✅</span>}
+                    {s.completed && <button onClick={e => { e.stopPropagation(); navigate(`/practice/${s.id}/replay`) }} className="text-[10px] text-text-muted hover:text-primary-glow">replay</button>}
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </PageContent>
+    </>
+  )
+}
+
+// ══════════════════════════════════════════
+// FEATURE 8 — SKILL DASHBOARD (V3)
+// V3: 7th axis (monologue_alignment), week-over-week bars, next drill card, pressure breakdown
+// ══════════════════════════════════════════
+function SkillDashboard() {
+  const [data, setData]       = useState(null)
+  const [loading, setLoading] = useState(true)
+  const navigate = useNavigate()
+
+  useEffect(() => {
+    Promise.all([
+      api.get('/practice/skill-dashboard'),
+      api.get('/practice/progress-summary').catch(() => ({ data: null })),
+      api.get('/practice/sessions').catch(() => ({ data: null })),
+    ]).then(([dash, progress, sessions]) => {
+      setData({
+        ...dash.data,
+        progress_summary: progress.data,
+        all_sessions: sessions.data?.sessions || [],
+        global_stats:  sessions.data?.stats   || null,
+      })
+    })
+    .catch(() => toast.error('Could not load dashboard'))
+    .finally(() => setLoading(false))
+  }, [])
+
+  if (loading) return <div className="flex-1 flex items-center justify-center"><div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" /></div>
+  if (!data)   return <div className="flex-1 flex items-center justify-center text-text-muted">No data yet</div>
+
+  // V3 — 7 axes including monologue_alignment
+  const axes = ['clarity', 'value', 'discovery', 'objection_handling', 'brevity', 'cta_strength', 'monologue_alignment']
+  const radarData = axes.map(axis => ({
+    axis: axis.replace(/_/g, ' '), score: data.current_axes?.[axis] ?? 0, prev: (data.axis_trends?.[axis]?.previous) ?? 0,
+  }))
+
+  const progress = data.progress_summary
+
+  return (
+    <>
+      <TopBar title="Skill Dashboard" backTo="/practice" />
+      <PageContent>
+        {data.sessions_30d === 0 ? (
+          <div className="text-center py-12">
+            <p className="text-4xl mb-3">📊</p>
+            <p className="text-sm font-semibold text-text-primary mb-1">No data yet</p>
+            <p className="text-xs text-text-muted mb-4">Complete a few sessions to see your skill profile.</p>
+            <Button onClick={() => navigate('/practice')}>Start practicing →</Button>
+          </div>
+        ) : (
+          <div className="space-y-5">
+
+            {/* V3 — "What to practice next" card */}
+            {progress?.recommended_next_drill && (
+              <div className="bg-primary/5 border border-primary/25 rounded-2xl p-5">
+                <div className="flex items-start justify-between mb-3">
+                  <div>
+                    <p className="text-xs font-semibold text-primary-glow uppercase tracking-wide mb-1">Your next practice</p>
+                    <p className="text-sm font-semibold text-text-primary capitalize">
+                      Focus: {progress.recommended_next_drill.replace(/_/g, ' ')}
+                    </p>
+                  </div>
+                  {progress.streak > 0 && (
+                    <div className="text-center">
+                      <p className="text-2xl font-bold text-warning">{progress.streak}</p>
+                      <p className="text-[9px] text-text-muted">day streak 🔥</p>
+                    </div>
+                  )}
+                </div>
+                {progress.breakthrough && (
+                  <div className="bg-success/5 border border-success/25 rounded-xl p-3 mb-3">
+                    <p className="text-xs text-success font-medium">🎉 {progress.breakthrough}</p>
+                  </div>
+                )}
+                {progress.week_over_week && (
+                  <div className="space-y-2 mb-3">
+                    {Object.entries(progress.week_over_week).slice(0, 3).map(([axis, w]) => (
+                      <div key={axis} className="flex items-center gap-2">
+                        <p className="text-[10px] text-text-muted w-24 shrink-0 capitalize">{axis.replace(/_/g, ' ')}</p>
+                        <div className="flex-1 flex items-center gap-1.5">
+                          <div className="flex-1 h-1.5 bg-surface-panel rounded-full overflow-hidden">
+                            <div className="h-full bg-primary/40 rounded-full" style={{ width: `${w.from}%` }} />
+                          </div>
+                          <span className="text-[9px] text-text-muted">{w.from}</span>
+                          <span className="text-[9px] text-text-muted">→</span>
+                          <div className="flex-1 h-1.5 bg-surface-panel rounded-full overflow-hidden">
+                            <div className={`h-full rounded-full ${w.delta >= 0 ? 'bg-success' : 'bg-error'}`} style={{ width: `${w.to}%` }} />
+                          </div>
+                          <span className={`text-[9px] font-bold w-8 text-right ${w.delta > 0 ? 'text-success' : w.delta < 0 ? 'text-error' : 'text-text-muted'}`}>
+                            {w.delta > 0 ? `+${w.delta}` : w.delta}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <Button size="sm" onClick={() => navigate('/practice')} className="w-full">
+                  Start {progress.recommended_next_drill?.replace(/_/g, ' ')} drill →
+                </Button>
+              </div>
+            )}
+
+            {/* Section A — Radar chart */}
+            <div className="bg-surface-card border border-surface-border rounded-2xl p-5">
+              <p className="text-sm font-semibold text-text-primary mb-1">Skill Radar (30 days)</p>
+              <p className="text-xs text-text-muted mb-4">Based on {data.sessions_30d} sessions</p>
+              <div className="h-56">
+                <ResponsiveContainer width="100%" height="100%">
+                  <RadarChart data={radarData}>
+                    <PolarGrid stroke="#ffffff08" />
+                    <PolarAngleAxis dataKey="axis" tick={{ fontSize: 9, fill: '#94a3b8' }} />
+                    {radarData[0].prev > 0 && <Radar name="Previous" dataKey="prev" stroke="#ffffff20" fill="#ffffff08" fillOpacity={0.3} />}
+                    <Radar name="Current" dataKey="score" stroke="#7c3aed" fill="#7c3aed" fillOpacity={0.3} />
+                  </RadarChart>
+                </ResponsiveContainer>
+              </div>
+
+              {/* Axis trends — V3: 7 axes */}
+              <div className="grid grid-cols-3 gap-2 mt-4">
+                {axes.map(axis => {
+                  const trend = data.axis_trends?.[axis]
+                  const delta = trend?.delta
+                  return (
+                    <div key={axis} className="text-center">
+                      <p className={`text-lg font-bold ${(trend?.current ?? 0) >= 70 ? 'text-success' : (trend?.current ?? 0) >= 50 ? 'text-primary-glow' : 'text-warning'}`}>{trend?.current ?? '—'}</p>
+                      <p className="text-[9px] text-text-muted capitalize">{axis.replace(/_/g, ' ')}</p>
+                      {delta != null && <p className={`text-[9px] font-semibold ${delta > 0 ? 'text-success' : delta < 0 ? 'text-error' : 'text-text-muted'}`}>{delta > 0 ? `+${delta}` : delta}</p>}
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+
+            {/* V3 — Week-over-week progression bars (all axes) */}
+            {progress?.week_over_week && Object.keys(progress.week_over_week).length > 0 && (
+              <div className="bg-surface-card border border-surface-border rounded-2xl p-5">
+                <p className="text-sm font-semibold text-text-primary mb-4">Week-Over-Week Progress</p>
+                <div className="space-y-3">
+                  {Object.entries(progress.week_over_week).map(([axis, w]) => (
+                    <div key={axis}>
+                      <div className="flex items-center justify-between mb-1">
+                        <p className="text-xs text-text-secondary capitalize">{axis.replace(/_/g, ' ')}</p>
+                        <span className={`text-xs font-bold ${w.delta > 0 ? 'text-success' : w.delta < 0 ? 'text-error' : 'text-text-muted'}`}>
+                          {w.delta > 0 ? `+${w.delta}` : w.delta}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] text-text-muted w-5 text-right">{w.from}</span>
+                        <div className="flex-1 h-2 bg-surface-panel rounded-full overflow-hidden relative">
+                          <div className="absolute inset-y-0 left-0 bg-surface-mid rounded-full" style={{ width: `${w.from}%` }} />
+                          <div className={`absolute inset-y-0 left-0 rounded-full transition-all duration-1000 ${w.delta >= 0 ? 'bg-success' : 'bg-error'}`} style={{ width: `${w.to}%` }} />
+                        </div>
+                        <span className={`text-[10px] font-bold w-5 ${w.to >= 70 ? 'text-success' : w.to >= 50 ? 'text-primary-glow' : 'text-warning'}`}>{w.to}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Section B — Weekly trend */}
+            {data.weekly_trend?.length > 1 && (
+              <div className="bg-surface-card border border-surface-border rounded-2xl p-5">
+                <p className="text-sm font-semibold text-text-primary mb-4">Score Trend</p>
+                <div className="h-36">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={data.weekly_trend}>
+                      <XAxis dataKey="week" tick={{ fontSize: 9, fill: '#94a3b8' }} />
+                      <YAxis domain={[0, 100]} tick={{ fontSize: 9, fill: '#94a3b8' }} />
+                      <Tooltip contentStyle={{ background: '#1e1b2e', border: '1px solid #2d2b3d', borderRadius: '8px', fontSize: '11px' }} />
+                      <Line type="monotone" dataKey="avg_score" stroke="#7c3aed" strokeWidth={2} dot={{ fill: '#7c3aed', r: 3 }} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+            )}
+
+            {/* V3 — Pressure breakdown */}
+            {data.pressure_breakdown && Object.keys(data.pressure_breakdown).length > 0 && (
+              <div className="bg-surface-card border border-surface-border rounded-2xl p-5">
+                <p className="text-sm font-semibold text-text-primary mb-3">Performance Under Pressure</p>
+                <div className="space-y-2">
+                  {Object.entries(data.pressure_breakdown).map(([modifier, info]) => {
+                    const score = info.avg_score ?? 0
+                    const color = score >= 70 ? 'bg-success' : score >= 50 ? 'bg-primary' : 'bg-error'
+                    return (
+                      <div key={modifier} className="flex items-center gap-3">
+                        <p className="text-xs text-text-secondary w-36 shrink-0">{PRESSURE_LABELS[modifier] || modifier}</p>
+                        <div className="flex-1 h-2 bg-surface-panel rounded-full overflow-hidden">
+                          <div className={`h-full ${color} rounded-full transition-all`} style={{ width: `${score}%` }} />
+                        </div>
+                        <div className="text-right shrink-0 w-16">
+                          <p className="text-xs font-semibold text-text-primary">{score}/100</p>
+                          <p className="text-[9px] text-text-muted">{info.sessions} sessions</p>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Section C — Objection heatmap */}
+            {Object.keys(data.objection_heatmap || {}).length > 0 && (
+              <div className="bg-surface-card border border-surface-border rounded-2xl p-5">
+                <p className="text-sm font-semibold text-text-primary mb-3">Objection Heatmap</p>
+                <div className="space-y-2">
+                  {Object.entries(data.objection_heatmap).map(([type, info]) => {
+                    const score = info.avg_score ?? 0
+                    const color = score >= 70 ? 'bg-success' : score >= 50 ? 'bg-primary' : 'bg-error'
+                    return (
+                      <div key={type} className="flex items-center gap-3">
+                        <div className="w-32 shrink-0"><p className="text-xs text-text-secondary truncate">{info.label}</p></div>
+                        <div className="flex-1 h-2 bg-surface-panel rounded-full overflow-hidden">
+                          <div className={`h-full ${color} rounded-full transition-all`} style={{ width: `${score}%` }} />
+                        </div>
+                        <div className="text-right shrink-0 w-16">
+                          <p className="text-xs font-semibold text-text-primary">{score ?? '—'}/100</p>
+                          <p className="text-[9px] text-text-muted">{info.sessions} sessions</p>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Section D — Best messages */}
+            {data.best_messages?.length > 0 && (
+              <div className="bg-surface-card border border-surface-border rounded-2xl p-5">
+                <p className="text-sm font-semibold text-text-primary mb-3">Best Messages Library</p>
+                <div className="space-y-2">
+                  {data.best_messages.map((m, i) => (
+                    <div key={i} className="bg-surface-panel border border-surface-border rounded-xl p-3">
+                      <p className="text-xs text-text-secondary leading-relaxed line-clamp-2">{m.content}</p>
+                      <button onClick={() => navigator.clipboard.writeText(m.content).then(() => toast('Copied!'))} className="text-[10px] text-primary-glow mt-1 hover:underline">Copy →</button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Section E — Coaching impact */}
+            {Object.keys(data.coaching_impact || {}).length > 0 && (
+              <div className="bg-surface-card border border-surface-border rounded-2xl p-5">
+                <p className="text-sm font-semibold text-text-primary mb-3">Coaching Impact</p>
+                <div className="space-y-2">
+                  {Object.entries(data.coaching_impact).map(([type, impact]) => {
+                    const avg = impact.attempts > 0 ? Math.round(impact.improvement / impact.attempts) : 0
+                    return (
+                      <div key={type} className="flex items-center justify-between">
+                        <p className="text-xs text-text-secondary">{SCENARIO_LABELS[type] || type}</p>
+                        <div className="flex items-center gap-2">
+                          <p className="text-xs text-text-muted">{impact.attempts} retries</p>
+                          <span className={`text-xs font-bold ${avg > 0 ? 'text-success' : 'text-error'}`}>{avg > 0 ? `+${avg}` : avg} pts avg</span>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </PageContent>
+    </>
+  )
+}
+
+// ══════════════════════════════════════════
+// MAIN PRACTICE PAGE — router
+// ══════════════════════════════════════════
+export default function PracticePage() {
+  const { '*': wildcard } = useParams()
+  const parts    = wildcard?.split('/').filter(Boolean) || []
+  const navigate = useNavigate()
+
+  if (parts[0] === 'dashboard') return <SkillDashboard />
+
+  if (parts.length === 2 && parts[1] === 'replay') {
+    return (
+      <div className="flex flex-col h-full">
+        <SessionReplayView sessionId={parts[0]} />
+      </div>
+    )
+  }
+
+  if (parts.length === 1 && parts[0] !== 'dashboard') {
+    return <PracticeSessionLoader sessionId={parts[0]} />
+  }
+
+  return <SessionListView />
+}
+
+function PracticeSessionLoader({ sessionId }) {
+  const { data } = usePracticeSessions()
+  const navigate = useNavigate()
+  const [session, setSession] = useState(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    const found = data?.sessions?.find(s => s.id === sessionId)
+    if (found) { setSession(found); setLoading(false); return }
+    api.get(`/practice/${sessionId}/messages`)
+      .then(r => { if (r.data) setSession({ ...r.data, id: sessionId, chat_id: r.data.chat_id }) })
+      .catch(() => {})
+      .finally(() => setLoading(false))
+  }, [sessionId, data?.sessions])
+
+  if (loading) return <div className="flex-1 flex items-center justify-center"><div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" /></div>
+  if (!session) return (
+    <div className="flex flex-col h-full">
+      <TopBar title="Practice Session" backTo="/practice" />
+      <div className="flex-1 flex items-center justify-center text-text-muted">Session not found</div>
+    </div>
+  )
+  return (
+    <div className="flex flex-col h-full">
+      <TopBar title="Practice Session" backTo="/practice" />
+      <div className="flex-1 overflow-hidden"><ActivePracticeSession session={session} /></div>
+    </div>
+  )
+}

@@ -354,6 +354,7 @@ export interface ChatMessage {
   scenario_type?:  string | null;
   chunk_index?:    number | null;
   is_final_chunk?: boolean | null;
+  attachments?: { name: string; type: string; url?: string }[] | null;
   coaching_tip?:   Record<string, unknown> | null;
   created_at:      string;
 }

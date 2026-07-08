@@ -5,7 +5,7 @@
 
 import { Router } from 'express';
 import { asyncHandler } from '../middleware/errorHandler.js';
-import { callWithFallback } from '../services/multiProvider.js';
+import { callWithFallbackGroq } from '../services/multiProvider.js';
 import { createLogger } from '../utils/logger.js';
 import { createHash } from 'crypto';
 import supabaseAdmin from '../config/supabase.js';
@@ -134,10 +134,11 @@ router.get('/', asyncHandler(async (req, res) => {
     
     logAI('GENERATE_SUGGESTIONS', { userId, workspaceId });
     
-    const { content } = await callWithFallback({
+    const { content } = await callWithFallbackGroq({
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.8,
       maxTokens: 400,
+      workspaceId, userId, sourceJob: 'generate_suggestions',
     });
     
     // Parse JSON response

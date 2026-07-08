@@ -4,7 +4,6 @@ import { asyncHandler }    from '../middleware/errorHandler.js';
 import { buildUserContext, requirePermission } from '../middleware/workspace.js';
 import { createLogger }    from '../utils/logger.js';
 import supabaseAdmin       from '../config/supabase.js';
-import { callWithFallback } from '../services/multiProvider.js';
 
 import { getCache, setCache } from '../services/redis.js';
 import { parseAIJson }     from '../utils/parseAIJson.js';
@@ -257,216 +256,9 @@ router.get('/skill-breakdown', asyncHandler(async (req, res) => {
   });
 }));
 
-// GET /api/metrics/intelligence
-router.get('/intelligence', asyncHandler(async (req, res) => {
-  const userId = req.user.id, workspaceId = req.workspace.id;
-  const cacheKey = `metrics:intelligence:${userId}:${workspaceId}`;
 
-  const cached = await getCache(cacheKey).catch(() => null);
-  if (cached) return res.json({ insights: cached, cached: true });
 
-  const userCtx = buildUserContext(req);
 
-  // Fetch ALL relevant data in parallel.
-  //
-  // Fix: destructure `data` directly off each Supabase response (same
-  // pattern as /dashboard) instead of carrying the full {data, error}
-  // wrapper around. The previous version kept the wrapper and then read
-  // `profile?.data?.[0]` / `pipeline?.data?.[0]` further down — but those two
-  // queries use .maybeSingle(), which resolves to a single object (or null),
-  // not an array. `[0]` on a plain object is always undefined, so every
-  // performance/pipeline stat fed into the AI prompt (and into the
-  // rule-based fallback below) was silently 0/undefined.
-  const [
-    { data: profile },
-    { data: pipeline },
-    { data: goals },
-    { data: checkIns },
-    { data: signals },
-    { data: patterns },
-    { data: objections },
-    { data: commitments },
-    { data: practice },
-    { data: skillTrends },
-    { data: recentOpps },
-    { data: unreadTips },
-  ] = await Promise.all([
-    supabaseAdmin.from('user_performance_profiles')
-      .select('*').eq('workspace_id', workspaceId).eq('user_id', userId).maybeSingle(),
-
-    supabaseAdmin.from('pipeline_metrics')
-      .select('*').eq('workspace_id', workspaceId).eq('user_id', userId).maybeSingle(),
-
-    supabaseAdmin.from('user_goals')
-      .select('*').eq('workspace_id', workspaceId).eq('user_id', userId).eq('status', 'active').limit(3),
-
-    supabaseAdmin.from('daily_check_ins')
-      .select('mood_score, answers').eq('user_id', userId).eq('workspace_id', workspaceId)
-      .order('date', { ascending: false }).limit(5),
-
-    supabaseAdmin.from('conversation_signals')
-      .select('signal_type, signal_text, confidence').eq('workspace_id', workspaceId)
-      .eq('user_id', userId).eq('is_active', true)
-      .order('detected_at', { ascending: false }).limit(10),
-
-    supabaseAdmin.from('communication_patterns')
-      .select('pattern_type, pattern_label, confidence_score, affected_outcome')
-      .eq('workspace_id', workspaceId).eq('user_id', userId).eq('is_active', true)
-      .order('confidence_score', { ascending: false }).limit(5),
-
-    supabaseAdmin.from('objection_tracker')
-      .select('objection_type, objection_phrase, occurrence_count, best_response')
-      .eq('workspace_id', workspaceId).eq('user_id', userId)
-      .order('occurrence_count', { ascending: false }).limit(5),
-
-    supabaseAdmin.from('conversation_commitments')
-      .select('commitment_text, owner, due_date, status')
-      .eq('workspace_id', workspaceId).eq('user_id', userId)
-      .in('status', ['pending', 'overdue'])
-      .order('due_date', { ascending: true }).limit(5),
-
-    supabaseAdmin.from('practice_sessions')
-      .select('scenario_type, skill_scores, outcome, difficulty_level')
-      .eq('workspace_id', workspaceId).eq('user_id', userId).eq('completed', true)
-      .order('created_at', { ascending: false }).limit(10),
-
-    supabaseAdmin.from('skill_progression')
-      .select('composite_score_avg, composite_delta, top_weakness, top_strength')
-      .eq('workspace_id', workspaceId).eq('user_id', userId)
-      .order('week_start', { ascending: false }).limit(4),
-
-    supabaseAdmin.from('opportunities')
-      .select('stage, status, marked_sent_at, feedback_prompted_at')
-      .eq('workspace_id', workspaceId).eq('user_id', userId)
-      .in('stage', ['contacted', 'replied', 'call_demo'])
-      .order('created_at', { ascending: false }).limit(10),
-
-    supabaseAdmin.from('growth_cards')
-      .select('card_type, is_read, is_dismissed, priority, created_at')
-      .eq('workspace_id', workspaceId).eq('user_id', userId)
-      .eq('is_read', false).eq('is_dismissed', false)
-      .order('priority', { ascending: false }).limit(5),
-  ]);
-
-  // Build rich context
-  const positiveRatePct   = Math.round((profile?.positive_rate || 0) * 100);
-  const recentCheckInMood = checkIns?.length
-    ? Math.round(checkIns.reduce((s, c) => s + (c.mood_score || 5), 0) / checkIns.length)
-    : null;
-
-  // Analyze stalled deals
-  const stalledDeals = recentOpps?.filter(o =>
-    o.marked_sent_at && !o.feedback_prompted_at &&
-    new Date(o.marked_sent_at) < new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
-  ) || [];
-
-  // Analyze skill trends
-  const skillTrend  = skillTrends?.[0];
-  const isImproving = skillTrend?.composite_delta > 0;
-
-  // Analyze practice weaknesses
-  const weakSkills = practice
-    ?.filter(p => p.skill_scores)
-    .flatMap(p => Object.entries(p.skill_scores || {})
-      .filter(([_, score]) => score < 60)
-      .map(([skill]) => skill)
-    ) || [];
-
-  const topWeakness = [...new Set(weakSkills)].slice(0, 3);
-
-  // Build enhanced prompt
-  const prompt = [
-    'Generate 3-5 specific, actionable intelligence insights for this seller based on ALL their data.',
-    '',
-    `Product: ${userCtx.product_description || 'not specified'}`,
-    `Target audience: ${userCtx.target_audience || 'not specified'}`,
-    `Archetype: ${userCtx.archetype || 'not specified'}`,
-    '',
-    '== Performance Profile ==',
-    `Positive reply rate: ${positiveRatePct}%`,
-    `Total sent: ${profile?.total_sent || 0}`,
-    `Positive: ${profile?.total_positive || 0}`,
-    `Negative: ${profile?.total_negative || 0}`,
-    `Best platform: ${profile?.best_platform || 'unknown'}`,
-    `Best message style: ${profile?.best_message_style || 'unknown'}`,
-    `Best message length: ${profile?.best_message_length || 'unknown'}`,
-    profile?.learned_patterns ? `Learned patterns: ${profile.learned_patterns}` : '',
-    '',
-    '== Pipeline Metrics ==',
-    `Contacted: ${pipeline?.contacted_count || 0}`,
-    `Replied: ${pipeline?.replied_count || 0}`,
-    `Call/Demo: ${pipeline?.call_demo_count || 0}`,
-    `Won: ${pipeline?.closed_won_count || 0}`,
-    `Pipeline value: $${pipeline?.pipeline_value || 0}`,
-    `Win rate: ${pipeline?.win_rate_pct || 0}%`,
-    '',
-    '== Active Goals ==',
-    (goals || []).map(g => `- ${g.goal_text} (${g.current_value || 0}/${g.target_value || 100})`).join('\n') || 'No active goals',
-    '',
-    '== Conversation Signals Detected ==',
-    (signals || []).map(s => `- ${s.signal_type}: ${s.signal_text} (${Math.round(s.confidence * 100)}% confidence)`).join('\n') || 'No signals detected',
-    '',
-    '== Communication Patterns ==',
-    (patterns || []).map(p =>
-      `- ${p.pattern_label}: ${p.affected_outcome} outcome (${Math.round(p.confidence_score * 100)}% confidence)`
-    ).join('\n') || 'No patterns detected',
-    '',
-    '== Top Objections ==',
-    (objections || []).map(o =>
-      `- "${o.objection_phrase}" (${o.occurrence_count} times)${o.best_response ? ` → Best response: ${o.best_response}` : ''}`
-    ).join('\n') || 'No objections tracked',
-    '',
-    '== Pending Commitments ==',
-    (commitments || []).map(c =>
-      `- ${c.commitment_text} (Due: ${c.due_date || 'No date'}, Status: ${c.status})`
-    ).join('\n') || 'No pending commitments',
-    '',
-    `== Practice Summary ==`,
-    `Total completed: ${practice?.length || 0}`,
-    practice?.length ? `Weakest skills: ${topWeakness.join(', ') || 'None identified'}` : '',
-    skillTrend ? `Skill trend: ${isImproving ? '✅ Improving' : '⚠️ Declining'} (${skillTrend.composite_delta > 0 ? '+' : ''}${(skillTrend.composite_delta || 0).toFixed(2)})` : '',
-    skillTrend?.top_weakness ? `Top weakness: ${skillTrend.top_weakness}` : '',
-    skillTrend?.top_strength ? `Top strength: ${skillTrend.top_strength}` : '',
-    '',
-    `== Opportunity Health ==`,
-    `Stalled deals (no feedback >7 days): ${stalledDeals.length}`,
-    recentOpps?.length ? `Recent activity: ${recentOpps.length} active opportunities` : 'No recent activity',
-    '',
-    `== Coaching Engagement ==`,
-    `Unread growth tips: ${unreadTips?.length || 0}`,
-    // Fix: mood_score is on a 1–5 scale per schema, was previously labeled "/10".
-    recentCheckInMood != null ? `Recent mood average: ${recentCheckInMood}/5` : '',
-    '',
-    'Generate insights that are SPECIFIC, ACTIONABLE, and DATA-DRIVEN. Focus on:',
-    '1. What patterns are helping or hurting the seller',
-    '2. Which objections need better responses',
-    '3. Skill gaps revealed by practice',
-    '4. Pipeline risks (stalled deals, weak win rate)',
-    '5. Behavioral adjustments for better outcomes',
-    '',
-    'Return ONLY a JSON array (no markdown):',
-    '[{"type":"pattern|opportunity|warning|coaching","icon":"emoji","title":"short, punchy title","body":"2-3 sentences with specific data","action":"one specific action or null"}]'
-  ].filter(Boolean).join('\n');
-
-  try {
-    const { content } = await callWithFallback({
-      systemPrompt: 'You are a sales intelligence expert. Generate insights based on data. Return only valid JSON arrays.',
-      messages: [{ role: 'user', content: prompt }],
-      temperature: 0.5, maxTokens: 1200,
-    });
-
-    const insights = parseAIJson(content);
-    await setCache(cacheKey, insights, INTELLIGENCE_TTL_S).catch(() => {});
-    res.json({ insights, cached: false });
-  } catch (err) {
-    logError('intelligence', err, { userId, workspaceId });
-    res.json({
-      insights: generateRuleBasedInsights(profile, pipeline, goals || [], objections, patterns, stalledDeals),
-      cached: false,
-      fallback: true
-    });
-  }
-}));
 
 // GET /api/metrics/conversation-analyses
 router.get('/conversation-analyses', asyncHandler(async (req, res) => {
@@ -1369,6 +1161,243 @@ router.get('/workspace/activity-feed', requirePermission('manager'), asyncHandle
   }));
 
   res.json({ feed, workspace_id: workspaceId });
+}));
+
+// ============================================================
+// NET-NEW METRICS ENDPOINTS
+// Added per Foundersales Insights & Metrics Refinement.
+// Pure aggregation / listing — no comparative judgment layered on top
+// (see /api/insights/* for the synthesis endpoints built on this data).
+// ============================================================
+
+// GET /api/metrics/practice/summary
+router.get('/practice/summary', asyncHandler(async (req, res) => {
+  const userId = req.user.id, workspaceId = req.workspace.id;
+  const period = req.query.period === '7d' ? 7 : req.query.period === '90d' ? 90 : 30;
+  const cutoff = new Date(Date.now() - period * 86400000).toISOString();
+
+  const { data: sessions, error } = await supabaseAdmin
+    .from('practice_sessions')
+    .select('scenario_type, completed, goal_achieved, exchanges_count, reply_received, ai_ended_session, retry_of_session_id, pressure_modifier, skill_scores')
+    .eq('workspace_id', workspaceId)
+    .eq('user_id', userId)
+    .gte('created_at', cutoff);
+
+  if (error) { logError('practice/summary', error, { userId }); throw error; }
+
+  if (!sessions?.length) {
+    return res.json({ has_data: false, period: `${period}d` });
+  }
+
+  const completed = sessions.filter(s => s.completed);
+  const totalSessions = sessions.length;
+  const completedCount = completed.length;
+
+  const goalAchievedRate = completedCount ? completed.filter(s => s.goal_achieved).length / completedCount : 0;
+  const replyReceivedRate = completedCount ? completed.filter(s => s.reply_received).length / completedCount : 0;
+  const aiEndedRate = completedCount ? completed.filter(s => s.ai_ended_session).length / completedCount : 0;
+  const retryRate = totalSessions ? sessions.filter(s => s.retry_of_session_id).length / totalSessions : 0;
+
+  const scoresWithValue = completed.filter(s => s.skill_scores?.session_score != null);
+  const avgSessionScore = scoresWithValue.length
+    ? parseFloat((scoresWithValue.reduce((sum, s) => sum + s.skill_scores.session_score, 0) / scoresWithValue.length).toFixed(1))
+    : null;
+
+  const exchangesWithValue = completed.filter(s => s.exchanges_count != null);
+  const avgExchanges = exchangesWithValue.length
+    ? parseFloat((exchangesWithValue.reduce((sum, s) => sum + s.exchanges_count, 0) / exchangesWithValue.length).toFixed(1))
+    : null;
+
+  const byScenario = {};
+  for (const s of completed) {
+    const scenario = s.scenario_type || 'unknown';
+    if (!byScenario[scenario]) byScenario[scenario] = { count: 0, scoreSum: 0, scoreCount: 0, goalAchieved: 0 };
+    byScenario[scenario].count++;
+    if (s.skill_scores?.session_score != null) { byScenario[scenario].scoreSum += s.skill_scores.session_score; byScenario[scenario].scoreCount++; }
+    if (s.goal_achieved) byScenario[scenario].goalAchieved++;
+  }
+  const byScenarioOut = Object.fromEntries(Object.entries(byScenario).map(([k, v]) => [k, {
+    count: v.count,
+    avg_score: v.scoreCount ? Math.round(v.scoreSum / v.scoreCount) : null,
+    goal_achieved_rate: v.count ? parseFloat((v.goalAchieved / v.count).toFixed(2)) : 0,
+  }]));
+
+  const byPressure = {};
+  for (const s of completed) {
+    if (!s.pressure_modifier || s.skill_scores?.session_score == null) continue;
+    if (!byPressure[s.pressure_modifier]) byPressure[s.pressure_modifier] = { sum: 0, count: 0 };
+    byPressure[s.pressure_modifier].sum += s.skill_scores.session_score;
+    byPressure[s.pressure_modifier].count++;
+  }
+  const pressureOut = Object.fromEntries(Object.entries(byPressure).map(([k, v]) => [k, Math.round(v.sum / v.count)]));
+
+  const { count: badgesEarned } = await supabaseAdmin
+    .from('practice_badges')
+    .select('id', { count: 'exact', head: true })
+    .eq('user_id', userId)
+    .gte('earned_at', cutoff);
+
+  res.json({
+    has_data: true,
+    period: `${period}d`,
+    total_sessions: totalSessions,
+    completed_sessions: completedCount,
+    goal_achieved_rate: parseFloat(goalAchievedRate.toFixed(2)),
+    avg_session_score: avgSessionScore,
+    avg_exchanges: avgExchanges,
+    reply_received_rate: parseFloat(replyReceivedRate.toFixed(2)),
+    ai_ended_rate: parseFloat(aiEndedRate.toFixed(2)),
+    retry_rate: parseFloat(retryRate.toFixed(2)),
+    by_scenario: byScenarioOut,
+    pressure_modifier_performance: pressureOut,
+    badges_earned: badgesEarned || 0,
+    skill_axes_ref: 'See GET /api/metrics/practice-skill-profile for axis-level scores (clarity, discovery, objection_handling, etc.)',
+  });
+}));
+
+// GET /api/metrics/objections
+router.get('/objections', asyncHandler(async (req, res) => {
+  const userId = req.user.id, workspaceId = req.workspace.id;
+
+  const { data: objections, error } = await supabaseAdmin
+    .from('objection_tracker')
+    .select('objection_type, objection_phrase, occurrence_count, best_response, response_score, practice_score, outcome_after, first_seen_at, last_seen_at, market_intel_generated_at')
+    .eq('workspace_id', workspaceId)
+    .eq('user_id', userId)
+    .order('occurrence_count', { ascending: false });
+
+  if (error) { logError('objections', error, { userId }); throw error; }
+
+  if (!objections?.length) return res.json({ has_data: false, objections: [], total_unique_types: 0 });
+
+  res.json({
+    has_data: true,
+    objections: objections.map(o => ({
+      type: o.objection_type,
+      occurrence_count: o.occurrence_count,
+      first_seen_at: o.first_seen_at,
+      last_seen_at: o.last_seen_at,
+      best_response: o.best_response || null,
+      response_score: o.response_score,
+      practice_score: o.practice_score,
+      outcome_after: o.outcome_after,
+      has_market_intel: !!o.market_intel_generated_at,
+      sample_phrase: o.objection_phrase,
+    })),
+    total_unique_types: objections.length,
+  });
+}));
+
+// GET /api/metrics/meetings/summary
+router.get('/meetings/summary', asyncHandler(async (req, res) => {
+  const userId = req.user.id, workspaceId = req.workspace.id;
+  const period = req.query.period === '90d' ? 90 : 30;
+  const cutoff = new Date(Date.now() - period * 86400000).toISOString().split('T')[0];
+
+  const { data: events, error } = await supabaseAdmin
+    .from('user_events')
+    .select('outcome, energy_score, prep_generated, debrief_completed_at, follow_up_options')
+    .eq('workspace_id', workspaceId)
+    .eq('user_id', userId)
+    .gte('event_date', cutoff);
+
+  if (error) { logError('meetings/summary', error, { userId }); throw error; }
+
+  if (!events?.length) return res.json({ has_data: false, period: `${period}d` });
+
+  const debriefed = events.filter(e => e.debrief_completed_at);
+  const outcomes = { positive: 0, negative: 0, pending: 0 };
+  events.forEach(e => {
+    if (e.outcome === 'positive') outcomes.positive++;
+    else if (e.outcome === 'negative') outcomes.negative++;
+    else outcomes.pending++;
+  });
+
+  const withEnergy = events.filter(e => e.energy_score != null);
+  const avgEnergy = withEnergy.length
+    ? parseFloat((withEnergy.reduce((s, e) => s + e.energy_score, 0) / withEnergy.length).toFixed(1))
+    : null;
+
+  res.json({
+    has_data: true,
+    period: `${period}d`,
+    total_meetings: events.length,
+    debriefed: debriefed.length,
+    debrief_completion_rate: parseFloat((debriefed.length / events.length).toFixed(2)),
+    outcomes,
+    avg_energy_score: avgEnergy,
+    meetings_with_prep_generated: events.filter(e => e.prep_generated).length,
+    follow_up_options_generated: events.filter(e => e.follow_up_options).length,
+  });
+}));
+
+// GET /api/metrics/workspace/dashboard (manager+)
+router.get('/workspace/dashboard', requirePermission('manager'), asyncHandler(async (req, res) => {
+  const workspaceId = req.workspace.id;
+  const cacheKey = `metrics:workspace-dashboard:${workspaceId}`;
+
+  const cached = await getCache(cacheKey).catch(() => null);
+  if (cached) return res.json({ ...cached, cached: true });
+
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString();
+
+  const [membersRes, pipelineRes, skillRes, dailyRes] = await Promise.allSettled([
+    supabaseAdmin.from('workspace_members').select('user_id, users(name)').eq('workspace_id', workspaceId).eq('status', 'active'),
+    supabaseAdmin.from('pipeline_metrics').select('*').eq('workspace_id', workspaceId),
+    supabaseAdmin.from('skill_progression').select('user_id, composite_score_avg, top_weakness, week_start').eq('workspace_id', workspaceId).order('week_start', { ascending: false }),
+    supabaseAdmin.from('daily_metrics').select('messages_sent, positive_outcomes').eq('workspace_id', workspaceId).gte('date', thirtyDaysAgo.split('T')[0]),
+  ]);
+
+  const members = membersRes.status === 'fulfilled' ? membersRes.value.data || [] : [];
+  const pipelineRows = pipelineRes.status === 'fulfilled' ? pipelineRes.value.data || [] : [];
+  const skillRows = skillRes.status === 'fulfilled' ? skillRes.value.data || [] : [];
+  const dailyRows = dailyRes.status === 'fulfilled' ? dailyRes.value.data || [] : [];
+
+  if (!members.length) return res.json({ has_data: false });
+
+  const nameByUserId = {};
+  members.forEach(m => { nameByUserId[m.user_id] = m.users?.name || 'Unknown'; });
+
+  const totalRevenue = pipelineRows.reduce((s, r) => s + (r.total_revenue || 0), 0);
+  const pipelineValue = pipelineRows.reduce((s, r) => s + (r.pipeline_value || 0), 0);
+  const totalWon = pipelineRows.reduce((s, r) => s + (r.closed_won_count || 0), 0);
+  const totalLost = pipelineRows.reduce((s, r) => s + (r.closed_lost_count || 0), 0);
+  const winRatePct = (totalWon + totalLost) > 0 ? parseFloat(((totalWon * 100) / (totalWon + totalLost)).toFixed(1)) : 0;
+
+  const totalMessagesSent = dailyRows.reduce((s, r) => s + (r.messages_sent || 0), 0);
+  const totalPositive = dailyRows.reduce((s, r) => s + (r.positive_outcomes || 0), 0);
+  const teamPositiveRate = totalMessagesSent > 0 ? parseFloat((totalPositive / totalMessagesSent).toFixed(2)) : 0;
+
+  const latestWeek = skillRows[0]?.week_start;
+  const currentWeekRows = skillRows.filter(r => r.week_start === latestWeek);
+  const teamComposite = currentWeekRows.length
+    ? parseFloat((currentWeekRows.reduce((s, r) => s + (r.composite_score_avg || 0), 0) / currentWeekRows.length).toFixed(1))
+    : null;
+
+  const sortedByComposite = [...currentWeekRows].filter(r => r.composite_score_avg != null).sort((a, b) => b.composite_score_avg - a.composite_score_avg);
+  const topPerformer = sortedByComposite[0]
+    ? { user_id: sortedByComposite[0].user_id, name: nameByUserId[sortedByComposite[0].user_id] || 'Unknown', composite: sortedByComposite[0].composite_score_avg }
+    : null;
+  const needsCoachingRow = sortedByComposite[sortedByComposite.length - 1];
+  const needsCoaching = needsCoachingRow && needsCoachingRow.composite_score_avg < 6
+    ? { user_id: needsCoachingRow.user_id, name: nameByUserId[needsCoachingRow.user_id] || 'Unknown', composite: needsCoachingRow.composite_score_avg, weakness: needsCoachingRow.top_weakness }
+    : null;
+
+  const result = {
+    has_data: true,
+    team_size: members.length,
+    team_composite_score: teamComposite,
+    team_positive_rate_30d: teamPositiveRate,
+    total_messages_sent_30d: totalMessagesSent,
+    pipeline_value: pipelineValue,
+    total_revenue: totalRevenue,
+    win_rate_pct: winRatePct,
+    top_performer: topPerformer,
+    needs_coaching: needsCoaching,
+  };
+
+  await setCache(cacheKey, result, 30 * 60).catch(() => {});
+  res.json({ ...result, cached: false });
 }));
 
 // ── Pure helpers exported for testability ─────────────────────

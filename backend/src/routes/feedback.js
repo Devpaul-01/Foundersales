@@ -168,6 +168,7 @@ router.post('/', validate(feedbackSchema), asyncHandler(async (req, res) => {
   // ✅ CORRECT - Use new Date()
 const oppUpdates = { 
   status: OPPORTUNITY_STATUS.SENT, 
+  feedback_prompted_at: new Date(),
   marked_sent_at: new Date()  // Returns Date object
 };
   let stageAdvanced = false;

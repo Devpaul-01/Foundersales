@@ -44,10 +44,15 @@ export const checkAndGenerateWeaknessCard = async ({ user_id, session_id, skillS
   const workspaceId = userRow?.active_workspace_id;
   if (!workspaceId) return;
 
-  // 1. Load last 10 completed sessions (user-scoped — practice is personal)
+  // Practice history is workspace-scoped, consistent with every other
+  // consumer of practice_sessions (metrics.js, skillProgressionJob.js,
+  // growthIntelligenceScheduler.js). Previously this was the one place
+  // treating practice as a personal, cross-workspace asset — that was an
+  // inconsistency, not a deliberate design choice elsewhere in the codebase.
   const { data: recentSessions } = await supabaseAdmin
     .from('practice_sessions')
     .select('id, scenario_type, skill_scores, created_at')
+    .eq('workspace_id', workspaceId)
     .eq('user_id', user_id).eq('completed', true)
     .not('skill_scores', 'is', null)
     .order('created_at', { ascending: false }).limit(10);
@@ -131,11 +136,12 @@ Return ONLY JSON:
 
   let cardContent = null;
   try {
-    const { callWithFallback } = await import('../services/multiProvider.js');
-    const { content } = await callWithFallback({
+    const { callWithFallbackGroq } = await import('../services/multiProvider.js');
+    const { content } = await callWithFallbackGroq({
       systemPrompt: 'You write focused, evidence-based coaching cards. Return only valid JSON.',
       messages:     [{ role: 'user', content: prompt }],
       temperature:  0.3, maxTokens: 400,
+      tier: 'fast', workspaceId, userId: user_id, sourceJob: 'practice_weakness_card',
     });
     cardContent = JSON.parse(content.replace(/```json|```/g, '').trim());
   } catch {

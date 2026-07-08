@@ -1,247 +1,173 @@
 // src/services/tokenTracker.js
 // ============================================================
-// TOKEN-BASED USAGE TRACKING
-// Tracks actual token consumption across all AI services.
-// Grok is free — tracked for analytics only, no limits enforced.
-// Perplexity is paid — limits enforced strictly.
+// AI USAGE TRACKING — REDESIGN
 //
-// FIX C-05: Replaced read-modify-write pattern (race condition under
-// concurrent AI calls) with atomic increment_token_usage RPC.
+// Replaces the old user-only, Perplexity-named tracking system.
+// Tables: ai_usage_events (granular, append-only, billing-ready)
+//         workspace_ai_usage_daily (fast rollup for quota checks)
+// See migrations/001_audit_remediation.sql for schema.
 //
-// FIX MONTHLY-RACE: updateMonthlyRollup previously did:
-//   SELECT → compute new values → UPDATE
-// This is a classic read-modify-write race condition. Two concurrent
-// AI calls would both read the same value and each increment from it,
-// causing one increment to be lost. Fixed by using an atomic
-// increment_monthly_token_usage RPC (INSERT ... ON CONFLICT DO UPDATE
-// SET col = col + $1 at the Postgres level).
+// Design notes:
+//  - Every call requires BOTH workspaceId and userId. The old system
+//    took a single `id` param that meant "user" in some call sites and
+//    "workspace" in others — that ambiguity is exactly what broke cost
+//    reporting. There is no longer a way to call this without being
+//    explicit about both.
+//  - workspaceId/userId are still accepted as nullable at the call site
+//    (see recordGroqUsage/recordExaUsage) so callers that don't yet have
+//    full context degrade to a console.warn instead of throwing. This
+//    matters because multiProvider.js's callWithFallbackGroq() calls into
+//    this file automatically when given ids, and some groq-practice.js
+//    functions (evaluateBuyerStateChange, generatePracticeInterruption)
+//    aren't reachable from any route in this codebase's scope — their
+//    real call sites may or may not have workspace context, and adding a
+//    hard requirement here would risk breaking an unseen caller.
+//  - Global daily totals are derived by summing workspace_ai_usage_daily
+//    for the day, rather than maintaining a separate counter. The old
+//    system had THREE separate counters (user-level, workspace-level,
+//    global-level) that could drift independently — this design has one
+//    source of truth.
 // ============================================================
 
 import supabaseAdmin from '../config/supabase.js';
-import {
-  PERPLEXITY_TOKEN_LIMITS,
-  PERPLEXITY_GLOBAL_DAILY_CAP_TOKENS,
-  COST_PER_1K_TOKENS
-} from '../config/constants.js';
 
-/**
- * Record token usage after an AI call.
- * Uses atomic DB-level increment to prevent race conditions.
- *
- * @param {string} userId
- * @param {'grok'|'perplexity'|string} model
- * @param {number} tokensIn
- * @param {number} tokensOut
- */
-export const recordTokenUsage = async (userId, model, tokensIn = 0, tokensOut = 0) => {
-  const today = new Date().toISOString().split('T')[0];
-  const totalTokens = tokensIn + tokensOut;
+// ──────────────────────────────────────────
+// Plan limits — replaces PERPLEXITY_LIMITS / WORKSPACE_PERPLEXITY_LIMITS /
+// PERPLEXITY_GLOBAL_DAILY_CAP from constants.js. Groq has no limits
+// (matches the old GROQ_LIMITS = Infinity convention).
+// ──────────────────────────────────────────
+export const EXA_WORKSPACE_DAILY_LIMITS = { free: 5, pro: 50, enterprise: 200 };
+export const EXA_GLOBAL_DAILY_CAP_CALLS = 500;
+export const EXA_COST_PER_SEARCH_CENTS  = 5; // matches old PERPLEXITY_COST_PER_CALL_CENTS
 
-  const costRate  = model === 'perplexity' ? COST_PER_1K_TOKENS.perplexity_sonar_pro : 0;
-  const costCents = Math.ceil((totalTokens / 1000) * costRate * 100);
+// ──────────────────────────────────────────
+// CORE WRITE PATH
+// ──────────────────────────────────────────
+const writeUsageEvent = async ({
+  workspaceId, userId, provider, eventType, model = null, tier = null,
+  tokensIn = 0, tokensOut = 0, creditsUsed = 0, costCents = 0,
+  sourceJob = null, metadata = {},
+}) => {
+  if (!workspaceId || !userId) {
+    console.warn(`[tokenTracker] Skipping ${provider} usage record — missing workspaceId or userId (sourceJob: ${sourceJob || 'unknown'})`);
+    return null;
+  }
 
   try {
-    // ── Daily tracking (atomic RPC) ────────────────────────────────────────
-    const { error: rpcError } = await supabaseAdmin.rpc('increment_token_usage', {
-      p_user_id:    userId,
-      p_date:       today,
-      p_model:      model,
-      p_tokens_in:  tokensIn,
-      p_tokens_out: tokensOut,
-      p_cost_cents: costCents
+    const { data, error } = await supabaseAdmin.rpc('record_ai_usage', {
+      p_workspace_id: workspaceId,
+      p_user_id:      userId,
+      p_provider:     provider,
+      p_event_type:   eventType,
+      p_model:        model,
+      p_tier:         tier,
+      p_tokens_in:    tokensIn,
+      p_tokens_out:   tokensOut,
+      p_credits_used: creditsUsed,
+      p_cost_cents:   costCents,
+      p_source_job:   sourceJob,
+      p_metadata:     metadata,
     });
-
-    if (rpcError) {
-      console.warn('[TokenTracker] Daily RPC unavailable, using upsert fallback:', rpcError.message);
-      await atomicUpsertFallback(userId, today, model, tokensIn, tokensOut, totalTokens, costCents);
+    if (error) {
+      console.warn(`[tokenTracker] record_ai_usage failed for ${provider}:`, error.message);
+      return null;
     }
-
-    // ── Monthly rollup (async, non-blocking) ──────────────────────────────
-    // FIX MONTHLY-RACE: now uses atomic RPC instead of read-modify-write
-    const month = today.slice(0, 8) + '01';
-    updateMonthlyRollupAtomic(userId, model, totalTokens, costCents, month).catch(err =>
-      console.warn('[TokenTracker] Monthly rollup failed:', err.message)
-    );
-
+    return data; // event id
   } catch (err) {
-    // Never let tracking errors break the main flow
-    console.warn('[TokenTracker] Record failed:', err.message);
+    console.warn(`[tokenTracker] record_ai_usage threw for ${provider}:`, err.message);
+    return null;
   }
 };
 
-/**
- * Atomic fallback for daily tracking when the RPC isn't available.
- * Still approximate for counters (no true col + N without RPC),
- * but acceptable for free Grok analytics.
- */
-const atomicUpsertFallback = async (userId, today, model, tokensIn, tokensOut, totalTokens, costCents) => {
-  if (model === 'grok' || !['grok', 'perplexity'].includes(model)) {
-    await supabaseAdmin.from('usage_tracking').upsert({
-      user_id:         userId,
-      date:            today,
-      grok_calls:      1,
-      grok_tokens:     totalTokens,
-      grok_tokens_in:  tokensIn,
-      grok_tokens_out: tokensOut
-    }, { onConflict: 'user_id,date', ignoreDuplicates: false });
-  } else {
-    await supabaseAdmin.from('usage_tracking').upsert({
-      user_id:               userId,
-      date:                  today,
-      perplexity_calls:      1,
-      perplexity_tokens:     totalTokens,
-      perplexity_tokens_in:  tokensIn,
-      perplexity_tokens_out: tokensOut,
-      estimated_cost_cents:  costCents
-    }, { onConflict: 'user_id,date', ignoreDuplicates: false });
-  }
-};
+// ──────────────────────────────────────────
+// GROQ (LLM completions)
+// ──────────────────────────────────────────
+export const recordGroqUsage = async ({
+  workspaceId, userId, model, tier, tokensIn, tokensOut, sourceJob, metadata,
+}) => writeUsageEvent({
+  workspaceId, userId, provider: 'groq', eventType: 'completion',
+  model, tier, tokensIn, tokensOut, sourceJob, metadata,
+});
 
-/**
- * FIX MONTHLY-RACE: Atomic monthly rollup using RPC.
- * The RPC does: INSERT ... ON CONFLICT DO UPDATE SET col = col + $delta
- * This is fully atomic at the Postgres level — no race condition possible.
- *
- * Falls back to upsert-from-scratch if RPC not available yet.
- */
-const updateMonthlyRollupAtomic = async (userId, model, tokens, costCents, month) => {
-  const grokDelta       = model === 'grok'       ? tokens : 0;
-  const perplexityDelta = model === 'perplexity' ? tokens : 0;
+// ──────────────────────────────────────────
+// EXA (search)
+// ──────────────────────────────────────────
+export const recordExaUsage = async ({
+  workspaceId, userId, creditsUsed = 1, costCents = EXA_COST_PER_SEARCH_CENTS, sourceJob, metadata,
+}) => writeUsageEvent({
+  workspaceId, userId, provider: 'exa', eventType: 'search',
+  creditsUsed, costCents, sourceJob, metadata,
+});
 
-  // Try atomic RPC first
-  const { error: rpcError } = await supabaseAdmin.rpc('increment_monthly_token_usage', {
-    p_user_id:               userId,
-    p_month:                 month,
-    p_grok_tokens:           grokDelta,
-    p_perplexity_tokens:     perplexityDelta,
-    p_cost_cents:            costCents
-  });
-
-  if (!rpcError) return; // Success — done
-
-  // RPC not deployed yet — fall back to safe insert (won't double-count on
-  // first insert, but concurrent second calls on the same month will be
-  // slightly off; acceptable until the RPC is deployed)
-  console.warn('[TokenTracker] Monthly RPC unavailable, using insert fallback:', rpcError.message);
-
-  const { data: existing } = await supabaseAdmin
-    .from('monthly_token_usage')
-    .select('id, grok_tokens_total, perplexity_tokens_total, total_cost_cents, token_allowance')
-    .eq('user_id', userId)
-    .eq('month', month)
-    .single();
-
-  if (existing) {
-    const newPerplexityTokens = (existing.perplexity_tokens_total || 0) + perplexityDelta;
-    await supabaseAdmin
-      .from('monthly_token_usage')
-      .update({
-        grok_tokens_total:       (existing.grok_tokens_total || 0) + grokDelta,
-        perplexity_tokens_total: newPerplexityTokens,
-        total_cost_cents:        (existing.total_cost_cents || 0) + costCents,
-        allowance_used_pct:      Math.min(100, Math.round(
-          newPerplexityTokens / (existing.token_allowance || 50000) * 100
-        ))
-      })
-      .eq('id', existing.id);
-  } else {
-    await supabaseAdmin
-      .from('monthly_token_usage')
-      .insert({
-        user_id:                 userId,
-        month,
-        grok_tokens_total:       grokDelta,
-        perplexity_tokens_total: perplexityDelta,
-        total_cost_cents:        costCents
-      });
-  }
-};
-
-/**
- * Check if user has Perplexity tokens remaining today.
- * Grok always returns allowed: true (no limits).
- */
-export const checkPerplexityAllowance = async (userId, tier = 'free') => {
-  const today      = new Date().toISOString().split('T')[0];
-  const dailyLimit = PERPLEXITY_TOKEN_LIMITS[tier] || PERPLEXITY_TOKEN_LIMITS.free;
-
-  // Check global cap first
-  const { data: globalToday } = await supabaseAdmin
-    .from('global_usage')
-    .select('perplexity_calls')
-    .eq('date', today)
-    .single();
-
-  if ((globalToday?.perplexity_calls || 0) * 2000 >= PERPLEXITY_GLOBAL_DAILY_CAP_TOKENS) {
-    return { allowed: false, reason: 'global_cap', used: 0, limit: dailyLimit, pct_used: 100 };
-  }
-
-  const { data: usage } = await supabaseAdmin
-    .from('usage_tracking')
-    .select('perplexity_tokens')
-    .eq('user_id', userId)
-    .eq('date', today)
-    .single();
-
-  const used     = usage?.perplexity_tokens || 0;
-  const pct_used = Math.round((used / dailyLimit) * 100);
-
-  return {
-    allowed:   used < dailyLimit,
-    reason:    used >= dailyLimit ? 'daily_limit' : null,
-    used,
-    limit:     dailyLimit,
-    pct_used,
-    remaining: Math.max(0, dailyLimit - used)
-  };
-};
-
-/**
- * Get token usage summary for user dashboard.
- */
-export const getUsageSummary = async (userId, tier = 'free') => {
+// ──────────────────────────────────────────
+// QUOTA CHECKS (Exa only — Groq has no limit, matching prior convention)
+// ──────────────────────────────────────────
+export const checkWorkspaceExaUsage = async (workspaceId, plan = 'free') => {
   const today = new Date().toISOString().split('T')[0];
-  const month = today.slice(0, 8) + '01';
+  const limit = EXA_WORKSPACE_DAILY_LIMITS[plan] ?? EXA_WORKSPACE_DAILY_LIMITS.free;
 
-  const [{ data: daily }, { data: monthly }] = await Promise.all([
-    supabaseAdmin.from('usage_tracking').select('*').eq('user_id', userId).eq('date', today).single(),
-    supabaseAdmin.from('monthly_token_usage').select('*').eq('user_id', userId).eq('month', month).single()
+  // Global cap first — single source of truth, summed from the same rollup
+  // table every workspace writes to (no separate drift-prone counter).
+  const { data: globalRows } = await supabaseAdmin
+    .from('workspace_ai_usage_daily')
+    .select('call_count')
+    .eq('date', today)
+    .eq('provider', 'exa');
+
+  const globalUsed = (globalRows || []).reduce((sum, r) => sum + (r.call_count || 0), 0);
+  if (globalUsed >= EXA_GLOBAL_DAILY_CAP_CALLS) {
+    return { allowed: false, reason: 'global_cap_reached', used: globalUsed, limit };
+  }
+
+  const { data: wsRow } = await supabaseAdmin
+    .from('workspace_ai_usage_daily')
+    .select('call_count')
+    .eq('workspace_id', workspaceId)
+    .eq('date', today)
+    .eq('provider', 'exa')
+    .maybeSingle();
+
+  const used = wsRow?.call_count || 0;
+  if (used >= limit) {
+    return { allowed: false, reason: 'workspace_limit_reached', used, limit };
+  }
+  return { allowed: true, used, limit };
+};
+
+// ──────────────────────────────────────────
+// USAGE SUMMARY (workspace dashboard)
+// ──────────────────────────────────────────
+export const getWorkspaceUsageSummary = async (workspaceId) => {
+  const today = new Date().toISOString().split('T')[0];
+  const monthStart = today.slice(0, 8) + '01';
+
+  const [{ data: todayRows }, { data: monthRows }] = await Promise.all([
+    supabaseAdmin.from('workspace_ai_usage_daily').select('*').eq('workspace_id', workspaceId).eq('date', today),
+    supabaseAdmin.from('workspace_ai_usage_daily').select('*').eq('workspace_id', workspaceId).gte('date', monthStart),
   ]);
 
-  const perplexityLimit = PERPLEXITY_TOKEN_LIMITS[tier] || PERPLEXITY_TOKEN_LIMITS.free;
-  const perplexityUsed  = daily?.perplexity_tokens || 0;
-  const grokUsed        = daily?.grok_tokens       || 0;
+  const sumBy = (rows, provider, field) =>
+    (rows || []).filter(r => r.provider === provider).reduce((s, r) => s + (r[field] || 0), 0);
 
   return {
     today: {
-      perplexity: {
-        tokens_used: perplexityUsed,
-        limit:       perplexityLimit,
-        pct_used:    Math.round((perplexityUsed / perplexityLimit) * 100),
-        remaining:   Math.max(0, perplexityLimit - perplexityUsed),
-        resets_in:   getSecondsUntilMidnight()
-      },
-      grok: {
-        tokens_used: grokUsed,
-        limit:       'unlimited',
-        note:        'Free model — unlimited use'
-      },
-      estimated_cost_cents: daily?.estimated_cost_cents || 0
+      groq:  { calls: sumBy(todayRows, 'groq', 'call_count'), tokens: sumBy(todayRows, 'groq', 'total_tokens') },
+      exa:   { calls: sumBy(todayRows, 'exa', 'call_count'), credits: sumBy(todayRows, 'exa', 'total_credits') },
+      estimated_cost_cents: sumBy(todayRows, 'groq', 'estimated_cost_cents') + sumBy(todayRows, 'exa', 'estimated_cost_cents'),
     },
     this_month: {
-      perplexity_tokens: monthly?.perplexity_tokens_total || 0,
-      grok_tokens:       monthly?.grok_tokens_total       || 0,
-      total_cost_cents:  monthly?.total_cost_cents        || 0,
-      allowance_used_pct: monthly?.allowance_used_pct     || 0
-    }
+      groq:  { calls: sumBy(monthRows, 'groq', 'call_count'), tokens: sumBy(monthRows, 'groq', 'total_tokens') },
+      exa:   { calls: sumBy(monthRows, 'exa', 'call_count'), credits: sumBy(monthRows, 'exa', 'total_credits') },
+      estimated_cost_cents: sumBy(monthRows, 'groq', 'estimated_cost_cents') + sumBy(monthRows, 'exa', 'estimated_cost_cents'),
+    },
   };
 };
 
-const getSecondsUntilMidnight = () => {
-  const now      = new Date();
-  const midnight = new Date(now);
-  midnight.setHours(24, 0, 0, 0);
-  return Math.floor((midnight - now) / 1000);
+export default {
+  recordGroqUsage,
+  recordExaUsage,
+  checkWorkspaceExaUsage,
+  getWorkspaceUsageSummary,
+  EXA_WORKSPACE_DAILY_LIMITS,
+  EXA_GLOBAL_DAILY_CAP_CALLS,
 };
-
-export default { recordTokenUsage, checkPerplexityAllowance, getUsageSummary };

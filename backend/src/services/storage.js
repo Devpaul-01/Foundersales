@@ -1,11 +1,16 @@
 // src/services/storage.js
 // ============================================================
 // FILE UPLOAD SERVICE
-// Uses Supabase Storage as primary.
+// Uses Cloudinary as primary storage provider.
 // Returns public URL + metadata for AI access.
+//
+// NOTE: DB metadata (file_uploads table) is still read/written via
+// supabaseAdmin — only the file STORAGE backend has moved to Cloudinary.
+// If you also want the metadata table off Supabase, that's a separate swap.
 // ============================================================
 
 import supabaseAdmin from '../config/supabase.js';
+import cloudinary from '../config/cloudinary.js';
 import { UPLOAD_LIMITS } from '../config/constants.js';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -20,7 +25,27 @@ const getFileType = (mimeType) => {
 };
 
 /**
- * Upload a file buffer to Supabase Storage.
+ * Cloudinary needs a resource_type hint. Images get native image
+ * handling (transformations, etc). Everything else (pdf, docs, misc)
+ * must go up as 'raw' or Cloudinary will reject/mangle it.
+ */
+const getResourceType = (fileType) => (fileType === 'image' ? 'image' : 'raw');
+
+/**
+ * Upload a buffer to Cloudinary via its upload_stream API,
+ * wrapped in a Promise since it's callback-based.
+ */
+const uploadBufferToCloudinary = (buffer, options) =>
+  new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(options, (error, result) => {
+      if (error) return reject(error);
+      resolve(result);
+    });
+    stream.end(buffer);
+  });
+
+/**
+ * Upload a file buffer to Cloudinary.
  * Stores metadata in file_uploads table.
  *
  * @param {Buffer} buffer - File contents
@@ -39,37 +64,47 @@ export const uploadFile = async (buffer, { originalFilename, mimeType, sizeBytes
   }
 
   const ext = originalFilename.split('.').pop() || 'bin';
-  const storagePath = `${userId}/${uuidv4()}.${ext}`;
+  const fileType = getFileType(mimeType);
+  const resourceType = getResourceType(fileType);
 
-  // Upload to Supabase Storage
-  const { error: uploadError } = await supabaseAdmin.storage
-    .from(UPLOAD_LIMITS.SUPABASE_BUCKET)
-    .upload(storagePath, buffer, {
-      contentType: mimeType,
-      upsert: false
+  // Cloudinary builds its own path from folder + public_id.
+  // We mirror the old `${userId}/${uuid}.${ext}` layout for continuity.
+  const publicId = uuidv4();
+  const folder = userId;
+
+  let uploadResult;
+  try {
+    uploadResult = await uploadBufferToCloudinary(buffer, {
+      folder,
+      public_id: publicId,
+      resource_type: resourceType,
+      // Preserve original extension/format for raw files (pdf/doc/etc)
+      // so the delivered URL still ends in the right extension.
+      format: resourceType === 'raw' ? ext : undefined,
+      use_filename: false,
+      unique_filename: false,
+      overwrite: false
     });
-
-  if (uploadError) {
+  } catch (uploadError) {
     throw new Error(`Storage upload failed: ${uploadError.message}`);
   }
 
-  // Get public URL
-  const { data: { publicUrl } } = supabaseAdmin.storage
-    .from(UPLOAD_LIMITS.SUPABASE_BUCKET)
-    .getPublicUrl(storagePath);
+  const storagePath = uploadResult.public_id; // e.g. "userId/uuid"
+  const publicUrl = uploadResult.secure_url;
 
   // Store metadata in DB
   const { data: fileRecord, error: dbError } = await supabaseAdmin
     .from('file_uploads')
     .insert({
       user_id: userId,
-      storage_provider: 'supabase',
+      storage_provider: 'cloudinary',
       storage_path: storagePath,
+      resource_type: resourceType,
       public_url: publicUrl,
       original_filename: originalFilename,
       mime_type: mimeType,
       size_bytes: sizeBytes,
-      file_type: getFileType(mimeType),
+      file_type: fileType,
       chat_id: chatId || null
     })
     .select()
@@ -87,7 +122,7 @@ export const uploadFile = async (buffer, { originalFilename, mimeType, sizeBytes
 export const deleteFile = async (fileId, userId) => {
   const { data: file } = await supabaseAdmin
     .from('file_uploads')
-    .select('storage_path, user_id')
+    .select('storage_path, resource_type, user_id')
     .eq('id', fileId)
     .single();
 
@@ -95,9 +130,9 @@ export const deleteFile = async (fileId, userId) => {
     throw new Error('File not found or access denied');
   }
 
-  await supabaseAdmin.storage
-    .from(UPLOAD_LIMITS.SUPABASE_BUCKET)
-    .remove([file.storage_path]);
+  await cloudinary.uploader.destroy(file.storage_path, {
+    resource_type: file.resource_type || 'image'
+  });
 
   await supabaseAdmin
     .from('file_uploads')

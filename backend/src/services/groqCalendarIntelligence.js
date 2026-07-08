@@ -12,7 +12,7 @@
 //  generateWeeklyPatternInsights()  — cross-conversation pattern engine
 // ============================================================
 
-import { callGroq, PRO_MODEL, PRIMARY_MODEL } from './groq.js';
+import { callWithFallbackGroq } from './multiProvider.js';
 import { parseJSONObject, parseJSONArray } from '../utils/parser.js';
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -107,11 +107,12 @@ Return ONLY this JSON (no markdown, no explanation):
   };
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.65,
       maxTokens:   800,
-      modelName:   PRO_MODEL,
+      tier:        'quality',
+      workspaceId: user.workspace_id, userId: user.id, sourceJob: 'calendar_enriched_prep',
     });
     const parsed = parseJSONObject(content, FALLBACK);
     // Validate required fields exist
@@ -175,11 +176,12 @@ Return ONLY this JSON:
   };
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.5,
       maxTokens:   500,
-      modelName:   PRO_MODEL,
+      tier:        'quality',
+      workspaceId: user.workspace_id, userId: user.id, sourceJob: 'calendar_meeting_debrief',
     });
     const parsed = parseJSONObject(content, FALLBACK);
     if (!parsed.summary) return FALLBACK;
@@ -195,7 +197,9 @@ Return ONLY this JSON:
 // Fast extraction of promises from meeting notes or chat text.
 // Uses cheap model — called frequently.
 // ──────────────────────────────────────────────────────────────────────────────
-export const extractCommitmentsFromText = async (text, attendeeName = 'Prospect') => {
+const IMPLICIT_DUE_TO_DAYS = { tomorrow: 1, 'this week': 5, 'this month': 21, unclear: null };
+
+export const extractCommitmentsFromText = async (text, attendeeName = 'Prospect', { workspaceId, userId } = {}) => {
   if (!text?.trim() || text.trim().length < 20) return [];
 
   const prompt = `Extract any commitments, promises, or action items from this text.
@@ -206,20 +210,30 @@ Text:
 
 Attendee name: ${attendeeName}
 
-Return ONLY a JSON array (empty array if none found):
-[{"text": "the specific commitment", "owner": "founder" or "prospect", "implicit_due": "tomorrow|this week|this month|unclear"}]
+Return ONLY a JSON array (empty array if none found). Use EXACTLY these key
+names — they map directly to database columns:
+[{"commitment_text": "the specific commitment", "owner": "founder" or "prospect", "implicit_due": "tomorrow|this week|this month|unclear"}]
 
 Only include clear, actionable commitments — not vague intentions.`;
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.1,
       maxTokens:   300,
-      modelName:   PRIMARY_MODEL,
+      tier:        'fast',
+      workspaceId, userId, sourceJob: 'extract_commitments',
     });
     const results = parseJSONArray(content, []);
-    return results.filter(c => c.text && c.owner && c.text.length > 5);
+    return results
+      .filter(c => c.commitment_text && c.owner && c.commitment_text.length > 5)
+      .map(c => {
+        const offsetDays = IMPLICIT_DUE_TO_DAYS[c.implicit_due] ?? null;
+        const due_date = offsetDays != null
+          ? new Date(Date.now() + offsetDays * 86400000).toISOString().split('T')[0]
+          : null;
+        return { commitment_text: c.commitment_text, owner: c.owner, due_date };
+      });
   } catch (err) {
     console.error('[CalendarIntel] extractCommitmentsFromText FAILED:', err.message);
     return [];
@@ -230,7 +244,7 @@ Only include clear, actionable commitments — not vague intentions.`;
 // 4. SIGNAL ANALYSIS
 // Detects buying/risk/timing/engagement signals from notes or conversation.
 // ──────────────────────────────────────────────────────────────────────────────
-export const generateSignalAnalysis = async (text, attendeeName = 'Prospect', outcome = null) => {
+export const generateSignalAnalysis = async (text, attendeeName = 'Prospect', outcome = null, { workspaceId, userId } = {}) => {
   if (!text?.trim() || text.trim().length < 20) return [];
 
   const prompt = `Analyze this sales meeting or conversation text for important signals.
@@ -247,22 +261,24 @@ Signal types to detect:
 - TIMING: Urgency signals, timeline constraints, decision deadlines, upcoming events
 - ENGAGEMENT: Response quality, depth of questions asked, enthusiasm level
 
-Return ONLY a JSON array (empty if no significant signals):
-[{"type": "buying|risk|timing|engagement", "text": "what was said/observed that signals this", "confidence": 0.6-1.0}]
+Return ONLY a JSON array (empty if no significant signals). Use EXACTLY these
+key names — they map directly to database columns:
+[{"signal_type": "buying|risk|timing|engagement", "signal_text": "what was said/observed that signals this", "confidence": 0.6-1.0}]
 
 Only include signals that are genuinely meaningful for forecasting this deal.`;
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.2,
       maxTokens:   400,
-      modelName:   PRIMARY_MODEL,
+      tier:        'fast',
+      workspaceId, userId, sourceJob: 'generate_signal_analysis',
     });
     const results = parseJSONArray(content, []);
     return results.filter(s =>
-      ['buying', 'risk', 'timing', 'engagement'].includes(s.type) &&
-      s.text && s.confidence >= 0.5
+      ['buying', 'risk', 'timing', 'engagement'].includes(s.signal_type) &&
+      s.signal_text && s.confidence >= 0.5
     );
   } catch (err) {
     console.error('[CalendarIntel] generateSignalAnalysis FAILED:', err.message);
@@ -339,11 +355,12 @@ Return ONLY this JSON:
   };
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.75,
       maxTokens:   500,
-      modelName:   PRO_MODEL,
+      tier:        'quality',
+      workspaceId: user.workspace_id, userId: user.id, sourceJob: 'post_meeting_followup',
     });
     const parsed = parseJSONObject(content, FALLBACK);
     if (!parsed.brief || !parsed.substantive) return FALLBACK;
@@ -393,12 +410,12 @@ RULES:
   }
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       systemPrompt,
       messages:    [...history, { role: 'user', content: noteFragment }],
       temperature: 0.6,
       maxTokens:   100,
-      modelName:   PRIMARY_MODEL,
+      tier:        'fast',
     });
 
     const isEnd = content.trim() === '__END_MEETING__';
@@ -496,11 +513,12 @@ Return ONLY a JSON array:
 Return an empty array [] if there's not enough data for meaningful insights.`;
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.4,
       maxTokens:   600,
-      modelName:   PRO_MODEL,
+      tier:        'quality',
+      workspaceId: user.workspace_id, userId: user.id, sourceJob: 'weekly_pattern_insights',
     });
     const results = parseJSONArray(content, []);
     return results.filter(i => i.title && i.body && i.type);
@@ -541,11 +559,12 @@ Return ONLY this JSON:
 }`;
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.3,
       maxTokens:   350,
-      modelName:   PRIMARY_MODEL,
+      tier:        'fast',
+      workspaceId: user.workspace_id, userId: user.id, sourceJob: 'enrich_prep_with_research',
     });
     return parseJSONObject(content, null);
   } catch (err) {
@@ -587,11 +606,12 @@ Write 2-3 sentences that capture:
 Sound like a sharp advisor, not a report generator. Be direct.`;
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.5,
       maxTokens:   200,
-      modelName:   PRIMARY_MODEL,
+      tier:        'fast',
+      workspaceId: user.workspace_id, userId: user.id, sourceJob: 'generate_prospect_summary',
     });
     return content.trim() || `${timeline.length} interactions recorded with ${prospect.name}. Review the timeline for details.`;
   } catch (err) {

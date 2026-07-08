@@ -12,9 +12,23 @@ interface SSECallbacks {
 
 /**
  * Streams a POST request using native fetch + ReadableStream.
- * Server sends: data: {"type":"chunk","content":"..."}\n
- *               data: {"type":"done","message_id":"..."}\n
- *               data: {"type":"error","message":"..."}\n
+ *
+ * Server (services/streaming.js `sendSSE`) sends standard two-line SSE
+ * frames — the event name on its own line, JSON payload on the next:
+ *
+ *   event: message_id
+ *   data: {"id":"..."}
+ *
+ *   event: token
+ *   data: {"token":"..."}
+ *
+ *   event: complete
+ *   data: {"message_id":"...","tokens_used":42,"model_used":"groq"}
+ *
+ *   event: error
+ *   data: {"message":"..."}
+ *
+ * There is no `type` field inside the payload — the event name IS the type.
  */
 export function useSSE() {
   const { accessToken } = useAuth();
@@ -60,6 +74,10 @@ export function useSSE() {
         const reader  = response.body.getReader();
         const decoder = new TextDecoder();
         let   buffer  = '';
+        // SSE frames are `event: <name>\ndata: <json>\n\n` — the event
+        // name arrives on its own line ahead of the data line, so we
+        // have to hold onto it until its matching data line shows up.
+        let   pendingEvent = '';
 
         // eslint-disable-next-line no-constant-condition
         while (true) {
@@ -71,25 +89,34 @@ export function useSSE() {
           buffer = lines.pop() ?? '';
 
           for (const line of lines) {
+            if (line.startsWith('event: ')) {
+              pendingEvent = line.slice(7).trim();
+              continue;
+            }
             if (!line.startsWith('data: ')) continue;
+
             const raw = line.slice(6).trim();
+            const eventName = pendingEvent;
+            pendingEvent = '';
             if (!raw || raw === '[DONE]') continue;
 
             try {
               const data = JSON.parse(raw) as {
-                type:        'chunk' | 'done' | 'error';
-                content?:    string;
+                token?:      string;
                 message_id?: string;
                 message?:    string;
               };
 
-              if (data.type === 'chunk' && data.content) {
-                callbacks.onChunk(data.content);
-              } else if (data.type === 'done' && data.message_id) {
+              if (eventName === 'token' && data.token) {
+                callbacks.onChunk(data.token);
+              } else if (eventName === 'complete' && data.message_id) {
                 callbacks.onDone(data.message_id);
-              } else if (data.type === 'error') {
+              } else if (eventName === 'error') {
                 callbacks.onError(data.message ?? 'Stream error');
               }
+              // 'message_id' event (sent before streaming starts) is
+              // intentionally not surfaced — ChatPage refetches on
+              // 'complete' rather than needing it early.
             } catch {
               // Ignore malformed JSON lines
             }

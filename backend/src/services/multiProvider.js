@@ -69,6 +69,27 @@ const MODEL_PRIORITY = {
   ],
 };
 
+// FAST tier — cheaper/smaller models for high-volume, low-stakes calls
+// (state-delta scoring, quick classification, etc.). Falls back to the
+// quality-tier list per provider if a provider has no fast-tier entry.
+const FAST_MODEL_PRIORITY = {
+  cerebras: MODEL_PRIORITY.cerebras,           // Cerebras is already fast; no separate tier
+  groq: [
+    'llama-3.1-8b-instant',
+    ...MODEL_PRIORITY.groq,
+  ],
+  mistral: [
+    'ministral-3b-2512',
+    ...MODEL_PRIORITY.mistral,
+  ],
+  openrouter: MODEL_PRIORITY.openrouter,
+};
+
+const getModelPriorityForTier = (providerId, tier) =>
+  tier === 'fast'
+    ? (FAST_MODEL_PRIORITY[providerId] || MODEL_PRIORITY[providerId])
+    : MODEL_PRIORITY[providerId];
+
 // ──────────────────────────────────────────
 // NON-CHAT MODEL FILTER
 // Patterns matching model IDs that are NOT chat/text-generation models.
@@ -270,10 +291,21 @@ const _discoverProviderModels = async (providerId, baseURL, apiKey) => {
  * Returns the effective model list for a provider.
  * Uses dynamically discovered models when available; falls back to MODEL_PRIORITY.
  */
-const getEffectiveModels = (providerId) =>
-  (_discoveryDone[providerId] && _discoveredModels[providerId]?.length > 0)
-    ? _discoveredModels[providerId]
-    : MODEL_PRIORITY[providerId] || PROVIDER_REGISTRY[providerId]?.models || [];
+const getEffectiveModels = (providerId, tier = 'quality') => {
+  if (_discoveryDone[providerId] && _discoveredModels[providerId]?.length > 0) {
+    // Discovered models are already ranked by the quality-tier priority
+    // template. For fast tier, prefer any discovered model that also
+    // appears in the fast-tier static list, otherwise fall back to the
+    // full discovered list (still resilient, just not size-optimized).
+    if (tier === 'fast') {
+      const fastIds = FAST_MODEL_PRIORITY[providerId] || [];
+      const matched = _discoveredModels[providerId].filter(id => fastIds.includes(id));
+      if (matched.length > 0) return matched;
+    }
+    return _discoveredModels[providerId];
+  }
+  return getModelPriorityForTier(providerId, tier) || PROVIDER_REGISTRY[providerId]?.models || [];
+};
 
 const getPools = () => {
   if (!_pools) {
@@ -422,7 +454,7 @@ const streamProvider = async ({
 // either the dynamically discovered + ranked list, or MODEL_PRIORITY fallback.
 // Only healthy (non-cooling) keys are included.
 // ──────────────────────────────────────────
-const buildProviderQueue = () => {
+const buildProviderQueue = (tier = 'quality') => {
   const pools = getPools();
   const queue = [];
 
@@ -434,7 +466,7 @@ const buildProviderQueue = () => {
     if (healthy.length === 0) continue;
 
     // Use dynamically discovered models when available, otherwise static priority list.
-    const models = getEffectiveModels(providerId);
+    const models = getEffectiveModels(providerId, tier);
 
     for (const model of models) {
       for (const keyEntry of healthy) {
@@ -457,7 +489,7 @@ const buildProviderQueue = () => {
 // NON-STREAMING: callWithFallback
 // ──────────────────────────────────────────
 export const callWithFallback = async (opts) => {
-  const queue = buildProviderQueue();
+  const queue = buildProviderQueue(opts.tier || 'quality');
 
   if (queue.length === 0) {
     throw new Error('ALL_PROVIDERS_FAILED: No healthy keys available across Cerebras, Groq, Mistral, or OpenRouter');
@@ -482,7 +514,16 @@ export const callWithFallback = async (opts) => {
       });
 
       console.log(`[MultiProvider] ✓ Success via ${provider.name}`);
-      return { ...result, model_used: provider.name };
+      // Normalize to the same shape callGroq() has always returned —
+      // every existing caller destructures tokens_in/tokens_out, and
+      // until now they were silently getting `undefined` for both.
+      return {
+        content:      result.content,
+        tokens_in:    result.usage?.prompt_tokens     || 0,
+        tokens_out:   result.usage?.completion_tokens || 0,
+        tokens_total: result.usage?.total_tokens       || 0,
+        model_used:   provider.name,
+      };
 
     } catch (err) {
       lastError = err;
@@ -500,6 +541,37 @@ export const callWithFallback = async (opts) => {
 
   console.error('[MultiProvider] All providers exhausted:', lastError?.message);
   throw new Error(`ALL_PROVIDERS_FAILED: ${lastError?.message}`);
+};
+
+// ──────────────────────────────────────────
+// callWithFallbackGroq — standardized entry point for all LLM calls.
+// Wraps callWithFallback and auto-records usage via tokenTracker when
+// workspaceId/userId are provided. This is the function every groq-*.js
+// business-logic file should call instead of groq-client.js's callGroq().
+//
+// workspaceId/userId are optional on purpose: a handful of groq-practice.js
+// functions (evaluateBuyerStateChange, generatePracticeInterruption) aren't
+// invoked by any route currently in scope, and their real call sites may or
+// may not have workspace context. Omitting them just means usage isn't
+// tracked for that call (logged via console.warn inside tokenTracker), not
+// a thrown error — this is intentional fail-open behavior so an unseen
+// caller never breaks.
+// ──────────────────────────────────────────
+export const callWithFallbackGroq = async ({
+  messages, systemPrompt, temperature, maxTokens, tier = 'quality',
+  workspaceId = null, userId = null, sourceJob = null,
+}) => {
+  const result = await callWithFallback({ messages, systemPrompt, temperature, maxTokens, tier });
+
+  if (workspaceId && userId) {
+    const { recordGroqUsage } = await import('./tokenTracker.js');
+    await recordGroqUsage({
+      workspaceId, userId, model: result.model_used, tier,
+      tokensIn: result.tokens_in, tokensOut: result.tokens_out, sourceJob,
+    });
+  }
+
+  return result;
 };
 
 // ──────────────────────────────────────────
@@ -595,4 +667,4 @@ export const getProviderStatus = () => {
   return status;
 };
 
-export default { callWithFallback, streamWithFallback, getProviderStatus };
+export default { callWithFallback, callWithFallbackGroq, streamWithFallback, getProviderStatus };

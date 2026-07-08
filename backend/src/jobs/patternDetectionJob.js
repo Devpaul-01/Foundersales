@@ -9,9 +9,7 @@
 
 import supabaseAdmin from '../config/supabase.js';
 import { scheduledQueue } from './queues.js';
-import { callWithFallback } from '../services/multiProvider.js';
-import { recordTokenUsage } from '../services/tokenTracker.js';
-import { PRO_MODEL } from '../services/groq.js';
+import { callWithFallbackGroq } from '../services/multiProvider.js';
 import { sleep, logJob } from '../utils/jobHelpers.js';
 
 const MIN_ANALYSES_REQUIRED = 5;
@@ -167,16 +165,14 @@ ${practiceSection}
 Return ONLY a JSON array:
 [{"pattern_type":"ghost_trigger|success_signal|weakness|objection_type","pattern_label":"8 words max","pattern_detail":"2-3 sentences with specific numbers","affected_outcome":"negative|positive|both","confidence_score":5-10,"recommendation":"one specific actionable fix"}]`;
 
-  const { content, tokens_in, tokens_out } = await callWithFallback({
+  const { content } = await callWithFallbackGroq({
     systemPrompt: 'You are a communication pattern analyst. Return only valid JSON arrays.',
     messages:     [{ role: 'user', content: prompt }],
     temperature:  0.2,
     maxTokens:    1000,
-    modelName:    PRO_MODEL,
+    tier:         'quality',
+    workspaceId, userId, sourceJob: 'pattern_detection',
   });
-
-  // Token usage tracked at workspace level
-  await recordTokenUsage(workspaceId, 'groq', tokens_in, tokens_out);
 
   let patterns;
   try {
@@ -259,26 +255,24 @@ const enrichWithMarketIntelligence = async (userId, workspaceId, user, topPatter
 
   if (recentIntel?.length) return;
 
-  // FIX HIGH-10: Check workspace quota before making Exa/Perplexity call
-  const { checkWorkspacePerplexityUsage, incrementWorkspaceUsage } = await import('../services/perplexity.js');
-  
-  const quotaCheck = await checkWorkspacePerplexityUsage(workspaceId, user.tier);
+  const { checkWorkspaceExaUsage } = await import('../services/tokenTracker.js');
+
+  const quotaCheck = await checkWorkspaceExaUsage(workspaceId, user.tier);
   if (!quotaCheck.allowed) {
     console.log(`[PatternDetection] Market intel skipped for workspace ${workspaceId}: quota exhausted`);
     return;
   }
 
-  const { searchForChat } = await import('../services/perplexity.js');
+  const { searchForChat } = await import('../services/exa.js');
   const searchQuery = `What are the most effective cold outreach strategies for ${user.target_audience || 'B2B founders'} in ${new Date().getFullYear()}? What messaging approaches get the highest reply rates? ${topPattern.pattern_label ? `How to avoid: ${topPattern.pattern_label}` : ''}`;
 
   const { content: marketIntel } = await searchForChat(
-    searchQuery, 'Find specific, data-backed insights about effective cold outreach.'
+    searchQuery, 'Find specific, data-backed insights about effective cold outreach.',
+    { workspaceId, userId, sourceJob: 'pattern_detection_market_intel' }
   );
 
   if (!marketIntel?.trim()) return;
-
-  // FIX HIGH-10: Increment workspace usage after successful search
-  await incrementWorkspaceUsage(workspaceId);
+  // Usage is now recorded inside searchForChat itself — no separate increment call needed.
 
   await supabaseAdmin.from('growth_cards').insert({
     workspace_id: workspaceId,

@@ -8,7 +8,7 @@
 // modified. Everything else in this file remains exactly as uploaded.
 
 import { parseTextResponse }                        from '../utils/parser.js';
-import { callGroq, PRO_MODEL, FLASH_MODEL }         from './groq-client.js';
+import { callWithFallbackGroq }                     from './multiProvider.js';
 import { SYSTEM_PROMPTS, PRESSURE_MODIFIER_BLOCKS, getContactLabel } from './groq-prompts.js';
 
 // ──────────────────────────────────────────
@@ -144,10 +144,12 @@ Return ONLY the post text.`;
   };
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.92,
-      maxTokens:   150
+      maxTokens:   150,
+      tier:        'fast',
+      workspaceId: user.workspace_id, userId: user.id, sourceJob: 'practice_scenario_prompt',
     });
     const result = parseTextResponse(content, defaults[scenarioType] || defaults.polite_decline);
     return result.length > 20 ? result : defaults[scenarioType];
@@ -180,10 +182,12 @@ Write the scenario from the prospect's perspective. Sound like a real human, not
 Do NOT reveal the scenario type. Return ONLY the scenario text.`;
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.85,
       maxTokens:   160,
+      tier:        'fast',
+      workspaceId: user.workspace_id, userId: user.id, sourceJob: 'practice_scenario_from_opportunity',
     });
     const result = parseTextResponse(content, opportunityContext?.slice(0, 200) || '');
     return result.length > 20 ? result : (opportunityContext?.slice(0, 300) || '');
@@ -255,7 +259,7 @@ Return ONLY valid JSON, no markdown, no explanation:
   };
 
   try {
-    const { content } = await callGroq({ messages: [{ role: 'user', content: prompt }], temperature: 0.75, maxTokens: 500 });
+    const { content } = await callWithFallbackGroq({ messages: [{ role: 'user', content: prompt }], temperature: 0.75, maxTokens: 500, tier: 'fast', workspaceId: user.workspace_id, userId: user.id, sourceJob: 'generate_buyer_profile' });
     const clean = content.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
     return {
@@ -350,10 +354,12 @@ Rules:
 - Do NOT explain your reasoning or reference this prompt`;
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.88,
       maxTokens:   180,
+      tier:        'fast',
+      workspaceId: user.workspace_id, userId: user.id, sourceJob: 'practice_reply_v1',
     });
 
     if (content.trim() === '__GHOST__' || scenarioType === 'ghost') return null;
@@ -401,7 +407,7 @@ Return ONLY valid JSON:
   const FALLBACK = { interest_delta: 0, trust_delta: 0, confusion_delta: 0, mood: 'neutral', reasoning: 'Message processed.' };
 
   try {
-    const { content } = await callGroq({ messages: [{ role: 'user', content: prompt }], temperature: 0.3, maxTokens: 200, modelName: FLASH_MODEL });
+    const { content } = await callWithFallbackGroq({ messages: [{ role: 'user', content: prompt }], temperature: 0.3, maxTokens: 200, tier: 'fast' });
     const clean  = content.replace(/```json|```/g, '').trim();
     return { ...FALLBACK, ...JSON.parse(clean) };
   } catch (err) {
@@ -445,7 +451,7 @@ Return ONLY valid JSON:
   const FALLBACK = { quality_score: 25, reply_worthy: false, weak_because: 'Message needs more specificity.', hint: 'Reference their specific situation.' };
 
   try {
-    const { content } = await callGroq({ messages: [{ role: 'user', content: prompt }], temperature: 0.3, maxTokens: 200, modelName: FLASH_MODEL });
+    const { content } = await callWithFallbackGroq({ messages: [{ role: 'user', content: prompt }], temperature: 0.3, maxTokens: 200, tier: 'fast', workspaceId: user.workspace_id, userId: user.id, sourceJob: 'evaluate_ghost_quality' });
     const clean  = content.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
     return {
@@ -567,7 +573,7 @@ Return ONLY valid JSON:
 }`;
 
   try {
-    const { content } = await callGroq({ messages: [{ role: 'user', content: prompt }], temperature: 0.88, maxTokens: 500, modelName: PRO_MODEL });
+    const { content } = await callWithFallbackGroq({ messages: [{ role: 'user', content: prompt }], temperature: 0.88, maxTokens: 500, tier: 'quality', workspaceId: user.workspace_id, userId: user.id, sourceJob: 'practice_reply_v2' });
     try {
       const clean  = content.replace(/```json|```/g, '').trim();
       const parsed = JSON.parse(clean);
@@ -753,12 +759,13 @@ Return ONLY valid JSON:
 }`;
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       systemPrompt,
       temperature: 0.88,
       maxTokens:   700,
-      modelName:   PRO_MODEL,
+      tier:        'quality',
+      workspaceId: user.workspace_id, userId: user.id, sourceJob: 'practice_reply_v3',
     });
 
     const parsed = parseV3Reply(content);
@@ -800,11 +807,11 @@ Write a natural, spontaneous interjection — a question that just popped into y
 1-2 sentences. Sound completely human. Return ONLY the text.`;
 
   try {
-    const { content } = await callGroq({
+    const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.85,
       maxTokens:   80,
-      modelName:   FLASH_MODEL,
+      tier:        'fast',
     });
     const text = content.trim().replace(/^["']|["']$/g, '');
     return text.length > 5 ? text : null;

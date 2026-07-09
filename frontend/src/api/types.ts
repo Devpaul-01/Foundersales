@@ -3,6 +3,16 @@
 // Maps 1:1 to OpenAPI v4.2.0 schemas + backend route responses.
 // owner_user_id used (matches routes), not owner_id (Part 3 typo).
 // stage used for Opportunity pipeline (matches routes/OpenAPI).
+//
+// CHAT AUDIT CHANGES:
+//   - Chat: added growth_card_id (was already read/written by chat.js
+//     but missing from this type — see migration_001), summary + 
+//     summary_updated_at (rolling conversation summary, task #8), and
+//     seq (stable ordering column used for chat-list pagination).
+//   - ChatMessage: added citations (audit §5.6/§7.1 — web-search sources,
+//     now persisted instead of discarded) and seq (stable keyset cursor
+//     for message pagination, audit §4.1, replacing created_at-based
+//     paging).
 // ─────────────────────────────────────────────────────────────
 
 // ── Primitive Enums ───────────────────────────────────────────
@@ -22,7 +32,7 @@ export type DifficultyLevel   = 'beginner' | 'standard' | 'advanced' | 'expert';
 export type PressureModifier  = 'decision_maker_watching' | 'aggressive_buyer' | 'competitor_mentioned' | 'compliance_concern';
 export type OpeningMood       = 'neutral' | 'skeptical' | 'curious' | 'defensive' | 'rushed';
 
-export type DeliveryStatus = 'pending' | 'delivered' | 'seen' | 'replied' | 'ghosted';
+export type DeliveryStatus = 'pending' | 'delivered' | 'seen' | 'replied' | 'ghosted' | 'failed';
 export type ChatType       = 'general' | 'opportunity' | 'practice';
 export type ChatMode       = 'general' | 'meeting_notes' | 'prep' | 'followup_coach';
 export type MessageRole    = 'user' | 'assistant' | 'system';
@@ -252,7 +262,7 @@ export interface Opportunity {
   lost_reason:           string | null;
   created_at:            string;
   updated_at?:           string;
-  feedback?:             Feedback[]; // always an array when present, may be empty
+  feedback?:             Feedback[];
 }
 
 export interface OpportunityIntel {
@@ -274,8 +284,6 @@ export interface PipelineMetrics {
   closed_lost_count:  number;
 }
 
-// ── Pipeline board / deal response shapes ─────────────────────
-/** Board-view shape — flattened feedback fields kept for backwards compat */
 export interface PipelineBoardOpportunity extends Opportunity {
   deal_value_usd?:      number | null;
   scheduled_call_date?: string | null;
@@ -293,7 +301,6 @@ export interface PipelineBoardResponse {
   metrics: PipelineMetrics;
 }
 
-/** Single-deal detail response — Opportunity already includes feedback[] */
 export interface DealDetailResponse {
   deal: Opportunity;
 }
@@ -309,18 +316,18 @@ export interface CalendarPrompt {
 // ── Feedback ──────────────────────────────────────────────────
 export interface Feedback {
   id:                     string;
-  user_id?:               string;        // optional — not always present in nested responses
-  workspace_id?:          string;        // optional — not always present in nested responses
-  opportunity_id?:        string;        // optional — not always present in nested responses
+  user_id?:               string;
+  workspace_id?:          string;
+  opportunity_id?:        string;
   outcome:                FeedbackOutcome;
   outcome_note:           string | null;
-  is_final?:              boolean;       // optional — defaults to false
+  is_final?:              boolean;
   deal_value_usd:         number | null;
   scheduled_call:         boolean;
   scheduled_call_date:    string | null;
-  scheduled_call_notes?:  string | null; // optional
+  scheduled_call_notes?:  string | null;
   created_at:             string;
-  updated_at?:            string;        // present on PATCH responses
+  updated_at?:            string;
 }
 
 // ── Chat ──────────────────────────────────────────────────────
@@ -335,10 +342,19 @@ export interface Chat {
   opportunity_id:  string | null;
   prospect_id:     string | null;
   event_id:        string | null;
+  growth_card_id?: string | null;
   message_count:   number;
   last_message_at: string | null;
   created_at:      string;
   updated_at?:     string;
+  /** Rolling AI-generated summary of everything older than the live
+   *  history window (chat audit task #8). Not present until a chat has
+   *  run long enough to trigger background summarization. */
+  summary?:               string | null;
+  summary_updated_at?:    string | null;
+  /** Stable monotonic ordering column, used as a pagination tiebreaker
+   *  alongside last_message_at in the chat list (chat audit §6). */
+  seq?:            number;
 }
 
 export interface ChatMessage {
@@ -355,8 +371,17 @@ export interface ChatMessage {
   chunk_index?:    number | null;
   is_final_chunk?: boolean | null;
   attachments?: { name: string; type: string; url?: string }[] | null;
+  /** Sources returned by a web search that informed this reply (chat
+   *  audit §5.6/§7.1) — previously computed by searchForChat and
+   *  discarded; now persisted and rendered under the message. */
+  citations?:      string[] | null;
   coaching_tip?:   Record<string, unknown> | null;
   created_at:      string;
+  /** Stable monotonic ordering column — the pagination cursor for
+   *  "load earlier messages" (chat audit §4.1). Always present on rows
+   *  returned from the backend; optional here only so client-only
+   *  optimistic messages (which don't have one yet) still type-check. */
+  seq?:            number;
 }
 
 export interface FileAttachment {
@@ -391,7 +416,7 @@ export interface BuyerState {
   trust_score:     number;
   confusion_score: number;
   mood:            string;
-  last_reasoning:  string; // ⚠️ NEVER shown during active session — replay only
+  last_reasoning:  string;
 }
 
 export interface SkillScores {
@@ -531,7 +556,6 @@ export interface CalendarEvent {
   debrief_content:      MeetingDebrief | null;
   meeting_notes:        string | null;
   perplexity_research:  Record<string, unknown> | null;
-  // computed fields
   debrief_needed?:      boolean;
   health_score?:        number | null;
   created_at:           string;
@@ -589,7 +613,6 @@ export interface Prospect {
   ai_summary_updated_at:     string | null;
   created_at:                string;
   updated_at?:               string;
-  // enriched
   pending_commitments?:      number;
 }
 
@@ -705,7 +728,7 @@ export interface Followup {
   created_at:   string;
 }
 
-// ── Commitment (lightweight — pages use this alongside ConversationCommitment) ─
+// ── Commitment ──────────────────────────────────────────────
 export interface Commitment {
   id:              string;
   workspace_id:    string;
@@ -723,7 +746,7 @@ export interface Commitment {
   created_at:      string;
 }
 
-// ── WorkspaceActivity (flat feed shape) ───────────────────────
+// ── WorkspaceActivity ──────────────────────────────────────────
 export interface WorkspaceActivity {
   id:           string;
   workspace_id: string;
@@ -735,7 +758,7 @@ export interface WorkspaceActivity {
   created_at:   string;
 }
 
-// ── MemoryFact (lightweight — distinct from UserMemoryFact) ───
+// ── MemoryFact ─────────────────────────────────────────────────
 export interface MemoryFact {
   id:         string;
   user_id:    string;
@@ -745,7 +768,7 @@ export interface MemoryFact {
   created_at: string;
 }
 
-// ── Goal (structured — distinct from UserGoal) ────────────────
+// ── Goal ────────────────────────────────────────────────────────
 export interface Goal {
   id:              string;
   workspace_id:    string;
@@ -781,7 +804,7 @@ export interface WorkspaceAnalytics {
   }>;
 }
 
-// ── Intelligence & Chart (used by MetricsDashboard pages) ─────
+// ── Intelligence & Chart ─────────────────────────────────────
 export interface IntelligenceCard {
   type:         'win' | 'tip' | 'warning';
   title:        string;

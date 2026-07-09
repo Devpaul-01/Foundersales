@@ -1,6 +1,6 @@
 // src/jobs/backgroundWorker.js — IMP-02
 //
-// FIXES APPLIED (refinement plan):
+// FIXES APPLIED (refinement plan, kept from prior revision):
 //  Issue 14: CALENDAR_PREP_GENERATE and CALENDAR_RESEARCH_PROSPECT handlers
 //            added. Previously calendar.js called generateAndSaveEnrichedPrep
 //            and researchProspectForMeeting as fire-and-forget inline calls —
@@ -8,9 +8,20 @@
 //            These are now proper BullMQ jobs: retryable and visible in Bull Board.
 //            The job constants are defined in BACKGROUND_JOB_TYPES (constants.js).
 //            calendar.js enqueues them via backgroundQueue.add().
+//
+// NEW (chat audit §11 / task instruction #8):
+//  CHAT_SUMMARIZE — rolling conversation summarization. Triggered by
+//  chat.js's maybeEnqueueSummarization() once a chat accumulates
+//  CHAT_SUMMARIZE_EVERY_N_MESSAGES new non-system messages since the last
+//  summary run. Folds everything OLDER than the live history window
+//  (CHAT_HISTORY_WINDOW, replayed verbatim on every turn — see chat.js)
+//  into chats.summary, which buildSystemPromptForChat then prepends to the
+//  system prompt. This keeps effective conversation memory extending
+//  indefinitely without resending the entire raw transcript every turn.
+//  Idempotent per chat/message-count via the jobId passed at enqueue time.
 import { Worker }             from 'bullmq';
 import { bullmqConnection }   from '../config/bullmq.js';
-import { BACKGROUND_JOB_TYPES } from '../config/constants.js';
+import { BACKGROUND_JOB_TYPES, CHAT_HISTORY_WINDOW } from '../config/constants.js';
 import { createLogger }       from '../utils/logger.js';
 import supabaseAdmin          from '../config/supabase.js';
 import { callWithFallbackGroq } from '../services/multiProvider.js';
@@ -35,7 +46,13 @@ const handlers = {
       temperature: 0.5, maxTokens: 150,
       tier: 'fast', workspaceId, userId, sourceJob: 'tip_card_generate',
     });
-    const tip = JSON.parse(tc.replace(/```json|```/g, '').trim());
+    let tip;
+    try {
+      tip = JSON.parse(tc.replace(/```json|```/g, '').trim());
+    } catch (err) {
+      logError('tip_card_generate_parse', err, { userId, goalId, raw: tc?.slice(0, 200) });
+      return;
+    }
     await supabaseAdmin.from('growth_cards').insert({
       workspace_id: workspaceId, user_id: userId, card_type: 'tip',
       title: tip.title, body: tip.body, action_label: 'Log more progress',
@@ -135,11 +152,6 @@ const handlers = {
   },
 
   // Issue 14: CALENDAR_PREP_GENERATE handler
-  // Re-fetches the event from DB (idempotent) then generates and saves enriched prep.
-  // Previously this ran as a fire-and-forget in calendar.js POST / — any Groq failure
-  // silently swallowed the error with .catch(()=>{}). Now retryable via BullMQ.
-  // Job deduplication: calendar.js passes jobId: `prep:${event.id}` so a second
-  // POST for the same event does not double-generate prep (BullMQ ignores duplicates).
   async [BACKGROUND_JOB_TYPES.CALENDAR_PREP_GENERATE](data) {
     const { userId, workspaceId, eventId, userCtx } = data;
     logJob(BACKGROUND_JOB_TYPES.CALENDAR_PREP_GENERATE, { userId, workspaceId, eventId });
@@ -151,8 +163,6 @@ const handlers = {
       return;
     }
 
-    // Rebuild prep context inline (buildPrepContext is a local helper in calendar.js;
-    // duplicated here to avoid circular imports — calendar.js is a route file).
     const context = {};
     if (event.prospect_id) {
       const [eventsRes, signalsRes, commitmentsRes] = await Promise.all([
@@ -190,8 +200,6 @@ const handlers = {
   },
 
   // Issue 14: CALENDAR_RESEARCH_PROSPECT handler
-  // Re-fetches event then calls the Perplexity prospect research function.
-  // Previously fire-and-forget with .catch(()=>{}) — now retryable.
   async [BACKGROUND_JOB_TYPES.CALENDAR_RESEARCH_PROSPECT](data) {
     const { userId, workspaceId, eventId, userCtx } = data;
     logJob(BACKGROUND_JOB_TYPES.CALENDAR_RESEARCH_PROSPECT, { userId, workspaceId, eventId });
@@ -205,6 +213,100 @@ const handlers = {
 
     await researchProspectForMeeting(userId, workspaceId, eventId, event, userCtx);
     log('calendar_research_prospect DONE', { userId, workspaceId, eventId });
+  },
+
+  // ── NEW: CHAT_SUMMARIZE ─────────────────────────────────────
+  // Folds everything older than the live CHAT_HISTORY_WINDOW into a
+  // rolling chats.summary field. Re-fetches all non-system messages for
+  // the chat (ordered by the stable `seq` column, not created_at — see
+  // migration_001), keeps the newest CHAT_HISTORY_WINDOW as "live" and
+  // summarizes only what falls before that boundary, merging with any
+  // existing summary so nothing already condensed is lost.
+  async [BACKGROUND_JOB_TYPES.CHAT_SUMMARIZE](data) {
+    const { chatId, workspaceId, userId } = data;
+    logJob(BACKGROUND_JOB_TYPES.CHAT_SUMMARIZE, { chatId, workspaceId });
+
+    const { data: chat, error: chatError } = await supabaseAdmin
+      .from('chats')
+      .select('id, summary, last_summarized_message_count')
+      .eq('id', chatId)
+      .eq('workspace_id', workspaceId)
+      .single();
+
+    if (chatError || !chat) {
+      log('chat_summarize skipped — chat not found', { chatId, workspaceId, error: chatError?.message });
+      return;
+    }
+
+    const { data: allMsgs, error: msgError } = await supabaseAdmin
+      .from('chat_messages')
+      .select('id, role, content, seq')
+      .eq('chat_id', chatId)
+      .neq('role', 'system')
+      .order('seq', { ascending: true });
+
+    if (msgError) {
+      logError('chat_summarize_fetch_messages', msgError, { chatId, workspaceId });
+      return;
+    }
+
+    if (!allMsgs?.length) {
+      log('chat_summarize skipped — no messages', { chatId });
+      return;
+    }
+
+    const toSummarize = allMsgs.slice(0, Math.max(0, allMsgs.length - CHAT_HISTORY_WINDOW));
+    if (toSummarize.length === 0) {
+      log('chat_summarize skipped — nothing older than the live window yet', { chatId, totalMessages: allMsgs.length });
+      return;
+    }
+
+    // Only summarize what's genuinely new since the last run — if a
+    // duplicate/late job fires for a chat that's already been summarized
+    // up to this point, this keeps it a safe no-op.
+    if (toSummarize.length <= (chat.last_summarized_message_count || 0)) {
+      log('chat_summarize skipped — already summarized up to this point', {
+        chatId, toSummarizeCount: toSummarize.length, alreadyDone: chat.last_summarized_message_count,
+      });
+      return;
+    }
+
+    const transcript = toSummarize
+      .map(m => `${m.role.toUpperCase()}: ${m.content}`)
+      .join('\n')
+      .slice(0, 12000);
+
+    const prompt = `Summarize the conversation so far into a compact briefing an AI sales-coaching assistant can use as its memory when continuing this conversation later. Preserve names, specific numbers, commitments, decisions, and anything the user would be annoyed to have to repeat. Be concise — under 300 words, plain prose, no headers or bullet lists.
+
+${chat.summary ? `EXISTING SUMMARY (carry forward anything still relevant):\n${chat.summary}\n\n` : ''}NEW MESSAGES TO FOLD IN:\n${transcript}`;
+
+    try {
+      const { content: summary } = await callWithFallbackGroq({
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.3, maxTokens: 400, tier: 'fast',
+        workspaceId, userId, sourceJob: 'chat_summarize',
+      });
+
+      if (!summary?.trim()) {
+        logError('chat_summarize', new Error('Empty summary returned'), { chatId, workspaceId });
+        return;
+      }
+
+      const { error: updateError } = await supabaseAdmin.from('chats').update({
+        summary:                        summary.trim(),
+        last_summarized_message_count:  toSummarize.length,
+        summary_updated_at:             new Date().toISOString(),
+      }).eq('id', chatId).eq('workspace_id', workspaceId);
+
+      if (updateError) {
+        logError('chat_summarize_save', updateError, { chatId, workspaceId });
+        return;
+      }
+
+      log('chat_summarize DONE', { chatId, foldedIn: toSummarize.length });
+    } catch (err) {
+      logError('chat_summarize', err, { chatId, workspaceId });
+    }
   },
 
 };

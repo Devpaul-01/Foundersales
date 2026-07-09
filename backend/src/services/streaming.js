@@ -5,7 +5,29 @@
 // Default streaming provider is now Groq (via streamGroq).
 // Pass streamWithFallback from multiProvider.js for multi-model
 // fallback in chat routes.
+//
+// CHAT AUDIT CHANGES:
+//   - increment_chat_stats is now called with ONLY p_chat_id (confirmed
+//     single-param signature) everywhere — this file already called it
+//     that way; chat.js's callers (which were passing an extra
+//     p_increment) have been corrected to match (audit §4.3).
+//   - onError now sets delivery_status: 'failed' on the message row
+//     instead of leaving it at 'sent', so failed generations are
+//     distinguishable from genuinely delivered ones in the DB (audit §6,
+//     low-priority polish item).
+//   - Accepts an optional `citations` array + `images` array, threaded
+//     through from chat.js, so:
+//       * citations (from Exa search) get persisted on the assistant
+//         row instead of being computed and discarded (audit §5.6/§7.1)
+//       * images (vision-capable current-turn attachments) get forwarded
+//         to streamWithFallback so a vision model can actually see them
+//         (audit §5.8)
+//   - maxTokens now defaults from the shared CHAT_MAX_TOKENS constant
+//     instead of a hardcoded 1200, aligning with the non-streaming path
+//     which was hardcoded to 800 (audit §5.4).
 // ============================================================
+
+import { CHAT_MAX_TOKENS } from '../config/constants.js';
 
 /**
  * Initialize SSE response headers.
@@ -26,8 +48,10 @@ export const sendSSE = (res, event, data) => {
     const payload = typeof data === 'string' ? data : JSON.stringify(data);
     res.write(`event: ${event}\ndata: ${payload}\n\n`);
     if (typeof res.flush === 'function') res.flush();
-  } catch {
-    // Client disconnected
+  } catch (err) {
+    // Client disconnected — not actionable, but worth a trace-level note
+    // rather than a fully silent catch (audit "no empty except blocks").
+    console.warn('[Streaming] sendSSE write failed (client likely disconnected):', err.message);
   }
 };
 
@@ -38,31 +62,33 @@ export const endSSE = (res) => {
   try {
     res.write('event: done\ndata: {}\n\n');
     res.end();
-  } catch {
-    // Already closed
+  } catch (err) {
+    console.warn('[Streaming] endSSE failed (stream likely already closed):', err.message);
   }
 };
 
 /**
  * High-level streaming handler for chat routes.
  *
- * @param {object} opts
+ * @param {object}   opts
  * @param {object}   opts.res          - Express response object
  * @param {string}   opts.systemPrompt - System prompt string
  * @param {Array}    opts.messages     - Message history array
  * @param {string}   opts.chatId       - Chat DB row ID
  * @param {string}   opts.userId       - User DB row ID
- * @param {string}   opts.workspaceId  - Workspace DB row ID (required for
- *                                       both the chat_messages insert and
- *                                       for token-usage tracking)
+ * @param {string}   opts.workspaceId  - Workspace DB row ID
  * @param {object}   opts.supabase     - Supabase admin client
  * @param {object}   [opts.metadata]   - Extra fields for the DB row
- * @param {string}   [opts.tier]       - Workspace plan tier, forwarded to recordGroqUsage
- * @param {string}   [opts.sourceJob]  - Label forwarded to recordGroqUsage (defaults to 'chat_stream')
- * @param {Function} [opts.streamFn]   - Streaming function to use.
- *                                       Defaults to streamGroq (primary model).
- *                                       Pass streamWithFallback from multiProvider.js
- *                                       to enable multi-model fallback.
+ * @param {string}   [opts.tier]       - Workspace plan tier
+ * @param {string}   [opts.sourceJob]  - Label forwarded to recordGroqUsage
+ * @param {Function} [opts.streamFn]   - Streaming function (defaults to streamGroq)
+ * @param {Array}    [opts.citations]  - Search citations to persist on the row (audit §5.6)
+ * @param {Array}    [opts.images]     - Current-turn image attachments to forward to
+ *                                       vision-capable models (audit §5.8)
+ * @param {Function}  [opts.onSaved]   - Optional callback fired with the final saved
+ *                                       message row, so callers (chat.js) can trigger
+ *                                       follow-up bookkeeping like summarization checks
+ *                                       without streaming.js needing to know about it.
  */
 export const streamAndSave = async ({
   res,
@@ -75,9 +101,11 @@ export const streamAndSave = async ({
   metadata = {},
   tier = null,
   sourceJob = 'chat_stream',
-  streamFn = null
+  streamFn = null,
+  citations = [],
+  images = undefined,
+  onSaved = null,
 }) => {
-  // Default to Groq primary model if no override provided
   let streamFunction = streamFn;
   if (!streamFunction) {
     const { streamGroq } = await import('./groq.js');
@@ -88,7 +116,6 @@ export const streamAndSave = async ({
 
   initSSE(res);
 
-  // Insert placeholder row
   const { data: messageRow, error: insertError } = await supabase
     .from('chat_messages')
     .insert({
@@ -99,13 +126,15 @@ export const streamAndSave = async ({
       content:         '',
       delivery_status: 'sent',
       is_streamed:     true,
-      model_used:      metadata.model_used || 'groq',
-      ...metadata
+      model_used:      metadata.model_used || 'pending',
+      citations:       citations?.length ? citations : [],
+      ...metadata,
     })
     .select()
     .single();
 
   if (insertError) {
+    console.error('[Streaming] Failed to insert placeholder message:', insertError.message);
     sendSSE(res, 'error', { message: 'Failed to initialize message' });
     endSSE(res);
     return;
@@ -120,7 +149,8 @@ export const streamAndSave = async ({
     systemPrompt,
     messages,
     temperature: 0.7,
-    maxTokens:   1200,
+    maxTokens:   CHAT_MAX_TOKENS,
+    images,
 
     onToken: (token) => {
       if (!clientConnected) return;
@@ -128,9 +158,8 @@ export const streamAndSave = async ({
     },
 
     onComplete: async (content, usage) => {
-      const modelUsed = usage?.model_used || metadata.model_used || 'groq';
+      const modelUsed = usage?.model_used || metadata.model_used || 'unknown';
 
-      // Guard against saving empty responses — surface a recovery message instead
       const finalContent = content?.trim()
         ? content
         : '[Message generation returned an empty response. Please try again.]';
@@ -142,26 +171,19 @@ export const streamAndSave = async ({
           tokens_used:     usage?.tokens_out || 0,
           delivered_at:    new Date().toISOString(),
           delivery_status: 'delivered',
-          model_used:      modelUsed
+          model_used:      modelUsed,
         })
         .eq('id', messageRow.id);
 
-      // ─── Atomic message_count increment ──────────────────────────────────
-      // IMPORTANT: The read-then-write pattern (select count → update count+1)
-      // has a race condition under concurrent sends. Use an RPC for atomicity.
-      //
-      // Required Supabase SQL (run once in SQL editor):
-      //   CREATE OR REPLACE FUNCTION increment_chat_stats(p_chat_id UUID)
-      //   RETURNS void LANGUAGE sql AS $$
-      //     UPDATE chats
-      //     SET message_count  = COALESCE(message_count, 0) + 1,
-      //         last_message_at = NOW()
-      //     WHERE id = p_chat_id;
-      //   $$;
-      //
+      // ─── Atomic message_count increment ──────────────────────────
+      // FIX (audit §4.3): increment_chat_stats() takes ONLY p_chat_id.
+      // chat.js's callers previously passed a second p_increment param
+      // against what may be a different deployed signature — corrected
+      // there; this file was already calling it correctly and is
+      // unchanged in that respect.
       const { error: rpcError } = await supabase.rpc('increment_chat_stats', { p_chat_id: chatId });
       if (rpcError) {
-        // Fallback: non-atomic update if RPC not yet deployed
+        console.error('[Streaming] increment_chat_stats RPC failed, falling back to non-atomic update:', rpcError.message);
         const { data: chat } = await supabase
           .from('chats')
           .select('message_count')
@@ -171,7 +193,7 @@ export const streamAndSave = async ({
           .from('chats')
           .update({
             last_message_at: new Date().toISOString(),
-            message_count:   (chat?.message_count || 0) + 1
+            message_count:   (chat?.message_count || 0) + 1,
           })
           .eq('id', chatId);
       }
@@ -192,9 +214,18 @@ export const streamAndSave = async ({
         sendSSE(res, 'complete', {
           message_id:  messageRow.id,
           tokens_used: tokensOut,
-          model_used:  modelUsed
+          model_used:  modelUsed,
+          citations:   citations?.length ? citations : [],
         });
         endSSE(res);
+      }
+
+      if (typeof onSaved === 'function') {
+        try {
+          await onSaved({ id: messageRow.id, chatId, workspaceId, userId });
+        } catch (err) {
+          console.error('[Streaming] onSaved callback failed:', err.message);
+        }
       }
     },
 
@@ -203,13 +234,16 @@ export const streamAndSave = async ({
 
       await supabase
         .from('chat_messages')
-        .update({ content: '[Message generation failed. Please try again.]' })
+        .update({
+          content:         '[Message generation failed. Please try again.]',
+          delivery_status: 'failed',
+        })
         .eq('id', messageRow.id);
 
       if (clientConnected) {
         sendSSE(res, 'error', { message: 'Generation failed. Please try again.' });
         endSSE(res);
       }
-    }
+    },
   });
 };

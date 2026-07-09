@@ -19,31 +19,24 @@
 // All four use OpenAI-compatible APIs — no separate SDKs needed.
 // Failed keys cool down for 1 hour (in-memory).
 //
-// MODEL SELECTION STRATEGY:
-//   - Mistral: uses provider-managed alias IDs (mistral-small-latest etc.) that
-//     Mistral automatically keeps pointing to their current best model — no manual
-//     updates needed.
-//   - Groq & Cerebras: dynamic model discovery via GET /v1/models at startup,
-//     ranked by MODEL_PRIORITY. Unknown new models are appended automatically.
-//     Falls back gracefully to the static priority list if discovery fails.
-//
-// NOTE: groq.js is no longer imported. This file handles all
-// provider calls directly via fetch against each provider's
-// OpenAI-compatible endpoint.
+// CHAT AUDIT CHANGES (this revision):
+//   - VISION SUPPORT (audit §5.8): callWithFallback / callWithFallbackGroq /
+//     streamWithFallback now accept an optional `images` array
+//     ([{ url: 'data:<mime>;base64,...' }]). Images are only actually
+//     attached to the outgoing request when the model chosen for that
+//     specific attempt is in VISION_CAPABLE_MODELS — every other model in
+//     the fallback queue still gets the plain-text messages exactly as
+//     before. This avoids sending multi-part `content` arrays to providers
+//     that may not expect them, while giving the one vision-capable model
+//     in the queue (Groq's llama-4-scout) the actual image bytes instead
+//     of a "there's an image here, describe it" placeholder it can never
+//     act on.
+//   - model_used is now a clean `${providerId}:${model}` string instead of
+//     the compound `${providerId}-${model}-key${index}` debug string
+//     (audit §5.3). The key index is still used internally for cooldown
+//     bookkeeping and logging — it just isn't leaked into persisted data
+//     / analytics anymore.
 // ============================================================
-
-// ──────────────────────────────────────────
-// MODEL PRIORITY LISTS (static fallback + ranking template)
-//
-// For Groq & Cerebras: these lists drive the ranking of dynamically
-// discovered models. Models listed here that are found at /v1/models
-// are used first (in order). Newly discovered models not in this list
-// are appended at the end as additional fallbacks.
-//
-// For Mistral: used as-is. The alias IDs (e.g. mistral-small-latest)
-// are provider-managed and always resolve to Mistral's current
-// recommended version — no /v1/models discovery needed.
-// ──────────────────────────────────────────
 
 const MODEL_PRIORITY = {
   cerebras: [
@@ -63,17 +56,14 @@ const MODEL_PRIORITY = {
   ],
 
   openrouter: [
-    'meta-llama/llama-3.3-70b-instruct:free', // Best default free model
-    'google/gemma-4-31b-it:free',             // Vision + reasoning
-    'nousresearch/hermes-3-405b:free',        // Highest intelligence
+    'meta-llama/llama-3.3-70b-instruct:free',
+    'google/gemma-4-31b-it:free',
+    'nousresearch/hermes-3-405b:free',
   ],
 };
 
-// FAST tier — cheaper/smaller models for high-volume, low-stakes calls
-// (state-delta scoring, quick classification, etc.). Falls back to the
-// quality-tier list per provider if a provider has no fast-tier entry.
 const FAST_MODEL_PRIORITY = {
-  cerebras: MODEL_PRIORITY.cerebras,           // Cerebras is already fast; no separate tier
+  cerebras: MODEL_PRIORITY.cerebras,
   groq: [
     'llama-3.1-8b-instant',
     ...MODEL_PRIORITY.groq,
@@ -91,23 +81,22 @@ const getModelPriorityForTier = (providerId, tier) =>
     : MODEL_PRIORITY[providerId];
 
 // ──────────────────────────────────────────
-// NON-CHAT MODEL FILTER
-// Patterns matching model IDs that are NOT chat/text-generation models.
-// Used during dynamic discovery to exclude embeddings, speech, guard, etc.
+// VISION-CAPABLE MODELS
+// Only models actually able to interpret image content. Everything else
+// in the fallback queue still receives the text-only messages array —
+// see buildMessagesForProvider below.
 // ──────────────────────────────────────────
+const VISION_CAPABLE_MODELS = new Set([
+  'meta-llama/llama-4-scout-17b-16e-instruct',
+  'google/gemma-4-31b-it:free',
+]);
+
 const NON_CHAT_PATTERN = /whisper|embed|guard|tts|moderation|transcribe|ocr|safeguard|vision-only/i;
 
-// ──────────────────────────────────────────
-// PROVIDER REGISTRY
-// `models` = static fallback list used when dynamic discovery is unavailable.
-//            Also serves as the ranking template for discovery results.
-// ──────────────────────────────────────────
 const PROVIDER_REGISTRY = {
   cerebras: {
     name:      'cerebras',
     baseURL:   'https://api.cerebras.ai/v1',
-    // gpt-oss-120b is the current production model on Cerebras (June 2026).
-    // Legacy llama models kept as fallbacks in case a dedicated endpoint still exposes them.
     models:    MODEL_PRIORITY.cerebras,
     envPrefix: 'CEREBRAS_API_KEY',
     maxKeys:   5,
@@ -115,8 +104,6 @@ const PROVIDER_REGISTRY = {
   groq: {
     name:      'groq',
     baseURL:   'https://api.groq.com/openai/v1',
-    // llama-4-scout: latest Groq production model; also vision-capable (multimodal).
-    // llama-3.3-70b-versatile + llama-3.1-8b-instant remain Groq production models.
     models:    MODEL_PRIORITY.groq,
     envPrefix: 'GROQ_API_KEY',
     maxKeys:   10,
@@ -124,8 +111,6 @@ const PROVIDER_REGISTRY = {
   mistral: {
     name:      'mistral',
     baseURL:   'https://api.mistral.ai/v1',
-    // Provider-managed aliases: Mistral keeps these pointing to the current recommended
-    // version. mistral-small-2506 (Small 3.2) and ministral-8b-2410 are now legacy.
     models:    MODEL_PRIORITY.mistral,
     envPrefix: 'MISTRAL_API_KEY',
     maxKeys:   5,
@@ -133,12 +118,9 @@ const PROVIDER_REGISTRY = {
   openrouter: {
     name:      'openrouter',
     baseURL:   'https://openrouter.ai/api/v1',
-    // Dynamic discovery via /v1/models. Static list here is the ranking template
-    // and fallback in case discovery fails.
     models:    MODEL_PRIORITY.openrouter,
     envPrefix: 'OPENROUTER_API_KEY',
     maxKeys:   5,
-    // OpenRouter recommends sending Referer + X-Title headers for attribution/ranking.
     extraHeaders: {
       'HTTP-Referer': process.env.OPENROUTER_REFERER ?? 'https://localhost',
       'X-Title':      process.env.OPENROUTER_APP_TITLE ?? 'MultiProvider',
@@ -146,14 +128,8 @@ const PROVIDER_REGISTRY = {
   },
 };
 
-// Attempt order: highest free TPM first; OpenRouter is paid so it goes last
 const PROVIDER_ORDER = ['cerebras', 'groq', 'mistral', 'openrouter'];
 
-// ──────────────────────────────────────────
-// KEY POOL BUILDER
-// Reads PROVIDER_API_KEY_1 … _N from env.
-// Falls back to PROVIDER_API_KEY (no suffix).
-// ──────────────────────────────────────────
 const buildKeyPool = (providerDef) => {
   const { name, envPrefix, maxKeys } = providerDef;
   const keys = [];
@@ -163,7 +139,6 @@ const buildKeyPool = (providerDef) => {
     if (key?.trim()) keys.push({ key: key.trim(), index: i, provider: name });
   }
 
-  // Single-key fallback (no suffix)
   if (keys.length === 0 && process.env[envPrefix]?.trim()) {
     keys.push({ key: process.env[envPrefix].trim(), index: 0, provider: name });
   }
@@ -175,10 +150,6 @@ const buildKeyPool = (providerDef) => {
   return keys;
 };
 
-// ──────────────────────────────────────────
-// COOLDOWN STATE (in-memory)
-// Keyed by `providerName-keyIndex`
-// ──────────────────────────────────────────
 const KEY_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
 const keyCooldowns    = new Map();
 
@@ -204,11 +175,6 @@ const isKeyCooling = (provider, keyIndex) => {
   return true;
 };
 
-// ──────────────────────────────────────────
-// ERROR CLASSIFICATION
-// Provider-agnostic — matches HTTP status codes
-// and common error strings from all three APIs.
-// ──────────────────────────────────────────
 const RATE_LIMIT_SIGNALS = ['rate_limit', 'rate limit', '429', 'too many requests', 'quota exceeded'];
 const AUTH_ERROR_SIGNALS = ['401', 'unauthorized', 'invalid api key', 'invalid_api_key', 'authentication'];
 const UNAVAIL_SIGNALS    = ['503', '502', '500', 'unavailable', 'overloaded', 'server error'];
@@ -226,28 +192,13 @@ const isRetryableError = (err) =>
 const shouldCoolKey = (err) =>
   matchesAny(err?.message, [...RATE_LIMIT_SIGNALS, ...AUTH_ERROR_SIGNALS, ...UNAVAIL_SIGNALS]);
 
-// ──────────────────────────────────────────
-// LAZY KEY POOLS (initialized on first use)
-// ──────────────────────────────────────────
 let _pools = null;
 
-// ──────────────────────────────────────────
-// DYNAMIC MODEL DISCOVERY
-//
-// Fetches /v1/models once per provider at startup (fire-and-forget).
-// Results are cached indefinitely for the process lifetime — restart
-// to re-discover after a provider adds/removes models.
-//
-// Mistral is excluded from discovery because it uses provider-managed
-// alias IDs (e.g. mistral-small-latest) that already auto-track the
-// current recommended version.
-// ──────────────────────────────────────────
-const _discoveredModels = {};   // { providerId: string[] }
-const _discoveryDone    = {};   // { providerId: boolean }
+const _discoveredModels = {};
+const _discoveryDone    = {};
 
 const _discoverProviderModels = async (providerId, baseURL, apiKey) => {
   if (providerId === 'mistral') {
-    // Aliases are provider-managed — no discovery needed.
     _discoveredModels[providerId] = MODEL_PRIORITY.mistral;
     _discoveryDone[providerId] = true;
     return;
@@ -264,7 +215,6 @@ const _discoverProviderModels = async (providerId, baseURL, apiKey) => {
     const json   = await res.json();
     const allIds = (json.data || []).map(m => m.id).filter(Boolean);
 
-    // Separate into known-priority models and newly discovered unknown models.
     const priorityList = MODEL_PRIORITY[providerId] || [];
     const known   = priorityList.filter(id => allIds.includes(id));
     const unknown = allIds.filter(id =>
@@ -287,16 +237,8 @@ const _discoverProviderModels = async (providerId, baseURL, apiKey) => {
   _discoveryDone[providerId] = true;
 };
 
-/**
- * Returns the effective model list for a provider.
- * Uses dynamically discovered models when available; falls back to MODEL_PRIORITY.
- */
 const getEffectiveModels = (providerId, tier = 'quality') => {
   if (_discoveryDone[providerId] && _discoveredModels[providerId]?.length > 0) {
-    // Discovered models are already ranked by the quality-tier priority
-    // template. For fast tier, prefer any discovered model that also
-    // appears in the fast-tier static list, otherwise fall back to the
-    // full discovered list (still resilient, just not size-optimized).
     if (tier === 'fast') {
       const fastIds = FAST_MODEL_PRIORITY[providerId] || [];
       const matched = _discoveredModels[providerId].filter(id => fastIds.includes(id));
@@ -316,13 +258,10 @@ const getPools = () => {
       _pools[id] = buildKeyPool(PROVIDER_REGISTRY[id]);
       total += _pools[id].length;
 
-      // Kick off dynamic model discovery in the background (fire-and-forget).
-      // The first few requests will use the static MODEL_PRIORITY list; once
-      // discovery completes, getEffectiveModels() returns the live list.
       const firstKey = _pools[id][0];
       if (firstKey) {
         _discoverProviderModels(id, PROVIDER_REGISTRY[id].baseURL, firstKey.key)
-          .catch(() => {}); // errors are already logged inside _discoverProviderModels
+          .catch((err) => console.warn(`[MultiProvider] ${id} discovery kickoff failed: ${err.message}`));
       }
     }
 
@@ -336,21 +275,42 @@ const getPools = () => {
 };
 
 // ──────────────────────────────────────────
-// GENERIC OpenAI-COMPATIBLE CALLER (non-streaming)
-// Works with Cerebras, Groq, and Mistral — all
-// expose the same /chat/completions endpoint shape.
+// VISION HELPER
+// Attaches image parts to the LAST message in the array (assumed to be
+// the current user turn), but only when the model actually receiving
+// this request is vision-capable. History/system messages are always
+// left as plain strings — we only ever have image bytes for the
+// current turn anyway (see chat.js).
 // ──────────────────────────────────────────
+const buildMessagesForProvider = (messages, images, isVisionCapable) => {
+  if (!isVisionCapable || !images?.length || messages.length === 0) return messages;
+
+  const lastIdx = messages.length - 1;
+  const last    = messages[lastIdx];
+  if (!last || last.role !== 'user' || typeof last.content !== 'string') return messages;
+
+  const content = [
+    { type: 'text', text: last.content || '' },
+    ...images.map(img => ({ type: 'image_url', image_url: { url: img.url } })),
+  ];
+
+  return [...messages.slice(0, lastIdx), { ...last, content }];
+};
+
 const callProvider = async ({
   baseURL, apiKey, model, extraHeaders,
-  messages, systemPrompt, temperature, maxTokens,
+  messages, systemPrompt, temperature, maxTokens, images,
 }) => {
+  const isVisionCapable = VISION_CAPABLE_MODELS.has(model);
+  const finalMessages   = buildMessagesForProvider(messages, images, isVisionCapable);
+
   const body = {
     model,
     max_tokens:  maxTokens   ?? 1024,
     temperature: temperature ?? 0.7,
     messages: [
       ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
-      ...messages,
+      ...finalMessages,
     ],
   };
 
@@ -372,18 +332,17 @@ const callProvider = async ({
   const data    = await res.json();
   const content = data.choices?.[0]?.message?.content ?? '';
   const usage   = data.usage ?? {};
-  return { content, usage };
+  return { content, usage, used_vision: isVisionCapable && !!images?.length };
 };
 
-// ──────────────────────────────────────────
-// GENERIC OpenAI-COMPATIBLE STREAMER
-// Reads SSE chunks and calls onToken per delta.
-// ──────────────────────────────────────────
 const streamProvider = async ({
   baseURL, apiKey, model, extraHeaders,
-  messages, systemPrompt, temperature, maxTokens,
+  messages, systemPrompt, temperature, maxTokens, images,
   onToken, onComplete,
 }) => {
+  const isVisionCapable = VISION_CAPABLE_MODELS.has(model);
+  const finalMessages   = buildMessagesForProvider(messages, images, isVisionCapable);
+
   const body = {
     model,
     max_tokens:  maxTokens   ?? 1024,
@@ -391,7 +350,7 @@ const streamProvider = async ({
     stream:      true,
     messages: [
       ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
-      ...messages,
+      ...finalMessages,
     ],
   };
 
@@ -421,7 +380,7 @@ const streamProvider = async ({
 
     buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split('\n');
-    buffer = lines.pop(); // hold incomplete line for next chunk
+    buffer = lines.pop();
 
     for (const line of lines) {
       const trimmed = line.trim();
@@ -438,22 +397,15 @@ const streamProvider = async ({
           onToken?.(token);
         }
       } catch {
-        // Malformed SSE chunk — skip silently
+        // Malformed SSE chunk — skip silently (upstream provider framing
+        // issue, not something the caller can act on).
       }
     }
   }
 
-  onComplete?.(fullContent, {});
+  onComplete?.(fullContent, { used_vision: isVisionCapable && !!images?.length });
 };
 
-// ──────────────────────────────────────────
-// PROVIDER QUEUE BUILDER
-//
-// Order: Cerebras → Groq → Mistral
-// Within each provider: models are ordered by getEffectiveModels() —
-// either the dynamically discovered + ranked list, or MODEL_PRIORITY fallback.
-// Only healthy (non-cooling) keys are included.
-// ──────────────────────────────────────────
 const buildProviderQueue = (tier = 'quality') => {
   const pools = getPools();
   const queue = [];
@@ -465,7 +417,6 @@ const buildProviderQueue = (tier = 'quality') => {
 
     if (healthy.length === 0) continue;
 
-    // Use dynamically discovered models when available, otherwise static priority list.
     const models = getEffectiveModels(providerId, tier);
 
     for (const model of models) {
@@ -476,7 +427,10 @@ const buildProviderQueue = (tier = 'quality') => {
           keyEntry,
           baseURL:      def.baseURL,
           extraHeaders: def.extraHeaders ?? {},
-          name:         `${providerId}-${model}-key${keyEntry.index}`,
+          // Debug-only label with key index — used for logs and cooldown
+          // bookkeeping. NOT what gets persisted as model_used anymore
+          // (audit §5.3) — see cleanModelUsed below.
+          debugName:    `${providerId}-${model}-key${keyEntry.index}`,
         });
       }
     }
@@ -485,10 +439,9 @@ const buildProviderQueue = (tier = 'quality') => {
   return queue;
 };
 
-// ──────────────────────────────────────────
-// NON-STREAMING: callWithFallback
-// ──────────────────────────────────────────
-export const callWithFallback = async (opts) => {
+const cleanModelUsed = (providerId, model) => `${providerId}:${model}`;
+
+export const callWithFallback = async ({ images, ...opts }) => {
   const queue = buildProviderQueue(opts.tier || 'quality');
 
   if (queue.length === 0) {
@@ -500,7 +453,7 @@ export const callWithFallback = async (opts) => {
 
   for (const provider of queue) {
     try {
-      console.log(`[MultiProvider] Trying ${provider.name}...`);
+      console.log(`[MultiProvider] Trying ${provider.debugName}...`);
 
       const result = await callProvider({
         baseURL:      provider.baseURL,
@@ -511,23 +464,22 @@ export const callWithFallback = async (opts) => {
         systemPrompt: opts.systemPrompt,
         temperature:  opts.temperature,
         maxTokens:    opts.maxTokens,
+        images,
       });
 
-      console.log(`[MultiProvider] ✓ Success via ${provider.name}`);
-      // Normalize to the same shape callGroq() has always returned —
-      // every existing caller destructures tokens_in/tokens_out, and
-      // until now they were silently getting `undefined` for both.
+      console.log(`[MultiProvider] ✓ Success via ${provider.debugName}${result.used_vision ? ' (vision)' : ''}`);
       return {
         content:      result.content,
         tokens_in:    result.usage?.prompt_tokens     || 0,
         tokens_out:   result.usage?.completion_tokens || 0,
         tokens_total: result.usage?.total_tokens       || 0,
-        model_used:   provider.name,
+        model_used:   cleanModelUsed(provider.providerId, provider.model),
+        used_vision:  result.used_vision,
       };
 
     } catch (err) {
       lastError = err;
-      console.warn(`[MultiProvider] ✗ ${provider.name} failed: ${err.message}`);
+      console.warn(`[MultiProvider] ✗ ${provider.debugName} failed: ${err.message}`);
 
       const cid = cooldownId(provider.keyEntry.provider, provider.keyEntry.index);
       if (shouldCoolKey(err) && !cooledThisCall.has(cid)) {
@@ -535,7 +487,7 @@ export const callWithFallback = async (opts) => {
         cooledThisCall.add(cid);
       }
 
-      if (!isRetryableError(err)) throw err; // Non-retryable — bail immediately
+      if (!isRetryableError(err)) throw err;
     }
   }
 
@@ -543,25 +495,11 @@ export const callWithFallback = async (opts) => {
   throw new Error(`ALL_PROVIDERS_FAILED: ${lastError?.message}`);
 };
 
-// ──────────────────────────────────────────
-// callWithFallbackGroq — standardized entry point for all LLM calls.
-// Wraps callWithFallback and auto-records usage via tokenTracker when
-// workspaceId/userId are provided. This is the function every groq-*.js
-// business-logic file should call instead of groq-client.js's callGroq().
-//
-// workspaceId/userId are optional on purpose: a handful of groq-practice.js
-// functions (evaluateBuyerStateChange, generatePracticeInterruption) aren't
-// invoked by any route currently in scope, and their real call sites may or
-// may not have workspace context. Omitting them just means usage isn't
-// tracked for that call (logged via console.warn inside tokenTracker), not
-// a thrown error — this is intentional fail-open behavior so an unseen
-// caller never breaks.
-// ──────────────────────────────────────────
 export const callWithFallbackGroq = async ({
   messages, systemPrompt, temperature, maxTokens, tier = 'quality',
-  workspaceId = null, userId = null, sourceJob = null,
+  workspaceId = null, userId = null, sourceJob = null, images = undefined,
 }) => {
-  const result = await callWithFallback({ messages, systemPrompt, temperature, maxTokens, tier });
+  const result = await callWithFallback({ messages, systemPrompt, temperature, maxTokens, tier, images });
 
   if (workspaceId && userId) {
     const { recordGroqUsage } = await import('./tokenTracker.js');
@@ -574,17 +512,9 @@ export const callWithFallbackGroq = async ({
   return result;
 };
 
-// ──────────────────────────────────────────
-// STREAMING: streamWithFallback
-//
-// Attempts each provider/key in queue order.
-// SSE streams can't switch mid-stream, so if a
-// key fails during streaming we fall through to
-// the next provider for a fresh stream attempt.
-// ──────────────────────────────────────────
 export const streamWithFallback = async ({
   messages, systemPrompt, temperature, maxTokens,
-  onToken, onComplete, onError,
+  onToken, onComplete, onError, images = undefined,
 }) => {
   const queue = buildProviderQueue();
 
@@ -597,7 +527,7 @@ export const streamWithFallback = async ({
 
   for (const provider of queue) {
     try {
-      console.log(`[MultiProvider] Streaming via ${provider.name}`);
+      console.log(`[MultiProvider] Streaming via ${provider.debugName}`);
 
       await streamProvider({
         baseURL:      provider.baseURL,
@@ -608,15 +538,19 @@ export const streamWithFallback = async ({
         systemPrompt,
         temperature,
         maxTokens,
+        images,
         onToken,
-        onComplete: (content, usage) =>
-          onComplete?.(content, { ...usage, model_used: provider.name }),
+        onComplete: (content, meta) =>
+          onComplete?.(content, {
+            ...meta,
+            model_used: cleanModelUsed(provider.providerId, provider.model),
+          }),
       });
 
-      return; // Stream completed successfully
+      return;
 
     } catch (err) {
-      console.warn(`[MultiProvider] Stream failed for ${provider.name}: ${err.message}`);
+      console.warn(`[MultiProvider] Stream failed for ${provider.debugName}: ${err.message}`);
 
       const cid = cooldownId(provider.keyEntry.provider, provider.keyEntry.index);
       if (shouldCoolKey(err) && !cooledThisCall.has(cid)) {
@@ -625,17 +559,12 @@ export const streamWithFallback = async ({
       }
 
       if (!isRetryableError(err)) { onError?.(err); return; }
-      // Otherwise continue to next provider
     }
   }
 
   onError?.(new Error('ALL_PROVIDERS_FAILED: All providers and keys exhausted'));
 };
 
-// ──────────────────────────────────────────
-// UTILITY: Full provider health status
-// Useful for /admin/status or debug endpoints.
-// ──────────────────────────────────────────
 export const getProviderStatus = () => {
   const pools  = getPools();
   const status = [];

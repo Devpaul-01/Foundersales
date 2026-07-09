@@ -318,6 +318,13 @@ export const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10MB
 // ── Chat ──────────────────────────────────────────────────────
 export const CHAT_MESSAGE_MAX_LENGTH = 5000;
 export const MAX_ATTACHMENTS_PER_MESSAGE = 10;
+// Chat audit (task #6): page size for the chat list's infinite-scroll
+// pagination. Mirrors the backend default in config/constants.js —
+// keep these two in sync if either changes.
+export const CHAT_LIST_PAGE_SIZE = 30;
+// Chat audit (§4.1): page size for message pagination. Mirrors the
+// backend's CHAT_MESSAGES_PAGE_SIZE default.
+export const CHAT_MESSAGES_PAGE_SIZE = 30;
 
 // ── Feedback ─────────────────────────────────────────────────
 export const FEEDBACK_OUTCOMES = {

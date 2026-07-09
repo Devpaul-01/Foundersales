@@ -6,7 +6,12 @@ const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 
 interface SSECallbacks {
   onChunk: (content: string) => void;
-  onDone:  (messageId: string) => void;
+  // CHAT AUDIT (§5.6/§7.1): citations are now included on the 'complete'
+  // event when the reply was informed by a web search, so the caller can
+  // optionally render them immediately without waiting on a refetch. The
+  // param is optional — existing callers that only take messageId keep
+  // working unchanged.
+  onDone:  (messageId: string, citations?: string[]) => void;
   onError: (message: string)  => void;
 }
 
@@ -23,7 +28,7 @@ interface SSECallbacks {
  *   data: {"token":"..."}
  *
  *   event: complete
- *   data: {"message_id":"...","tokens_used":42,"model_used":"groq"}
+ *   data: {"message_id":"...","tokens_used":42,"model_used":"groq","citations":[...]}
  *
  *   event: error
  *   data: {"message":"..."}
@@ -74,9 +79,6 @@ export function useSSE() {
         const reader  = response.body.getReader();
         const decoder = new TextDecoder();
         let   buffer  = '';
-        // SSE frames are `event: <name>\ndata: <json>\n\n` — the event
-        // name arrives on its own line ahead of the data line, so we
-        // have to hold onto it until its matching data line shows up.
         let   pendingEvent = '';
 
         // eslint-disable-next-line no-constant-condition
@@ -105,12 +107,13 @@ export function useSSE() {
                 token?:      string;
                 message_id?: string;
                 message?:    string;
+                citations?:  string[];
               };
 
               if (eventName === 'token' && data.token) {
                 callbacks.onChunk(data.token);
               } else if (eventName === 'complete' && data.message_id) {
-                callbacks.onDone(data.message_id);
+                callbacks.onDone(data.message_id, data.citations);
               } else if (eventName === 'error') {
                 callbacks.onError(data.message ?? 'Stream error');
               }

@@ -1,11 +1,17 @@
 // ============================================================
 // FILE: src/pages/chat/ChatListPage.tsx
-// From chat-9.txt HIGH-01: all queries filter by workspace_id
-// NEW: search chats by title, rename chat, delete (archive) chat
+//
+// CHAT AUDIT CHANGE (task #6): chat list is now paginated via
+// useInfiniteQuery. Offset-based (not full keyset) — see
+// IMPLEMENTATION_SUMMARY.md for why: last_message_at is nullable, which
+// makes a clean keyset comparison meaningfully more complex for limited
+// benefit at "hundreds/thousands of chats per user" scale. The backend
+// (chat.js GET /) returns has_more/next_offset using the standard
+// limit+1 trick so this doesn't need a separate COUNT query.
 // ============================================================
 import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { chatApi }     from '@/api/chat';
 import { queryKeys }   from '@/lib/queryKeys';
 import { useToast }    from '@/hooks/useToast';
@@ -13,9 +19,10 @@ import { Button }      from '@/components/ui/Button';
 import { Skeleton }    from '@/components/ui/Skeleton';
 import { EmptyState }  from '@/components/common/index';
 import { formatRelativeDate, cn } from '@/lib/utils';
+import { CHAT_LIST_PAGE_SIZE } from '@/lib/constants';
 import {
   MessageCircle, Plus, ChevronRight, Search, X,
-  MoreVertical, Pencil, Trash2, Check,
+  MoreVertical, Pencil, Trash2, Check, Loader2,
 } from 'lucide-react';
 import type { Chat } from '@/api/types';
 
@@ -26,16 +33,12 @@ const MODE_LABELS: Record<string, string> = {
   followup_coach: 'Follow-up coach',
 };
 
-// Type is now conveyed with a small status dot instead of a colored
-// icon tile on every row — quieter, and scans faster in a long list.
 const TYPE_DOT: Record<string, string> = {
   general:     'bg-text-muted',
   opportunity: 'bg-brand',
   practice:    'bg-purple-500',
 };
 
-// Debounce a fast-changing value (e.g. search input) so we don't fire a
-// network request on every keystroke.
 function useDebouncedValue<T>(value: T, delayMs: number): T {
   const [debounced, setDebounced] = useState(value);
   useEffect(() => {
@@ -104,8 +107,6 @@ function ChatRow({
       className={cn(
         'group relative flex items-center gap-3 px-4 py-3 border-b border-surface-border last:border-0 transition-colors',
         isEditing || isConfirmingDelete ? 'bg-surface-hover' : 'hover:bg-surface-hover cursor-pointer',
-        // Lift this row above its siblings while the dropdown is open, otherwise
-        // the next row in the list (same stacking level) paints over the menu.
         isMenuOpen && 'z-30',
       )}
     >
@@ -196,7 +197,6 @@ function ChatRow({
 
           {isMenuOpen && (
             <>
-              {/* Backdrop to close the menu on outside click */}
               <div className="fixed inset-0 z-40" onClick={onCloseMenu} />
               <div
                 role="menu"
@@ -255,11 +255,26 @@ export default function ChatListPage() {
   const [renameValue, setRenameValue]         = useState('');
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
-  const { data, isLoading } = useQuery({
+  // FIX (task #6): paginated chat list. Re-keyed on `debouncedSearch` so
+  // changing the search term starts a fresh paginated result set instead
+  // of trying to splice pages fetched under a different query.
+  const {
+    data,
+    isLoading,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInfiniteQuery({
     queryKey: [...queryKeys.chats(), { search: debouncedSearch }],
-    queryFn:  () => chatApi.list({ limit: 50, search: debouncedSearch || undefined }).then((r) => r.data.chats),
+    queryFn: ({ pageParam }: { pageParam?: number }) =>
+      chatApi.list({ limit: CHAT_LIST_PAGE_SIZE, offset: pageParam ?? 0, search: debouncedSearch || undefined })
+        .then((r) => r.data),
     staleTime: 30_000,
+    initialPageParam: 0,
+    getNextPageParam: (lastPage) => (lastPage.has_more ? lastPage.next_offset ?? undefined : undefined),
   });
+
+  const chats = (data?.pages ?? []).flatMap((p) => p.chats);
 
   const newChatMutation = useMutation({
     mutationFn: () => chatApi.create({ chat_type: 'general', chat_mode: 'general' }).then((r) => r.data.chat),
@@ -300,9 +315,9 @@ export default function ChatListPage() {
       <div className="flex items-end justify-between">
         <div>
           <h1 className="text-lg font-semibold text-text-primary tracking-tight">Chat</h1>
-          {!!data?.length && (
+          {!!chats.length && (
             <p className="text-xs text-text-muted mt-0.5">
-              {data.length} conversation{data.length === 1 ? '' : 's'}
+              {chats.length}{hasNextPage ? '+' : ''} conversation{chats.length === 1 && !hasNextPage ? '' : 's'}
             </p>
           )}
         </div>
@@ -322,6 +337,7 @@ export default function ChatListPage() {
           value={searchInput}
           onChange={(e) => setSearchInput(e.target.value)}
           placeholder="Search chats by title…"
+          aria-label="Search chats by title"
           className="w-full text-sm bg-white border border-surface-border rounded-lg pl-9 pr-8 py-2 outline-none focus:border-brand text-text-primary placeholder:text-text-muted"
         />
         {searchInput && (
@@ -339,9 +355,6 @@ export default function ChatListPage() {
       <div
         className={cn(
           'bg-white border border-surface-border rounded-lg',
-          // overflow-hidden gives the list its rounded corners, but it also
-          // clips any dropdown menu that pops out past a row's edge. Only
-          // clip when nothing is open.
           openMenuId ? 'overflow-visible' : 'overflow-hidden',
         )}
       >
@@ -357,7 +370,7 @@ export default function ChatListPage() {
               </div>
             ))}
           </div>
-        ) : !data?.length ? (
+        ) : !chats.length ? (
           hasSearch ? (
             <EmptyState
               icon={<Search size={22} />}
@@ -374,30 +387,44 @@ export default function ChatListPage() {
             />
           )
         ) : (
-          data.map((chat) => (
-            <ChatRow
-              key={chat.id}
-              chat={chat}
-              isMenuOpen={openMenuId === chat.id}
-              isEditing={editingId === chat.id}
-              isConfirmingDelete={confirmDeleteId === chat.id}
-              renameValue={renameValue}
-              isRenamePending={renameMutation.isPending && renameMutation.variables?.chatId === chat.id}
-              isDeletePending={deleteMutation.isPending && deleteMutation.variables === chat.id}
-              onOpenMenu={() => setOpenMenuId(chat.id)}
-              onCloseMenu={() => setOpenMenuId(null)}
-              onStartRename={() => {
-                setRenameValue(chat.title);
-                setEditingId(chat.id);
-              }}
-              onRenameValueChange={setRenameValue}
-              onCommitRename={() => handleCommitRename(chat.id)}
-              onCancelRename={() => setEditingId(null)}
-              onStartDelete={() => setConfirmDeleteId(chat.id)}
-              onCancelDelete={() => setConfirmDeleteId(null)}
-              onConfirmDelete={() => deleteMutation.mutate(chat.id)}
-            />
-          ))
+          <>
+            {chats.map((chat) => (
+              <ChatRow
+                key={chat.id}
+                chat={chat}
+                isMenuOpen={openMenuId === chat.id}
+                isEditing={editingId === chat.id}
+                isConfirmingDelete={confirmDeleteId === chat.id}
+                renameValue={renameValue}
+                isRenamePending={renameMutation.isPending && renameMutation.variables?.chatId === chat.id}
+                isDeletePending={deleteMutation.isPending && deleteMutation.variables === chat.id}
+                onOpenMenu={() => setOpenMenuId(chat.id)}
+                onCloseMenu={() => setOpenMenuId(null)}
+                onStartRename={() => {
+                  setRenameValue(chat.title);
+                  setEditingId(chat.id);
+                }}
+                onRenameValueChange={setRenameValue}
+                onCommitRename={() => handleCommitRename(chat.id)}
+                onCancelRename={() => setEditingId(null)}
+                onStartDelete={() => setConfirmDeleteId(chat.id)}
+                onCancelDelete={() => setConfirmDeleteId(null)}
+                onConfirmDelete={() => deleteMutation.mutate(chat.id)}
+              />
+            ))}
+            {hasNextPage && (
+              <div className="flex justify-center py-3 border-t border-surface-border">
+                <button
+                  onClick={() => fetchNextPage()}
+                  disabled={isFetchingNextPage}
+                  className="flex items-center gap-1.5 text-xs text-text-muted hover:text-brand px-3 py-1.5 rounded-full hover:bg-brand-50 transition-colors disabled:opacity-50"
+                >
+                  {isFetchingNextPage && <Loader2 size={12} className="animate-spin" />}
+                  {isFetchingNextPage ? 'Loading…' : 'Load more chats'}
+                </button>
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>

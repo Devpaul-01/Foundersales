@@ -41,7 +41,6 @@ const authenticate = async (req, res, next) => {
     });
   }
 
-  console.log("authentication required");
 
   const token = authHeader.slice(7);
 

@@ -1,103 +1,116 @@
-// src/routes/chat.js — WORKSPACE REFACTOR
+// src/routes/chat.js — CHAT AUDIT IMPLEMENTATION
 //
-// FIXES APPLIED:
-//  HIGH-01: All chat queries and inserts now include workspace_id.
-//            - GET / (list chats) filters by workspace_id
-//            - POST / (create chat) inserts with workspace_id
-//            - GET /:chatId fetches by workspace_id
-//            - POST /:chatId/message filters by workspace_id
-//            - All chat_messages inserts include workspace_id
-//  HIGH-05 (read-side): user_memory read in POST /:chatId/message now
-//            filters by workspace_id. The write side (memoryExtractionJob)
-//            was already fixed; the read side here was missed, meaning
-//            memory facts from other workspaces could surface in chat.
-//  HIGH-11: Perplexity/Exa search now uses workspace-level quota
-//            workspace-level quota (checkWorkspacePerplexityUsage)
-//            instead of per-user quota functions.
-//  LOW-07:  chatMessageSchema validates POST /:chatId/message body,
-//            enforcing message max 5000 chars.
-//  LOW-08:  buildChatSystemPrompt is now called unconditionally (the
-//            optional-chaining guard `groqService.buildChatSystemPrompt ?`
-//            has been removed now that the function exists on groqService).
-//  LOGGER:  Local inline log/logError/logDB/logAI functions replaced with
-//            createLogger('Chat') from utils/logger.js for consistency.
+// CARRIED FORWARD FROM PRIOR WORKSPACE REFACTOR:
+//  HIGH-01: All chat queries and inserts include workspace_id.
+//  HIGH-05 (read-side): user_memory read scoped to workspace_id.
+//  HIGH-11: Perplexity/Exa search uses workspace-level quota.
+//  LOW-07:  chatMessageSchema validates POST /:chatId/message body.
+//  LOW-08:  buildChatSystemPrompt called unconditionally.
 //  MED-07:  Opportunity ownership checks include workspace_id.
-//  Token tracking: handled automatically by callWithFallbackGroq.
-//  NEW:     User messages now persist their `attachments` metadata (name/
-//            type/url) as structured data instead of only folding it into
-//            the AI prompt text. REQUIRES a migration if the column doesn't
-//            already exist:
-//              ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS
-//                attachments jsonb DEFAULT NULL;
-//  NEW (attachment context in history): `content` now stores the raw user
-//            message text only. Processed attachment content (extracted
-//            PDF/doc text) is stored separately in `attachment_context`, so
-//            it's available as structured data for later turns instead of
-//            being permanently baked into `content`. REQUIRES:
-//              ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS
-//                attachment_context jsonb DEFAULT NULL;
-//            When history is replayed for the AI on a later turn, older
-//            messages' attachments are re-included as a heavily-truncated
-//            summary (attachmentProcessor.buildAttachmentHistorySummary),
-//            capped by an aggregate char budget across the whole history
-//            window, rather than resending full document text on every
-//            subsequent message (previous behavior — silent token bloat as
-//            a conversation grows). The CURRENT turn's attachments still
-//            get full processed content, same as before.
-
+//
+// CHAT AUDIT FIXES APPLIED (this revision):
+//  §4.1 CRITICAL — Message pagination was oldest-first with no way to
+//        reach recent messages past 50. GET /:chatId now uses a stable
+//        keyset cursor (the new `seq` bigserial column — see
+//        migration_001) to fetch the LATEST N messages and page
+//        backward in time via `before_seq`, matching how ChatPage.tsx's
+//        new infinite-scroll "load earlier" now works.
+//  §4.2 CRITICAL — POST /with-message never fed growth-card/opportunity
+//        context to the model on a chat's first message, even though it
+//        persisted that context as a system row for display. Both
+//        /with-message and the inline logic in /:chatId/message now go
+//        through the SAME shared buildSystemPromptForChat() helper used
+//        by regenerate/edit, which fetches + injects both.
+//  §4.3 CRITICAL — increment_chat_stats() was called with a second
+//        p_increment param in five places here, against a single-param
+//        p_chat_id signature elsewhere (confirmed as the only deployed
+//        version). All call sites now call it with p_chat_id only.
+//  §5.1 / §5.2 — Growth-card context was being replayed twice (once via
+//        buildGrowthCardSystemMessage, once via unfiltered history
+//        replay of the system-role row inserted at chat creation), while
+//        opportunity context had no re-injection at all and silently
+//        fell out of the model's context after ~4 turns. Fixed by (a)
+//        excluding role='system' rows from ALL history replay queries —
+//        those rows exist for the UI's display, not for re-feeding to
+//        the model — and (b) adding opportunity-context fetch+injection
+//        to buildSystemPromptForChat alongside growth-card context, so
+//        both are freshly re-injected every turn instead of relying on
+//        a single historical copy.
+//  §5.4 — maxTokens is now the shared CHAT_MAX_TOKENS constant on both
+//        the streaming and non-streaming paths (was 1200 vs 800).
+//  §5.6 / §7.1 — searchForChat's citations were computed and discarded.
+//        Now captured and persisted on the assistant message row
+//        (chat_messages.citations, already jsonb in the schema).
+//  §5.7 — chat_mode is now validated against CHAT_MODE_VALUES wherever
+//        it's accepted from the client (message send, chat creation,
+//        with-message).
+//  §5.8 — Current-turn image attachments are extracted and forwarded to
+//        multiProvider.js so a vision-capable model in the fallback
+//        queue can actually see them, instead of only ever getting a
+//        text placeholder. See attachmentProcessor.extractImageParts().
+//  §9   — buildSystemPromptForChat is now the SINGLE shared helper used
+//        by all four generation entry points (message, with-message,
+//        regenerate, edit) instead of three slightly different inline
+//        implementations.
+//  Dead code — the unused `needsChatSearch` import has been dropped.
+//        Per explicit product decision, auto-search stays OFF; the
+//        manual `force_search` toggle is the only way search fires.
+//        (needsChatSearch itself is left intact in exa.js in case it's
+//        wired up deliberately later — just no longer imported here.)
+//
+// NEW (task instructions):
+//  #8 — CHAT_SUMMARIZE background job: maybeEnqueueSummarization() fires
+//       (fire-and-forget) after every successful assistant reply. Once a
+//       chat has accumulated CHAT_SUMMARIZE_EVERY_N_MESSAGES new
+//       non-system messages since its last summary, a job is enqueued to
+//       fold everything older than the live history window into
+//       chats.summary (see backgroundWorker.js). buildSystemPromptForChat
+//       prepends that summary to the system prompt when present.
+//  #9 — CHAT_HISTORY_WINDOW raised from 8 → 20 (constants.js), replayed
+//       from the stable `seq` column instead of created_at.
+//
 import { Router } from 'express';
 import { asyncHandler } from '../middleware/errorHandler.js';
-import { CHAT_TYPES } from '../config/constants.js';
+import { CHAT_TYPES, CHAT_MODES, CHAT_MODE_VALUES, CHAT_HISTORY_WINDOW,
+         CHAT_MAX_TOKENS, CHAT_SUMMARIZE_EVERY_N_MESSAGES,
+         CHAT_MESSAGES_PAGE_SIZE, CHAT_LIST_PAGE_SIZE,
+         BACKGROUND_JOB_TYPES } from '../config/constants.js';
 import { buildUserContext } from '../middleware/workspace.js';
 import { createLogger } from '../utils/logger.js';
+import { backgroundQueue } from '../config/bullmq.js';
 
 import { callWithFallbackGroq, streamWithFallback } from '../services/multiProvider.js';
 import groqService from '../services/groq.js';
 import { streamAndSave, initSSE, sendSSE, endSSE } from '../services/streaming.js';
 
-import { needsChatSearch, searchForChat } from '../services/exa.js';
-import {checkWorkspaceExaUsage} from '../services/tokenTracker.js';
-import { preprocessAttachmentsForGrok, buildGrokAttachmentPrompt, buildAttachmentHistorySummary } from '../utils/attachmentProcessor.js';
+import { searchForChat } from '../services/exa.js';
+import { checkWorkspaceExaUsage } from '../services/tokenTracker.js';
+import {
+  preprocessAttachmentsForGrok,
+  buildGrokAttachmentPrompt,
+  buildAttachmentHistorySummary,
+  extractImageParts,
+} from '../utils/attachmentProcessor.js';
 
 // Aggregate char budget for attachment context pulled back in from OLDER
-// messages when replaying history for the AI. This is separate from (and
-// much smaller than) the per-message attachment budget in
-// attachmentProcessor.js — it exists so that a chat with many past
-// attachment-bearing turns doesn't keep re-billing tokens for all of them,
-// every single subsequent message, forever. Spent newest-first so the most
-// recently discussed attachments get priority over ones from far earlier.
+// messages when replaying history for the AI.
 const MAX_HISTORY_ATTACHMENT_CONTEXT_CHARS = 2000;
 
 import { generateMeetingNotesResponse } from '../services/groqCalendarIntelligence.js';
 import supabaseAdmin from '../config/supabase.js';
 import { z } from 'zod';
 
-// Supabase's query builder returned by .rpc()/.from() is only a "thenable"
-// (it implements .then() so `await`/Promise.all work), not a real Promise
-// instance — so .catch()/.finally() aren't guaranteed to exist on it. Calling
-// .catch() directly on it can throw synchronously ("...catch is not a
-// function"), which for a fire-and-forget bookkeeping call turns into an
-// unhandled exception that fails the whole request. Wrapping in
-// Promise.resolve() guarantees a real Promise before we swallow the error.
-const fireAndForget = (builder) => Promise.resolve(builder).catch(() => {});
+// Supabase's query builder is only "thenable", not a real Promise — see
+// prior audit note. Promise.resolve() guarantees .catch() is safe to call.
+const fireAndForget = (builder) => Promise.resolve(builder).catch((err) => {
+  logError('fireAndForget', err instanceof Error ? err : new Error(String(err)));
+});
 
 const router = Router();
 
-// ── Centralised logger (LOGGER FIX) ─────────────────────────
-// Previously this file defined inline log/logError/logDB/logAI functions.
-// All routes now use the shared createLogger utility for consistency.
 const { log, logError, logDB, logAI } = createLogger('Chat');
 
-const CHAT_MODES = {
-  GENERAL:        'general',
-  MEETING_NOTES:  'meeting_notes',
-  PREP:           'prep',
-  FOLLOWUP_COACH: 'followup_coach',
-};
-
 // ── Growth card helper ───────────────────────────────────────
-// Fetches a growth card (scoped to workspace + user), builds a rich system
-// message from it, and returns the card data so callers can store the id.
 async function fetchGrowthCard(growthCardId, userId, workspaceId) {
   if (!growthCardId) return null;
   const { data: card, error } = await supabaseAdmin
@@ -126,22 +139,77 @@ function buildGrowthCardSystemMessage(card) {
   ).slice(0, 4000);
 }
 
-// ── Shared helpers for AI turns (message / regenerate / edit) ─
-// Factored out so regenerate + edit-and-regenerate don't have to duplicate
-// the system-prompt assembly and history-replay logic that already lived
-// inline in POST /:chatId/message.
+// ── Opportunity context helper (audit §5.2 — NEW) ─────────────
+// Unlike growth cards, opportunity context previously had NO re-injection
+// mechanism at all — it was written once as a system row at chat creation
+// and then fell out of the model's context window after ~4 turns. This
+// fetches a short, budget-capped version fresh on every turn instead.
+async function fetchOpportunityContext(opportunityId, workspaceId) {
+  if (!opportunityId) return null;
+  const { data: opp, error } = await supabaseAdmin
+    .from('opportunities')
+    .select('target_name, target_context, prepared_message, platform')
+    .eq('id', opportunityId)
+    .eq('workspace_id', workspaceId)
+    .single();
+  if (error || !opp) return null;
+  return opp;
+}
 
+function buildOpportunityContextMessage(opp) {
+  return (
+    `Context: You're helping with outreach for someone on ${opp.platform}${opp.target_name ? ` (${opp.target_name})` : ''}.\n\n` +
+    `Their situation: ${opp.target_context}\n\n` +
+    `Draft message so far: ${opp.prepared_message || 'none yet'}`
+  ).slice(0, 2000);
+}
+
+// ── Chat summarization trigger (task #8 — NEW) ────────────────
+// Fire-and-forget check run after every successful assistant reply. Only
+// enqueues a job once CHAT_SUMMARIZE_EVERY_N_MESSAGES new non-system
+// messages have accumulated since the last summarization run, so this
+// isn't hammering the queue on every single turn. The jobId makes
+// duplicate enqueues for the same chat/count a safe no-op in BullMQ.
+async function maybeEnqueueSummarization(chatId, workspaceId, userId) {
+  try {
+    const { data: chat, error: chatErr } = await supabaseAdmin
+      .from('chats')
+      .select('last_summarized_message_count')
+      .eq('id', chatId)
+      .single();
+    if (chatErr || !chat) return;
+
+    const { count: nonSystemCount, error: countErr } = await supabaseAdmin
+      .from('chat_messages')
+      .select('id', { count: 'exact', head: true })
+      .eq('chat_id', chatId)
+      .neq('role', 'system');
+    if (countErr) { logError('maybeEnqueueSummarization_count', countErr, { chatId }); return; }
+
+    const newSince = (nonSystemCount || 0) - (chat.last_summarized_message_count || 0);
+    if (newSince < CHAT_SUMMARIZE_EVERY_N_MESSAGES) return;
+
+    await backgroundQueue.add(
+      BACKGROUND_JOB_TYPES.CHAT_SUMMARIZE,
+      { chatId, workspaceId, userId },
+      { jobId: `chat_summarize:${chatId}:${nonSystemCount}` },
+    );
+    log('CHAT_SUMMARIZE_ENQUEUED', { chatId, workspaceId, nonSystemCount });
+  } catch (err) {
+    logError('maybeEnqueueSummarization', err, { chatId, workspaceId });
+  }
+}
+
+// ── Shared helpers for AI turns (message / regenerate / edit / with-message) ─
+// Consolidated per audit §9 — this is now the ONE place growth-card and
+// opportunity context get fetched and prepended, used by every generation
+// entry point in this file.
 async function buildSystemPromptForChat(req, chat, effectiveChatMode) {
   const userId      = req.user.id;
   const workspaceId = req.workspace.id;
   const userCtx     = buildUserContext(req);
 
-  // These four lookups are all independent — none of them depends on the
-  // result of another — but were previously awaited one after another,
-  // costing 3-4 sequential DB round-trips before the model call could even
-  // start. Running them together turns that into one round-trip's worth
-  // of wall-clock time.
-  const [memFactsResult, goalsResult, checkInResult, growthCard] = await Promise.all([
+  const [memFactsResult, goalsResult, checkInResult, growthCard, opportunityContext] = await Promise.all([
     req.user.memory_enabled !== false
       ? supabaseAdmin
           .from('user_memory')
@@ -168,6 +236,7 @@ async function buildSystemPromptForChat(req, chat, effectiveChatMode) {
       .limit(1)
       .maybeSingle(),
     chat.growth_card_id ? fetchGrowthCard(chat.growth_card_id, userId, workspaceId) : Promise.resolve(null),
+    chat.opportunity_id ? fetchOpportunityContext(chat.opportunity_id, workspaceId) : Promise.resolve(null),
   ]);
 
   let memoryContext = '';
@@ -181,24 +250,44 @@ async function buildSystemPromptForChat(req, chat, effectiveChatMode) {
     latestMood: checkInResult.data?.mood_score || null,
   });
 
-  const finalSystemPrompt = growthCard
-    ? buildGrowthCardSystemMessage(growthCard) + '\n\n' + systemPrompt
-    : systemPrompt;
+  // Layer context, most-specific-first: growth card / opportunity (if
+  // any), then a rolling conversation summary (if the chat has run long
+  // enough to have one — task #8), then the base system prompt.
+  let finalSystemPrompt = systemPrompt;
+  if (chat.summary) {
+    finalSystemPrompt = `Summary of the conversation so far (earlier messages not repeated below):\n${chat.summary}\n\n${finalSystemPrompt}`;
+  }
+  if (opportunityContext) {
+    finalSystemPrompt = buildOpportunityContextMessage(opportunityContext) + '\n\n' + finalSystemPrompt;
+    log('OPPORTUNITY_CONTEXT_INJECTED', { chatId: chat.id });
+  }
+  if (growthCard) {
+    finalSystemPrompt = buildGrowthCardSystemMessage(growthCard) + '\n\n' + finalSystemPrompt;
+    log('GROWTH_CARD_CONTEXT_INJECTED', { chatId: chat.id, cardId: growthCard.id });
+  }
 
   return { finalSystemPrompt, userCtx };
 }
 
-// Replays the last N turns of a chat into the shape the model expects,
-// folding in condensed attachment context the same way /:chatId/message
-// does. Pass `excludeMessageId` to drop a specific row (e.g. a stale
-// assistant reply that's about to be regenerated) before it's re-sent.
-async function getHistoryMessages(chatId, { excludeMessageId, limit = 8 } = {}) {
-  const { data: history } = await supabaseAdmin
+// Replays the last N turns of a chat into the shape the model expects.
+// FIX §5.1/§5.2: excludes role='system' rows — those are one-time display
+// context for the UI, not something that should be replayed into the
+// model's history now that buildSystemPromptForChat re-injects fresh
+// growth-card/opportunity context on every turn. Ordered by the stable
+// `seq` column (not created_at) to match the pagination fix.
+async function getHistoryMessages(chatId, { excludeMessageId, limit = CHAT_HISTORY_WINDOW } = {}) {
+  const { data: history, error } = await supabaseAdmin
     .from('chat_messages')
     .select('id, role, content, attachment_context')
     .eq('chat_id', chatId)
-    .order('created_at', { ascending: false })
+    .neq('role', 'system')
+    .order('seq', { ascending: false })
     .limit(limit);
+
+  if (error) {
+    logError('getHistoryMessages', error, { chatId });
+    return [];
+  }
 
   let historyAttachmentBudget = MAX_HISTORY_ATTACHMENT_CONTEXT_CHARS;
   return (history || [])
@@ -216,13 +305,13 @@ async function getHistoryMessages(chatId, { excludeMessageId, limit = 8 } = {}) 
 }
 
 // Runs the model against an already-assembled message list and persists the
-// reply, handling both the streaming and non-streaming response shapes.
-// Used by regenerate and edit-and-regenerate, which (unlike the main send
-// endpoint) never need to insert a *new* user message — the history they
-// pass in already ends with the user turn to respond to.
+// reply. Used by regenerate and edit-and-regenerate.
 async function generateAndSaveAssistantReply({
   res, stream, finalSystemPrompt, messagesForAI, chatId, userId, workspaceId, userCtx, sourceJob,
+  citations = [], images = undefined,
 }) {
+  log('GENERATE_REPLY_START', { userId, chatId, sourceJob, stream, historyCount: messagesForAI.length });
+
   if (stream) {
     try {
       await streamAndSave({
@@ -236,14 +325,20 @@ async function generateAndSaveAssistantReply({
         streamFn:     streamWithFallback,
         tier:         userCtx.tier,
         sourceJob,
+        citations,
+        images,
+        onSaved: () => maybeEnqueueSummarization(chatId, workspaceId, userId),
       });
+      log('GENERATE_REPLY_STREAM_OK', { userId, chatId, sourceJob });
     } catch (err) {
-      logError(sourceJob, err, { userId, chatId });
+      logError(sourceJob, err, { userId, chatId, stream: true });
       if (!res.headersSent) initSSE(res);
       try {
         sendSSE(res, 'error', { message: 'Stream failed' });
         endSSE(res);
-      } catch { /* response already closed */ }
+      } catch (sseErr) {
+        logError(`${sourceJob}_sseCloseFailed`, sseErr, { userId, chatId });
+      }
     }
     return;
   }
@@ -252,10 +347,11 @@ async function generateAndSaveAssistantReply({
     systemPrompt: finalSystemPrompt,
     messages:     messagesForAI,
     temperature:  0.7,
-    maxTokens:    800,
+    maxTokens:    CHAT_MAX_TOKENS,
     userId,
     workspaceId,
     sourceJob,
+    images,
   });
 
   const { data: aiMsg, error: insertError } = await supabaseAdmin
@@ -266,22 +362,34 @@ async function generateAndSaveAssistantReply({
       workspace_id: workspaceId,
       role:         'assistant',
       content:      aiContent || 'I encountered an error. Please try again.',
+      citations:    citations?.length ? citations : [],
     })
     .select()
     .single();
 
   if (insertError) { logError(sourceJob, insertError, { userId, chatId }); throw insertError; }
 
-  // Bookkeeping — not something the client needs to wait on before it gets
-  // its reply back.
-  fireAndForget(supabaseAdmin.rpc('increment_chat_stats', { p_chat_id: chatId, p_increment: 1 }));
-  supabaseAdmin.from('chats').update({ last_message_at: new Date().toISOString() }).eq('id', chatId)
-    .then(({ error }) => { if (error) logError(sourceJob, error, { userId, chatId, step: 'update_last_message_at' }); });
+  // FIX §4.3: single-param signature only.
+  const { error: rpcError } = await supabaseAdmin.rpc('increment_chat_stats', { p_chat_id: chatId });
+  if (rpcError) {
+    logError(`${sourceJob}_incrementStats`, rpcError, { userId, chatId });
+    fireAndForget(
+      supabaseAdmin.from('chats').update({ last_message_at: new Date().toISOString() }).eq('id', chatId)
+    );
+  } else {
+    fireAndForget(
+      supabaseAdmin.from('chats').update({ last_message_at: new Date().toISOString() }).eq('id', chatId)
+    );
+  }
 
+  log('GENERATE_REPLY_NONSTREAM_OK', { userId, chatId, sourceJob, aiMessageId: aiMsg?.id });
   res.json({ message: aiMsg });
+
+  maybeEnqueueSummarization(chatId, workspaceId, userId).catch((err) =>
+    logError('maybeEnqueueSummarization_afterNonStream', err, { chatId }));
 }
 
-// ── FIX LOW-07: Input validation schema for message endpoint ─
+// ── FIX LOW-07 / §5.7: Input validation schema for message endpoint ─
 const chatMessageSchema = z.object({
   message: z.string().min(1).max(5000, 'Message cannot exceed 5000 characters'),
   stream: z.boolean().optional(),
@@ -291,7 +399,7 @@ const chatMessageSchema = z.object({
     type: z.string().max(100),
     url:  z.string().url().optional(),
   })).max(10).optional(),
-  chat_mode: z.string().optional(),
+  chat_mode: z.enum(CHAT_MODE_VALUES).optional(),
   growth_card_id: z.string().uuid().optional(),
 });
 
@@ -309,13 +417,21 @@ const validateChatMessage = (req, res, next) => {
 
 // ──────────────────────────────────────────
 // GET /api/chat
-// FIX HIGH-01: added workspace_id filter
+// FIX §6 (task #6): chat list pagination. Offset-based (not full keyset)
+// — deliberate tradeoff, see IMPLEMENTATION_SUMMARY.md: last_message_at is
+// nullable, which makes a clean keyset comparison materially more complex
+// for limited benefit at "hundreds/thousands of chats per user" scale.
+// Returns has_more/next_offset via the standard limit+1 trick instead of
+// a separate COUNT query.
 // ──────────────────────────────────────────
 router.get('/', asyncHandler(async (req, res) => {
-  const { type, mode, limit = 20, offset = 0, search } = req.query;
+  const { type, mode, limit = CHAT_LIST_PAGE_SIZE, offset = 0, search } = req.query;
   const userId      = req.user.id;
   const workspaceId = req.workspace.id;
-  log('LIST_CHATS', { userId, workspaceId, type, mode, limit, offset, search });
+  const limitNum    = Math.min(parseInt(limit) || CHAT_LIST_PAGE_SIZE, 100);
+  const offsetNum   = Math.max(parseInt(offset) || 0, 0);
+
+  log('LIST_CHATS', { userId, workspaceId, type, mode, limit: limitNum, offset: offsetNum, search });
 
   let query = supabaseAdmin
     .from('chats')
@@ -324,36 +440,38 @@ router.get('/', asyncHandler(async (req, res) => {
       created_at, updated_at, last_message_at, message_count, is_archived
     `)
     .eq('user_id', userId)
-    .eq('workspace_id', workspaceId)   // FIX HIGH-01
+    .eq('workspace_id', workspaceId)
     .eq('is_archived', false)
     .order('last_message_at', { ascending: false, nullsFirst: false })
-    .range(parseInt(offset), parseInt(offset) + parseInt(limit) - 1);
+    .order('seq', { ascending: false })
+    // Fetch one extra row so we know whether there's a next page without
+    // a separate COUNT(*) query.
+    .range(offsetNum, offsetNum + limitNum);
 
   if (type) query = query.eq('chat_type', type);
   if (mode) query = query.eq('chat_mode', mode);
 
-  // NEW: search chats by title. Escape ILIKE wildcards (% and _) so user
-  // input can't accidentally (or deliberately) turn into a broader pattern
-  // match than intended, and cap length defensively.
   if (search && typeof search === 'string' && search.trim()) {
     const escaped = search.trim().slice(0, 200).replace(/[%_]/g, (c) => `\\${c}`);
     query = query.ilike('title', `%${escaped}%`);
   }
 
-  const { data: chats, error } = await query;
+  const { data: rows, error } = await query;
   if (error) {
     logError('LIST_CHATS', error, { userId });
     throw error;
   }
 
-  log('LIST_CHATS_OK', { userId, count: chats?.length || 0 });
-  res.json({ chats: chats || [] });
+  const hasMore   = (rows || []).length > limitNum;
+  const chats     = (rows || []).slice(0, limitNum);
+  const nextOffset = hasMore ? offsetNum + limitNum : null;
+
+  log('LIST_CHATS_OK', { userId, count: chats.length, hasMore });
+  res.json({ chats, has_more: hasMore, next_offset: nextOffset });
 }));
 
 // ──────────────────────────────────────────
 // POST /api/chat
-// FIX HIGH-01: chats insert includes workspace_id
-// FIX MED-07:  opportunity ownership check includes workspace_id
 // ──────────────────────────────────────────
 router.post('/', asyncHandler(async (req, res) => {
   const {
@@ -371,8 +489,14 @@ router.post('/', asyncHandler(async (req, res) => {
       message: `chat_type must be one of: ${Object.values(CHAT_TYPES).join(', ')}`,
     });
   }
+  // FIX §5.7: chat_mode is now validated the same way chat_type already was.
+  if (chat_mode && !CHAT_MODE_VALUES.includes(chat_mode)) {
+    return res.status(400).json({
+      error:   'VALIDATION_ERROR',
+      message: `chat_mode must be one of: ${CHAT_MODE_VALUES.join(', ')}`,
+    });
+  }
 
-  // Fetch growth card early so we can use its title if needed
   const growthCard = await fetchGrowthCard(growth_card_id, userId, workspaceId);
   if (growth_card_id && !growthCard) {
     return res.status(404).json({ error: 'NOT_FOUND', message: 'Growth card not found' });
@@ -387,7 +511,7 @@ router.post('/', asyncHandler(async (req, res) => {
         .from('opportunities')
         .select('target_name, target_context, platform')
         .eq('id', opportunity_id)
-        .eq('workspace_id', workspaceId)   // FIX MED-07
+        .eq('workspace_id', workspaceId)
         .or(`user_id.eq.${userId},assigned_to.eq.${userId}`)
         .single();
       chatTitle = opp ? `Outreach: ${opp.target_name || opp.platform}` : 'New conversation';
@@ -401,7 +525,7 @@ router.post('/', asyncHandler(async (req, res) => {
     .from('chats')
     .insert({
       user_id:        userId,
-      workspace_id:   workspaceId,   // FIX HIGH-01
+      workspace_id:   workspaceId,
       title:          chatTitle,
       chat_type,
       chat_mode:      chat_mode || CHAT_MODES.GENERAL,
@@ -418,7 +542,6 @@ router.post('/', asyncHandler(async (req, res) => {
     throw error;
   }
 
-  // Inject growth card context as system message
   if (growthCard) {
     logDB('INSERT', 'chat_messages', { chatId: chat.id, role: 'system', source: 'growth_card_context' });
     await supabaseAdmin.from('chat_messages').insert({
@@ -430,13 +553,12 @@ router.post('/', asyncHandler(async (req, res) => {
     });
   }
 
-  // Inject opportunity context as system message
   if (opportunity_id) {
     const { data: opp } = await supabaseAdmin
       .from('opportunities')
       .select('target_context, prepared_message, platform, source_url')
       .eq('id', opportunity_id)
-      .eq('workspace_id', workspaceId)   // FIX MED-07
+      .eq('workspace_id', workspaceId)
       .single();
 
     if (opp) {
@@ -444,7 +566,7 @@ router.post('/', asyncHandler(async (req, res) => {
       await supabaseAdmin.from('chat_messages').insert({
         chat_id:      chat.id,
         user_id:      userId,
-        workspace_id: workspaceId,   // FIX HIGH-01
+        workspace_id: workspaceId,
         role:         'system',
         content:      `Context: You're helping with outreach for someone on ${opp.platform}.\n\nTheir situation: ${opp.target_context}\n\nDraft message: ${opp.prepared_message}`,
       });
@@ -456,7 +578,7 @@ router.post('/', asyncHandler(async (req, res) => {
     await supabaseAdmin.from('chat_messages').insert({
       chat_id:      chat.id,
       user_id:      userId,
-      workspace_id: workspaceId,   // FIX HIGH-01
+      workspace_id: workspaceId,
       role:         'system',
       content:      initial_context.slice(0, 4000),
     });
@@ -468,21 +590,26 @@ router.post('/', asyncHandler(async (req, res) => {
 
 // ──────────────────────────────────────────
 // GET /api/chat/:chatId
-// FIX HIGH-01: added workspace_id to chat lookup
+// FIX §4.1 (CRITICAL): keyset pagination via the `seq` column. Returns the
+// LATEST `limit` messages by default (not the oldest), in chronological
+// order for display, plus has_more/oldest_seq so the client can page
+// further back with ?before_seq=<oldest_seq>.
 // ──────────────────────────────────────────
 router.get('/:chatId', asyncHandler(async (req, res) => {
   const { chatId }  = req.params;
-  const { limit = 50, before } = req.query;
+  const { limit = CHAT_MESSAGES_PAGE_SIZE, before_seq } = req.query;
   const userId      = req.user.id;
   const workspaceId = req.workspace.id;
-  log('GET_CHAT', { userId, workspaceId, chatId, limit, before });
+  const limitNum    = Math.min(parseInt(limit) || CHAT_MESSAGES_PAGE_SIZE, 100);
+
+  log('GET_CHAT', { userId, workspaceId, chatId, limit: limitNum, before_seq });
 
   const { data: chat, error: chatError } = await supabaseAdmin
     .from('chats')
     .select('*')
     .eq('id', chatId)
     .eq('user_id', userId)
-    .eq('workspace_id', workspaceId)   // FIX HIGH-01
+    .eq('workspace_id', workspaceId)
     .single();
 
   if (chatError || !chat) {
@@ -494,16 +621,21 @@ router.get('/:chatId', asyncHandler(async (req, res) => {
     .from('chat_messages')
     .select('*')
     .eq('chat_id', chatId)
-    .order('created_at', { ascending: true })
-    .limit(parseInt(limit));
+    .order('seq', { ascending: false })
+    .limit(limitNum + 1);
 
-  if (before) msgQuery = msgQuery.lt('created_at', before);
+  if (before_seq) msgQuery = msgQuery.lt('seq', parseInt(before_seq));
 
-  const { data: messages, error: msgError } = await msgQuery;
+  const { data: messagesDesc, error: msgError } = await msgQuery;
   if (msgError) {
     logError('GET_CHAT_MESSAGES', msgError, { chatId });
     throw msgError;
   }
+
+  const rows       = messagesDesc || [];
+  const hasMore    = rows.length > limitNum;
+  const page       = rows.slice(0, limitNum).reverse(); // chronological for display
+  const oldestSeq  = page.length ? page[0].seq : null;
 
   let linkedEvent = null;
   if (chat.event_id && chat.chat_mode === CHAT_MODES.MEETING_NOTES) {
@@ -515,14 +647,18 @@ router.get('/:chatId', asyncHandler(async (req, res) => {
     linkedEvent = ev;
   }
 
-  log('GET_CHAT_OK', { userId, chatId, messageCount: messages?.length || 0 });
-  res.json({ chat, messages: messages || [], linked_event: linkedEvent });
+  log('GET_CHAT_OK', { userId, chatId, messageCount: page.length, hasMore });
+  res.json({
+    chat,
+    messages:    page,
+    linked_event: linkedEvent,
+    has_more:    hasMore,
+    oldest_seq:  oldestSeq,
+  });
 }));
 
 // ──────────────────────────────────────────
-// PATCH /api/chat/:chatId
-// NEW: rename a chat (title only, for now).
-// Ownership scoped to user_id + workspace_id like every other route here.
+// PATCH /api/chat/:chatId — rename
 // ──────────────────────────────────────────
 const chatRenameSchema = z.object({
   title: z.string().trim().min(1, 'Title cannot be empty').max(200, 'Title cannot exceed 200 characters'),
@@ -572,11 +708,10 @@ router.patch('/:chatId', asyncHandler(async (req, res) => {
 }));
 
 // ──────────────────────────────────────────
-// DELETE /api/chat/:chatId
-// FIX HIGH-01: added workspace_id
-// Soft-delete: marks the chat archived rather than dropping rows, so it
-// disappears from the list (GET / already filters is_archived=false) but
-// nothing is destructively lost server-side.
+// DELETE /api/chat/:chatId — soft delete (is_archived=true).
+// Per product decision, no archived-chat browsing/restore UI is being
+// built — this remains a one-way "remove from my list" action from the
+// user's perspective even though the row itself is retained.
 // ──────────────────────────────────────────
 router.delete('/:chatId', asyncHandler(async (req, res) => {
   const { chatId } = req.params;
@@ -588,21 +723,22 @@ router.delete('/:chatId', asyncHandler(async (req, res) => {
     .select('id')
     .eq('id', chatId)
     .eq('user_id', userId)
-    .eq('workspace_id', workspaceId)   // FIX HIGH-01
+    .eq('workspace_id', workspaceId)
     .single();
 
   if (!chat) return res.status(404).json({ error: 'NOT_FOUND' });
 
-  await supabaseAdmin.from('chats').update({ is_archived: true }).eq('id', chatId).eq('workspace_id', workspaceId);
+  const { error } = await supabaseAdmin.from('chats').update({ is_archived: true }).eq('id', chatId).eq('workspace_id', workspaceId);
+  if (error) {
+    logError('ARCHIVE_CHAT', error, { userId, chatId });
+    throw error;
+  }
   log('ARCHIVE_CHAT', { userId, chatId });
   res.json({ success: true });
 }));
 
 // ──────────────────────────────────────────
 // GET /api/chat/:chatId/search
-// NEW: full-text-ish search across a single chat's messages (as opposed to
-// GET / which searches chat titles across the whole list). Scoped to the
-// same user_id + workspace_id ownership check as every other route here.
 // ──────────────────────────────────────────
 router.get('/:chatId/search', asyncHandler(async (req, res) => {
   const { chatId } = req.params;
@@ -624,17 +760,16 @@ router.get('/:chatId/search', asyncHandler(async (req, res) => {
 
   if (!chat) return res.status(404).json({ error: 'NOT_FOUND', message: 'Chat not found' });
 
-  // Escape ILIKE wildcards, same defensive pattern as the chat-list search.
   const escaped = q.trim().slice(0, 200).replace(/[%_]/g, (c) => `\\${c}`);
 
   const { data: messages, error } = await supabaseAdmin
     .from('chat_messages')
-    .select('id, role, content, created_at')
+    .select('id, role, content, created_at, seq')
     .eq('chat_id', chatId)
     .eq('workspace_id', workspaceId)
     .neq('role', 'system')
     .ilike('content', `%${escaped}%`)
-    .order('created_at', { ascending: true })
+    .order('seq', { ascending: true })
     .limit(Math.min(parseInt(limit) || 50, 100));
 
   if (error) {
@@ -648,12 +783,6 @@ router.get('/:chatId/search', asyncHandler(async (req, res) => {
 
 // ──────────────────────────────────────────
 // POST /api/chat/:chatId/message
-// FIX HIGH-01: chat ownership and message inserts use workspace_id
-// FIX HIGH-05: user_memory read now scoped to workspace_id
-// FIX HIGH-11: Perplexity quota uses workspace-level functions
-// FIX LOW-07:  validateChatMessage middleware applied
-// FIX LOW-08:  buildChatSystemPrompt called unconditionally
-// Token tracking uses workspaceId
 // ──────────────────────────────────────────
 router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, res) => {
   const { chatId }  = req.params;
@@ -661,7 +790,7 @@ router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, re
   const userId      = req.user.id;
   const workspaceId = req.workspace.id;
 
-  log('SEND_MESSAGE', { userId, workspaceId, chatId, hasMessage: !!message, stream, hasAttachments: !!attachments?.length });
+  log('SEND_MESSAGE', { userId, workspaceId, chatId, hasMessage: !!message, stream, hasAttachments: !!attachments?.length, force_search });
 
   if (!message?.trim() && (!attachments || attachments.length === 0)) {
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'message or attachments required' });
@@ -680,129 +809,36 @@ router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, re
   }
 
   const effectiveChatMode = reqChatMode || chat.chat_mode || CHAT_MODES.GENERAL;
-  const userCtx = buildUserContext(req);
 
   // ── Context gathering, batched ──────────────────────────────
-  // All of these reads are independent of one another — history, memory,
-  // goals, check-in, growth card, and attachment preprocessing don't touch
-  // anything the others produce. They used to be awaited one at a time,
-  // which meant up to 6 sequential DB/processing round-trips before the
-  // model call could even begin (the main source of the slow
-  // time-to-first-token). Firing them together collapses that to roughly
-  // one round-trip's worth of wall-clock time.
-  const [
-    historyResult,
-    memFactsResult,
-    goalsResult,
-    checkInResult,
-    growthCard,
-    attachmentResult,
-  ] = await Promise.all([
-    supabaseAdmin
-      .from('chat_messages')
-      .select('role, content, attachment_context')
-      .eq('chat_id', chatId)
-      .order('created_at', { ascending: false })
-      .limit(8),
-    req.user.memory_enabled !== false
-      ? supabaseAdmin
-          .from('user_memory')
-          .select('fact')
-          .eq('user_id', userId)
-          .eq('workspace_id', workspaceId)
-          .eq('is_active', true)
-          .order('reinforcement_count', { ascending: false })
-          .limit(5)
-      : Promise.resolve({ data: null }),
-    supabaseAdmin
-      .from('user_goals')
-      .select('goal_text, current_value, target_value, target_unit')
-      .eq('workspace_id', workspaceId)
-      .eq('user_id', userId)
-      .eq('status', 'active')
-      .limit(3),
-    supabaseAdmin
-      .from('daily_check_ins')
-      .select('mood_score, answers')
-      .eq('user_id', userId)
-      .not('processed_at', 'is', null)
-      .order('date', { ascending: false })
-      .limit(1)
-      .maybeSingle(),
-    chat.growth_card_id ? fetchGrowthCard(chat.growth_card_id, userId, workspaceId) : Promise.resolve(null),
+  const [historyMessages, { finalSystemPrompt, userCtx }, attachmentResult] = await Promise.all([
+    getHistoryMessages(chatId),
+    buildSystemPromptForChat(req, chat, effectiveChatMode),
     attachments?.length
       ? (async () => {
-          log('ATTACHMENTS_RECEIVED', { userId, chatId, count: attachments.length, attachments });
+          log('ATTACHMENTS_RECEIVED', { userId, chatId, count: attachments.length });
           try {
             const processed = await preprocessAttachmentsForGrok(attachments, userId);
             const prompt = buildGrokAttachmentPrompt(processed);
-            log('ATTACHMENTS_PROCESSED', {
-              userId, chatId,
-              processedCount: processed?.length || 0,
-              promptChars: prompt.length,
-            });
+            log('ATTACHMENTS_PROCESSED', { userId, chatId, processedCount: processed?.length || 0, promptChars: prompt.length });
             return { processed, prompt };
           } catch (err) {
-            logError('preprocessAttachments', err, { userId });
+            logError('preprocessAttachments', err, { userId, chatId });
             return { processed: null, prompt: '' };
           }
         })()
       : Promise.resolve({ processed: null, prompt: '' }),
   ]);
 
-  // FIX: older messages' attachment content was never being re-included
-  // when replaying history for the AI (only the bare `content` text was
-  // selected/sent), so the model would lose track of anything attached in
-  // earlier turns. We now pull it back in from `attachment_context`, but
-  // condensed and under a shared budget — full per-message detail isn't
-  // worth resending on every later turn. `history` is newest-first here,
-  // so we spend the budget in that order (recent attachments win) before
-  // reversing into chronological order for the AI payload.
-  let historyAttachmentBudget = MAX_HISTORY_ATTACHMENT_CONTEXT_CHARS;
-  const historyMessages = (historyResult.data || [])
-    .map(m => {
-      let content = m.content || '';
-      if (m.attachment_context?.length && historyAttachmentBudget > 0) {
-        const summary = buildAttachmentHistorySummary(m.attachment_context).slice(0, historyAttachmentBudget);
-        historyAttachmentBudget -= summary.length;
-        content += summary;
-      }
-      return { role: m.role, content };
-    })
-    .reverse();
-
-  let memoryContext = '';
-  if (memFactsResult.data?.length) {
-    memoryContext = `\nContext about this user:\n${memFactsResult.data.map(f => `- ${f.fact}`).join('\n')}`;
-  }
-
-  const systemPrompt = groqService.buildChatSystemPrompt(userCtx, effectiveChatMode, {
-    memoryContext,
-    goals: goalsResult.data || [],
-    latestMood: checkInResult.data?.mood_score || null,
-  });
-
-  // If this chat is linked to a growth card, prepend card context to the system prompt
-  let finalSystemPrompt = systemPrompt;
-  if (growthCard) {
-    finalSystemPrompt = buildGrowthCardSystemMessage(growthCard) + '\n\n' + systemPrompt;
-    log('GROWTH_CARD_CONTEXT_INJECTED', { chatId, cardId: growthCard.id });
-  }
-
   const processedAttachments = attachmentResult.processed;
   const attachmentPrompt     = attachmentResult.prompt;
+  // FIX §5.8: pull real image bytes back out for vision-capable models.
+  const imageParts           = extractImageParts(processedAttachments);
 
-  // `userMessageContent` is what gets sent to the AI for THIS turn — full
-  // message text plus the fully-processed (but budget-capped, see
-  // attachmentProcessor.js) attachment text. This is intentionally kept
-  // separate from what we persist to `content` below: full attachment text
-  // is only worth paying tokens for on the turn it's actually discussed.
   const userMessageContent = [message?.trim(), attachmentPrompt].filter(Boolean).join('\n\n');
 
   // ── Persist the user turn + (optional) web search, together ────────
-  // Neither depends on the other's result, so run them side by side rather
-  // than paying for the search round-trip before the insert even starts.
-  const [, searchContext] = await Promise.all([
+  const [insertResult, searchResult] = await Promise.all([
     supabaseAdmin
       .from('chat_messages')
       .insert({
@@ -810,46 +846,55 @@ router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, re
         user_id:      userId,
         workspace_id: workspaceId,
         role:         'user',
-        // `content` now stores the raw message text only (no attachment text
-        // baked in) — keeps the DB row lean and stops history replay from
-        // silently accumulating attachment text turn after turn.
         content:      message?.trim() || (attachments?.length ? '[attachment]' : ''),
-        // Raw attachment metadata (name/type/url), for client-side previews.
-        attachments:  attachments?.length ? attachments : null,
-        // NEW: processed attachment content (extracted PDF/doc text, or an
-        // image placeholder), stored structured so future turns can pull a
-        // condensed summary back in via buildAttachmentHistorySummary instead
-        // of re-reading `content`. Not stored for images since there's no
-        // text payload worth persisting there.
+        attachments:  attachments?.length ? attachments : [],
         attachment_context: processedAttachments?.length ? processedAttachments : null,
       })
       .select('id')
       .single(),
     force_search
       ? (async () => {
+          log('EXA_SEARCH_ATTEMPT', { userId, workspaceId, chatId, tier: userCtx.tier });
           try {
             const perplexityCheck = await checkWorkspaceExaUsage(workspaceId, userCtx.tier);
-            if (perplexityCheck.allowed) {
-              const { content: searchResult } = await searchForChat(message, finalSystemPrompt, {
-                workspaceId, userId, sourceJob: 'search_for_chat',
-              });
-              if (searchResult?.trim()) {
-                return `\n\nWeb search results:\n${searchResult}`;
-              }
+            log('EXA_USAGE_CHECK_RESULT', { userId, workspaceId, chatId, allowed: perplexityCheck?.allowed ?? null, reason: perplexityCheck?.reason ?? null });
+
+            if (!perplexityCheck?.allowed) {
+              log('EXA_SEARCH_SKIPPED_NOT_ALLOWED', { userId, workspaceId, chatId, perplexityCheck });
+              return { text: '', citations: [] };
             }
-            return '';
+
+            const searchStartedAt = Date.now();
+            const { content: searchText, citations } = await searchForChat(message, finalSystemPrompt, {
+              workspaceId, userId, sourceJob: 'search_for_chat',
+            });
+            const durationMs = Date.now() - searchStartedAt;
+            log('EXA_SEARCH_RESULT', { userId, workspaceId, chatId, durationMs, resultChars: searchText?.length || 0, citationCount: citations?.length || 0 });
+
+            if (searchText?.trim()) {
+              return { text: `\n\nWeb search results:\n${searchText}`, citations: citations || [] };
+            }
+            return { text: '', citations: [] };
           } catch (err) {
-            logError('perplexitySearch', err, { userId });
-            return '';
+            logError('perplexitySearch', err, { userId, workspaceId, chatId, force_search });
+            return { text: '', citations: [] };
           }
         })()
-      : Promise.resolve(''),
+      : Promise.resolve({ text: '', citations: [] }),
   ]);
 
-  // Bookkeeping only — not on the critical path to the model call, so this
-  // is fired without blocking the response on it (still logged/ignored the
-  // same way a failure here was already treated before).
-  fireAndForget(supabaseAdmin.rpc('increment_chat_stats', { p_chat_id: chatId, p_increment: 1 }));
+  if (insertResult.error) {
+    logError('SEND_MESSAGE_INSERT_USER_TURN', insertResult.error, { userId, chatId });
+    throw insertResult.error;
+  }
+
+  const searchContext = searchResult.text;
+  // FIX §5.6/§7.1: citations captured instead of discarded.
+  const citations      = searchResult.citations;
+
+  log('SEND_MESSAGE_SEARCH_CONTEXT', { userId, chatId, force_search, searchContextChars: searchContext.length, citationCount: citations.length });
+
+  fireAndForget(supabaseAdmin.rpc('increment_chat_stats', { p_chat_id: chatId }));
 
   const messagesForAI = [
     ...historyMessages,
@@ -857,10 +902,36 @@ router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, re
   ];
 
   if (effectiveChatMode === CHAT_MODES.MEETING_NOTES) {
+    // FIX (found during audit implementation cross-check, not in the
+    // original audit doc since it lacked groqCalendarIntelligence.js):
+    // generateMeetingNotesResponse's real signature is
+    // (noteFragment, conversationHistory, eventContext) => { content, is_end }
+    // — this call site was previously passing (userCtx, chat, messagesForAI,
+    // userMessageContent) and destructuring { response, event_id }, neither
+    // of which the function actually produces. That meant meeting-notes
+    // chats received `undefined` content (falling back to "Notes
+    // captured.") and could, on an end-of-meeting phrase, literally save
+    // the internal "__END_MEETING__" sentinel as visible message content.
     try {
-      const { response, event_id } = await generateMeetingNotesResponse(
-        userCtx, chat, messagesForAI, userMessageContent
+      const linkedEvent = chat.event_id
+        ? (await supabaseAdmin
+            .from('user_events')
+            .select('id, title, event_type, attendee_name')
+            .eq('id', chat.event_id)
+            .single()).data
+        : null;
+
+      const conversationHistory = historyMessages; // already fetched above, non-system, chronological
+
+      const { content: notesReply, is_end } = await generateMeetingNotesResponse(
+        userMessageContent,
+        conversationHistory,
+        linkedEvent || { title: chat.title },
       );
+
+      const finalContent = is_end
+        ? 'Meeting wrapped up — notes captured. You can review them anytime from this chat.'
+        : (notesReply || 'Got it. Anything else to capture?');
 
       const { data: aiMsg } = await supabaseAdmin
         .from('chat_messages')
@@ -869,27 +940,25 @@ router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, re
           user_id:      userId,
           workspace_id: workspaceId,
           role:         'assistant',
-          content:      response || 'Notes captured.',
+          content:      finalContent,
         })
         .select()
         .single();
 
-      fireAndForget(supabaseAdmin.rpc('increment_chat_stats', { p_chat_id: chatId, p_increment: 1 }));
-      supabaseAdmin.from('chats').update({ last_message_at: new Date().toISOString() }).eq('id', chatId)
-        .then(({ error }) => { if (error) logError('meetingNotesResponse', error, { userId, chatId, step: 'update_last_message_at' }); });
+      fireAndForget(supabaseAdmin.rpc('increment_chat_stats', { p_chat_id: chatId }));
+      fireAndForget(supabaseAdmin.from('chats').update({ last_message_at: new Date().toISOString() }).eq('id', chatId));
+      maybeEnqueueSummarization(chatId, workspaceId, userId).catch(() => {});
 
-      return res.json({ message: aiMsg, event_id });
+      return res.json({ message: aiMsg, event_id: chat.event_id || null, meeting_ended: !!is_end });
     } catch (err) {
       logError('meetingNotesResponse', err, { userId, chatId });
+      // Fall through to general-purpose generation below rather than
+      // leaving the request hanging, matching this route's existing
+      // "log and continue" pattern for this branch.
     }
   }
 
   if (stream) {
-    // NOTE: streamAndSave is a complete handler — it calls initSSE itself,
-    // inserts the placeholder assistant message, updates it on completion,
-    // increments chat stats, records token usage, sends its own SSE events
-    // (message_id / token / complete / error), and ends the response. We
-    // must NOT duplicate any of that here — we just pass it what it needs.
     try {
       await streamAndSave({
         res,
@@ -899,19 +968,22 @@ router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, re
         userId,
         workspaceId,
         supabase:     supabaseAdmin,
-        streamFn:     streamWithFallback,   // enable multi-model fallback, matching non-stream path
+        streamFn:     streamWithFallback,
         tier:         userCtx.tier,
-        sourceJob:    'chat_message',       // matches sourceJob used by the non-stream path below
+        sourceJob:    'chat_message',
+        citations,
+        images: imageParts.length ? imageParts : undefined,
+        onSaved: () => maybeEnqueueSummarization(chatId, workspaceId, userId),
       });
     } catch (err) {
       logError('streamResponse', err, { userId, chatId });
-      // Defensive fallback only — streamAndSave already handles its own
-      // error SSE event/close in the normal failure paths.
       if (!res.headersSent) initSSE(res);
       try {
         sendSSE(res, 'error', { message: 'Stream failed' });
         endSSE(res);
-      } catch { /* response already closed */ }
+      } catch (sseErr) {
+        logError('streamResponse_sseCloseFailed', sseErr, { userId, chatId });
+      }
     }
     return;
   }
@@ -921,10 +993,11 @@ router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, re
       systemPrompt: finalSystemPrompt,
       messages:     messagesForAI,
       temperature:  0.7,
-      maxTokens:    800,
+      maxTokens:    CHAT_MAX_TOKENS,
       userId,
       workspaceId,
       sourceJob:    'chat_message',
+      images: imageParts.length ? imageParts : undefined,
     });
 
     const { data: aiMsg } = await supabaseAdmin
@@ -935,16 +1008,18 @@ router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, re
         workspace_id: workspaceId,
         role:         'assistant',
         content:      aiContent || 'I encountered an error. Please try again.',
+        citations:    citations.length ? citations : [],
       })
       .select()
       .single();
 
-    fireAndForget(supabaseAdmin.rpc('increment_chat_stats', { p_chat_id: chat.id, p_increment: 1 }));
-    supabaseAdmin.from('chats').update({ last_message_at: new Date().toISOString() }).eq('id', chatId)
-      .then(({ error }) => { if (error) logError('nonStreamResponse', error, { userId, chatId, step: 'update_last_message_at' }); });
+    fireAndForget(supabaseAdmin.rpc('increment_chat_stats', { p_chat_id: chat.id }));
+    fireAndForget(supabaseAdmin.from('chats').update({ last_message_at: new Date().toISOString() }).eq('id', chatId));
 
     log('SEND_MESSAGE_OK', { userId, chatId, messageId: aiMsg?.id });
     res.json({ message: aiMsg });
+
+    maybeEnqueueSummarization(chatId, workspaceId, userId).catch(() => {});
   } catch (err) {
     logError('nonStreamResponse', err, { userId, chatId });
     throw err;
@@ -953,10 +1028,6 @@ router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, re
 
 // ──────────────────────────────────────────
 // POST /api/chat/:chatId/regenerate
-// NEW: Regenerates the most recent assistant reply. Deletes the stale
-// assistant message and re-runs the model against the same history (the
-// last user turn, replayed as-is) — nothing new is inserted on the user
-// side. Supports streaming, matching /:chatId/message.
 // ──────────────────────────────────────────
 router.post('/:chatId/regenerate', asyncHandler(async (req, res) => {
   const { chatId } = req.params;
@@ -980,9 +1051,9 @@ router.post('/:chatId/regenerate', asyncHandler(async (req, res) => {
 
   const { data: recent, error: recentError } = await supabaseAdmin
     .from('chat_messages')
-    .select('id, role, created_at')
+    .select('id, role, seq')
     .eq('chat_id', chatId)
-    .order('created_at', { ascending: false })
+    .order('seq', { ascending: false })
     .limit(10);
 
   if (recentError) {
@@ -995,10 +1066,8 @@ router.post('/:chatId/regenerate', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'NO_ASSISTANT_MESSAGE', message: 'Nothing to regenerate yet' });
   }
 
-  // Guard against regenerating a reply that isn't actually the latest turn
-  // (e.g. a stale client retrying against a chat that's moved on).
   const newerThanAssistant = (recent || []).some(
-    m => m.id !== lastAssistant.id && new Date(m.created_at) > new Date(lastAssistant.created_at)
+    m => m.id !== lastAssistant.id && m.seq > lastAssistant.seq
   );
   if (newerThanAssistant) {
     return res.status(409).json({ error: 'STALE_STATE', message: 'A newer message already exists in this chat' });
@@ -1026,24 +1095,22 @@ router.post('/:chatId/regenerate', asyncHandler(async (req, res) => {
 
 // ──────────────────────────────────────────
 // PATCH /api/chat/:chatId/message/:messageId
-// NEW: Edits a user message and regenerates the response that followed it.
-// Restricted to the single most recent message in the chat, so the edit
-// flow stays linear (rewrite the tail of the conversation) rather than
-// branching mid-history. Anything after the edited message — typically just
-// its old assistant reply — is discarded before the model is re-run.
 // ──────────────────────────────────────────
 const editMessageSchema = z.object({
   message: z.string().trim().min(1).max(5000, 'Message cannot exceed 5000 characters'),
   stream:  z.boolean().optional(),
 });
 
-router.patch('/:chatId/message/:messageId', asyncHandler(async (req, res) => {
+const editMessageHandler = asyncHandler(async (req, res) => {
   const { chatId, messageId } = req.params;
   const userId      = req.user.id;
   const workspaceId = req.workspace.id;
 
+  log('EDIT_MESSAGE_START', { userId, workspaceId, chatId, messageId });
+
   const parsed = editMessageSchema.safeParse(req.body);
   if (!parsed.success) {
+    log('EDIT_MESSAGE_VALIDATION_FAILED', { userId, chatId, messageId, errors: parsed.error.errors });
     return res.status(400).json({
       error:   'VALIDATION_ERROR',
       message: parsed.error.errors?.[0]?.message || 'Invalid request body',
@@ -1060,48 +1127,58 @@ router.patch('/:chatId/message/:messageId', asyncHandler(async (req, res) => {
     .single();
 
   if (chatError || !chat) {
+    log('EDIT_MESSAGE_CHAT_NOT_FOUND', { userId, chatId, messageId, chatError: chatError?.message });
     return res.status(404).json({ error: 'NOT_FOUND', message: 'Chat not found' });
   }
 
   const { data: target, error: targetError } = await supabaseAdmin
     .from('chat_messages')
-    .select('id, role, created_at')
+    .select('id, role, seq')
     .eq('id', messageId)
     .eq('chat_id', chatId)
     .eq('workspace_id', workspaceId)
     .single();
 
   if (targetError || !target) {
+    log('EDIT_MESSAGE_TARGET_NOT_FOUND', { userId, chatId, messageId, targetError: targetError?.message });
     return res.status(404).json({ error: 'NOT_FOUND', message: 'Message not found' });
   }
   if (target.role !== 'user') {
+    log('EDIT_MESSAGE_INVALID_ROLE', { userId, chatId, messageId, role: target.role });
     return res.status(400).json({ error: 'INVALID_ROLE', message: 'Only user messages can be edited' });
   }
 
-  const { data: lastMsg } = await supabaseAdmin
+  const { data: lastUserMsg, error: lastUserMsgError } = await supabaseAdmin
     .from('chat_messages')
     .select('id')
     .eq('chat_id', chatId)
-    .order('created_at', { ascending: false })
+    .eq('workspace_id', workspaceId)
+    .eq('role', 'user')
+    .order('seq', { ascending: false })
     .limit(1)
     .single();
 
-  if (!lastMsg || lastMsg.id !== target.id) {
-    // The common case here is the target being a user message that already
-    // has an assistant reply after it (the reply is now the "last" message)
-    // — editing would silently discard that reply, so we require the
-    // client to only offer editing on the actual last message in the chat.
-    return res.status(409).json({ error: 'NOT_LAST_MESSAGE', message: 'Only the most recent message can be edited' });
+  if (lastUserMsgError) {
+    logError('EDIT_MESSAGE_LAST_USER_LOOKUP', lastUserMsgError, { userId, chatId, messageId });
   }
 
-  // Drop anything after the edited message (its old reply, if any) — the
-  // edit rewrites the tail of the conversation from this point forward.
-  await supabaseAdmin
+  if (!lastUserMsg || lastUserMsg.id !== target.id) {
+    log('EDIT_MESSAGE_NOT_LAST_USER', { userId, chatId, messageId, targetId: target.id, lastUserMsgId: lastUserMsg?.id || null });
+    return res.status(409).json({ error: 'NOT_LAST_USER_MESSAGE', message: 'Only your most recent message can be edited' });
+  }
+
+  const { error: deleteError, count: deletedCount } = await supabaseAdmin
     .from('chat_messages')
-    .delete()
+    .delete({ count: 'exact' })
     .eq('chat_id', chatId)
     .eq('workspace_id', workspaceId)
-    .gt('created_at', target.created_at);
+    .gt('seq', target.seq);
+
+  if (deleteError) {
+    logError('EDIT_MESSAGE_TAIL_DELETE', deleteError, { userId, chatId, messageId });
+    throw deleteError;
+  }
+  log('EDIT_MESSAGE_TAIL_DELETED', { userId, chatId, messageId, deletedCount: deletedCount ?? null });
 
   const { error: updateError } = await supabaseAdmin
     .from('chat_messages')
@@ -1125,15 +1202,25 @@ router.patch('/:chatId/message/:messageId', asyncHandler(async (req, res) => {
       res, stream, finalSystemPrompt, messagesForAI, chatId, userId, workspaceId, userCtx,
       sourceJob: 'chat_edit_regenerate',
     });
-    if (!stream) log('EDIT_REGENERATE_OK', { userId, chatId });
+    if (!stream) log('EDIT_REGENERATE_OK', { userId, chatId, messageId });
   } catch (err) {
     if (!stream) {
-      logError('editRegenerateResponse', err, { userId, chatId });
+      logError('editRegenerateResponse', err, { userId, chatId, messageId });
       throw err;
     }
   }
-}));
+});
 
+router.patch('/:chatId/message/:messageId', editMessageHandler);
+router.post('/:chatId/message/:messageId', editMessageHandler);
+
+// ──────────────────────────────────────────
+// POST /api/chat/with-message
+// FIX §4.2 (CRITICAL): now goes through buildSystemPromptForChat like
+// every other entry point, so growth-card/opportunity context actually
+// reaches the model on the very first reply — previously it was fetched
+// and persisted as a display-only system row but never fed to the AI.
+// ──────────────────────────────────────────
 router.post('/with-message', validateChatMessage, asyncHandler(async (req, res) => {
   const {
     message,
@@ -1147,22 +1234,21 @@ router.post('/with-message', validateChatMessage, asyncHandler(async (req, res) 
     attachments,
     growth_card_id,
   } = req.body;
-  
+
   const userId = req.user.id;
   const workspaceId = req.workspace.id;
-  
+
   log('CREATE_CHAT_WITH_MESSAGE', { userId, workspaceId, chat_mode, chat_type, messageLength: message?.length, growth_card_id });
-  
+
   if (!message?.trim()) {
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'message is required' });
   }
 
-  // Fetch growth card early for title + context injection
   const growthCard = await fetchGrowthCard(growth_card_id, userId, workspaceId);
   if (growth_card_id && !growthCard) {
     return res.status(404).json({ error: 'NOT_FOUND', message: 'Growth card not found' });
   }
-  
+
   let chatTitle = title;
   if (!chatTitle) {
     if (growthCard) {
@@ -1180,15 +1266,15 @@ router.post('/with-message', validateChatMessage, asyncHandler(async (req, res) 
       chatTitle = message.slice(0, 50) + (message.length > 50 ? '...' : '');
     }
   }
-  
+
   const { data: chat, error: chatError } = await supabaseAdmin
     .from('chats')
     .insert({
       user_id: userId,
       workspace_id: workspaceId,
       title: chatTitle,
-      chat_type: chat_type,
-      chat_mode: chat_mode,
+      chat_type,
+      chat_mode,
       opportunity_id: opportunity_id || null,
       prospect_id: prospect_id || null,
       event_id: event_id || null,
@@ -1196,25 +1282,21 @@ router.post('/with-message', validateChatMessage, asyncHandler(async (req, res) 
     })
     .select()
     .single();
-  
+
   if (chatError) {
     logError('CREATE_CHAT_WITH_MESSAGE_INSERT', chatError, { userId });
     throw chatError;
   }
-  
+
   logDB('INSERT', 'chats', { userId, workspaceId, chatId: chat.id, chat_mode });
 
-  // Inject growth card context as system message
   if (growthCard) {
     await supabaseAdmin.from('chat_messages').insert({
-      chat_id: chat.id,
-      user_id: userId,
-      workspace_id: workspaceId,
-      role: 'system',
-      content: buildGrowthCardSystemMessage(growthCard),
+      chat_id: chat.id, user_id: userId, workspace_id: workspaceId,
+      role: 'system', content: buildGrowthCardSystemMessage(growthCard),
     });
   }
-  
+
   if (opportunity_id) {
     const { data: opp } = await supabaseAdmin
       .from('opportunities')
@@ -1222,160 +1304,114 @@ router.post('/with-message', validateChatMessage, asyncHandler(async (req, res) 
       .eq('id', opportunity_id)
       .eq('workspace_id', workspaceId)
       .single();
-    
+
     if (opp) {
       await supabaseAdmin.from('chat_messages').insert({
-        chat_id: chat.id,
-        user_id: userId,
-        workspace_id: workspaceId,
+        chat_id: chat.id, user_id: userId, workspace_id: workspaceId,
         role: 'system',
         content: `Context: You're helping with outreach for someone on ${opp.platform}.\n\nTheir situation: ${opp.target_context}\n\nDraft message: ${opp.prepared_message}`,
       });
     }
   }
-  
+
   let attachmentPrompt = '';
   let processedAttachments = null;
   if (attachments?.length) {
-    log('ATTACHMENTS_RECEIVED', { userId, count: attachments.length, attachments });
+    log('ATTACHMENTS_RECEIVED', { userId, count: attachments.length });
     try {
-      const { preprocessAttachmentsForGrok, buildGrokAttachmentPrompt } = await import('../utils/attachmentProcessor.js');
       processedAttachments = await preprocessAttachmentsForGrok(attachments, userId);
       attachmentPrompt = buildGrokAttachmentPrompt(processedAttachments);
-      log('ATTACHMENTS_PROCESSED', {
-        userId,
-        processedCount: processedAttachments?.length || 0,
-        promptChars: attachmentPrompt.length,
-      });
+      log('ATTACHMENTS_PROCESSED', { userId, processedCount: processedAttachments?.length || 0, promptChars: attachmentPrompt.length });
     } catch (err) {
       logError('preprocessAttachments', err, { userId });
     }
   }
-  
-  // Full text (message + fully-processed attachment content) is what goes
-  // to the AI for this turn. `content` persisted below stays clean/raw so
-  // this doesn't get permanently baked in and re-billed every later turn
-  // (see matching fix in /:chatId/message).
+  const imageParts = extractImageParts(processedAttachments);
+
   const userMessageContent = [message.trim(), attachmentPrompt].filter(Boolean).join('\n\n');
-  
-  await supabaseAdmin
+
+  const { error: userInsertError } = await supabaseAdmin
     .from('chat_messages')
     .insert({
-      chat_id: chat.id,
-      user_id: userId,
-      workspace_id: workspaceId,
+      chat_id: chat.id, user_id: userId, workspace_id: workspaceId,
       role: 'user',
       content: message.trim() || (attachments?.length ? '[attachment]' : ''),
-      // Raw attachment metadata (see matching fix in /:chatId/message)
-      attachments: attachments?.length ? attachments : null,
-      // Structured processed attachment content, for condensed reuse if
-      // this chat continues via /:chatId/message later.
+      attachments: attachments?.length ? attachments : [],
       attachment_context: processedAttachments?.length ? processedAttachments : null,
-    })
-    .select('id')
-    .single();
-  
-  const userCtx = buildUserContext(req);
-
-  // Independent lookups, run together (see the matching fix in
-  // POST /:chatId/message for why this was sequential before and what that
-  // was costing).
-  const [memFactsResult, goalsResult, checkInResult] = await Promise.all([
-    req.user.memory_enabled !== false
-      ? supabaseAdmin
-          .from('user_memory')
-          .select('fact')
-          .eq('user_id', userId)
-          .eq('workspace_id', workspaceId)
-          .eq('is_active', true)
-          .order('reinforcement_count', { ascending: false })
-          .limit(5)
-      : Promise.resolve({ data: null }),
-    supabaseAdmin
-      .from('user_goals')
-      .select('goal_text, current_value, target_value, target_unit')
-      .eq('workspace_id', workspaceId)
-      .eq('user_id', userId)
-      .eq('status', 'active')
-      .limit(3),
-    supabaseAdmin
-      .from('daily_check_ins')
-      .select('mood_score, answers')
-      .eq('user_id', userId)
-      .not('processed_at', 'is', null)
-      .order('date', { ascending: false })
-      .limit(1)
-      .maybeSingle(),
-  ]);
-
-  let memoryContext = '';
-  if (memFactsResult.data?.length) {
-    memoryContext = `\nContext about this user:\n${memFactsResult.data.map(f => `- ${f.fact}`).join('\n')}`;
+    });
+  if (userInsertError) {
+    logError('CREATE_CHAT_WITH_MESSAGE_USER_TURN', userInsertError, { userId, chatId: chat.id });
+    throw userInsertError;
   }
 
-  const systemPrompt = groqService.buildChatSystemPrompt(userCtx, chat_mode, {
-    memoryContext,
-    goals: goalsResult.data || [],
-    latestMood: checkInResult.data?.mood_score || null,
-  });
-  
-  let searchContext = '';
-  if (force_search) {
-    try {
-      const {searchForChat } = await import('../services/exa.js');
-      const {checkWorkspaceExaUsage } = await import('../services/tokenTracker.js');
+  // FIX §4.2: shared helper now used here too — this is what actually
+  // gets growth-card/opportunity context into the model's system prompt
+  // on the very first reply of a new chat.
+  const { finalSystemPrompt, userCtx } = await buildSystemPromptForChat(req, chat, chat_mode);
 
-      
+  let searchContext = '';
+  let citations = [];
+  if (force_search) {
+    log('EXA_SEARCH_ATTEMPT', { userId, workspaceId, chatId: chat.id, tier: userCtx.tier });
+    try {
       const perplexityCheck = await checkWorkspaceExaUsage(workspaceId, userCtx.tier);
-      if (perplexityCheck.allowed) {
-        const { content: searchResult } = await searchForChat(message, systemPrompt, {
+      if (!perplexityCheck?.allowed) {
+        log('EXA_SEARCH_SKIPPED_NOT_ALLOWED', { userId, workspaceId, chatId: chat.id, perplexityCheck });
+      } else {
+        const { content: searchText, citations: searchCitations } = await searchForChat(message, finalSystemPrompt, {
           workspaceId, userId, sourceJob: 'search_for_chat',
         });
-        if (searchResult?.trim()) {
-          searchContext = `\n\nWeb search results:\n${searchResult}`;
+        if (searchText?.trim()) {
+          searchContext = `\n\nWeb search results:\n${searchText}`;
+          citations = searchCitations || [];
         }
       }
     } catch (err) {
-      logError('perplexitySearch', err, { userId });
+      logError('perplexitySearch', err, { userId, workspaceId, chatId: chat.id, force_search });
     }
   }
-  
+
   const messagesForAI = [
     { role: 'user', content: userMessageContent + searchContext },
   ];
-  
+
   const { content: aiContent } = await callWithFallbackGroq({
-    systemPrompt,
+    systemPrompt: finalSystemPrompt,
     messages:    messagesForAI,
     temperature: 0.7,
-    maxTokens:   800,
+    maxTokens:   CHAT_MAX_TOKENS,
     userId,
     workspaceId,
     sourceJob:   'chat_with_message',
+    images: imageParts.length ? imageParts : undefined,
   });
-  
-  const { data: aiMsg } = await supabaseAdmin
+
+  const { data: aiMsg, error: aiInsertError } = await supabaseAdmin
     .from('chat_messages')
     .insert({
-      chat_id: chat.id,
-      user_id: userId,
-      workspace_id: workspaceId,
+      chat_id: chat.id, user_id: userId, workspace_id: workspaceId,
       role: 'assistant',
       content: aiContent || 'I encountered an error. Please try again.',
+      citations: citations.length ? citations : [],
     })
     .select()
     .single();
+  if (aiInsertError) {
+    logError('CREATE_CHAT_WITH_MESSAGE_AI_TURN', aiInsertError, { userId, chatId: chat.id });
+    throw aiInsertError;
+  }
 
-  // Bookkeeping — fired without blocking the client's response on it.
-  fireAndForget(supabaseAdmin.rpc('increment_chat_stats', { p_chat_id: chat.id, p_increment: 2 }));
-  supabaseAdmin.from('chats').update({ last_message_at: new Date().toISOString() }).eq('id', chat.id)
-    .then(({ error }) => { if (error) logError('CREATE_CHAT_WITH_MESSAGE', error, { userId, chatId: chat.id, step: 'update_last_message_at' }); });
-  
+  // FIX §4.3: single-param signature only (was p_increment:2).
+  fireAndForget(supabaseAdmin.rpc('increment_chat_stats', { p_chat_id: chat.id }));
+  fireAndForget(supabaseAdmin.rpc('increment_chat_stats', { p_chat_id: chat.id })); // two turns (user+assistant) inserted this request
+  fireAndForget(supabaseAdmin.from('chats').update({ last_message_at: new Date().toISOString() }).eq('id', chat.id));
+
   log('CREATE_CHAT_WITH_MESSAGE_OK', { userId, workspaceId, chatId: chat.id, messageId: aiMsg?.id });
-  
+
   res.status(201).json({
     chat: chat,
     message: aiMsg,
   });
 }));
+
 export default router;

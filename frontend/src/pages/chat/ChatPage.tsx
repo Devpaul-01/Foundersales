@@ -1,44 +1,35 @@
 // ============================================================
 // FILE: src/pages/chat/ChatPage.tsx
-// From chat-9.txt:
-// - SSE streaming (fetch + ReadableStream)
-// - workspace_id on all inserts (HIGH-01)
-// - user_memory scoped to workspace_id (HIGH-05 read-side)
-// - workspace-level Perplexity quota (HIGH-11)
-// - LOW-07: message max 5000 chars
-// - LOW-08: buildChatSystemPrompt called unconditionally
-// - meeting_notes mode support
 //
-// Scroll behavior: auto-scroll only "sticks" to the bottom while the user
-// is already near the bottom. If they scroll up (e.g. to re-read earlier
-// context) while a reply is streaming in, we stop yanking the view back
-// down. A "scroll to bottom" button appears whenever they're not at the
-// bottom, so they can jump back down on demand.
+// CHAT AUDIT CHANGES (this revision):
+// - MESSAGE PAGINATION (§4.1, CRITICAL): the chat/message fetch is now a
+//   useInfiniteQuery keyed by `before_seq` (the new stable `seq` cursor
+//   from the backend — see chat.js). The initial page loads the LATEST
+//   messages (previously the oldest 50, with no way to reach anything
+//   after them). A "Load earlier messages" affordance at the top of the
+//   scroll pane calls fetchNextPage() to page further back in time, with
+//   scroll position preserved across the prepend so the view doesn't
+//   jump.
+// - CITATIONS (§5.6/§7.1): assistant messages that were informed by a web
+//   search now render their sources as small pill links under the reply,
+//   using ChatMessage.citations (persisted server-side, previously
+//   computed and discarded).
+// - ACCESSIBILITY (§10): the streaming bubble is now wrapped in an
+//   aria-live="polite" region so screen readers get incremental updates
+//   as tokens arrive, and the composer textarea has an explicit
+//   aria-label instead of relying on placeholder text alone.
 //
-// NEW:
-// - useSmoothStream decouples chunk arrival from on-screen reveal pace, so
-//   streamed replies read as a smooth, steady stream instead of jerky bursts.
-// - Attachments render beside the message they belong to (images as
-//   thumbnails, other files as chips), for both the optimistic local
-//   message and ones loaded from the server.
-// - Fixed the composer visually showing message content behind it: the
-//   messages pane was missing `min-h-0`, a classic flexbox gotcha where a
-//   flex child with a fixed-size sibling won't actually shrink to scroll
-//   and can bleed into the area below it. The composer's translucent
-//   background made that bleed-through visible as a stray rounded box.
-// - In-chat message search, chat deletion, editing your last message
-//   (which triggers a regenerate), and manually regenerating the last
-//   assistant response.
-// - Automatic retry (with backoff) on transient network failure for the
-//   streaming send/regenerate path, matching the retry behavior other
-//   API calls already get from the axios client.
+// (All prior behavior — SSE streaming, workspace_id on inserts, LOW-07
+// max length, in-chat search, delete, editing/regenerating the last
+// message, retry-with-backoff, smooth reveal pacing, attachment preview
+// — is unchanged.)
 // ============================================================
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { useQuery, useMutation } from '@tanstack/react-query';
+import { useInfiniteQuery, useQuery, useMutation } from '@tanstack/react-query';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { chatApi }     from '@/api/chat';
+import { chatApi, type ChatMessagesResponse }     from '@/api/chat';
 import { uploadApi }   from '@/api/misc';
 import { queryClient } from '@/lib/queryClient';
 import { queryKeys }   from '@/lib/queryKeys';
@@ -54,28 +45,14 @@ import { CHAT_MESSAGE_MAX_LENGTH, ALLOWED_FILE_TYPES, MAX_FILE_SIZE_BYTES } from
 import { formatRelativeDate, cn, generateId } from '@/lib/utils';
 import {
   Send, Globe, Paperclip, ArrowLeft,
-  Calendar, MessageCircle, X, FileText, ChevronDown,
+  Calendar, MessageCircle, X, FileText, ChevronDown, ChevronUp,
   Search, Trash2, RotateCw, Pencil, Check, Loader2,
-  Square, Plus,
+  Square, Plus, ExternalLink,
 } from 'lucide-react';
 
 // ── Attachments ─────────────────────────────────────────────
-// Attachments aren't part of the shared ChatMessage type yet (the backend
-// now persists them, but api/types.ts hasn't been updated) — this local
-// type + accessor keep that gap from spreading `any` through the file.
-// Once ChatMessage grows a real `attachments` field, this can be dropped
-// and the prop type below can just be ChatMessage['attachments'].
 type MessageAttachment = { name: string; type: string; url?: string };
 
-// ── Retry helper for the streaming send/regenerate flow ────────
-// `stream()` (useSSE) talks to the network directly rather than through
-// apiClient, so it doesn't get the axios-level retry wrapper in api/chat.ts.
-// This gives the same "a couple of automatic retries on transient network
-// failure, with backoff" behavior for that path. Only retries actual
-// network failures (fetch throwing / connection dropping before any SSE
-// event arrived) — once the server has started streaming a reply, a
-// failure partway through is surfaced to the user instead of silently
-// retried, since re-sending could duplicate the turn.
 const SEND_RETRY_ATTEMPTS = 2;
 const SEND_RETRY_BASE_DELAY_MS = 600;
 
@@ -85,7 +62,7 @@ function sleep(ms: number) {
 
 function isLikelyNetworkFailure(err: unknown) {
   if (!err) return false;
-  if (err instanceof TypeError) return true; // fetch's generic "network request failed"
+  if (err instanceof TypeError) return true;
   const message = (err as Error)?.message?.toLowerCase?.() ?? '';
   return message.includes('network') || message.includes('failed to fetch') || message.includes('offline');
 }
@@ -108,15 +85,6 @@ async function withSendRetry(attempt: () => Promise<void>, onRetry?: (attemptNum
   throw lastError;
 }
 
-
-// ChatPage.tsx - Modify getAttachments function
-// The model occasionally emits raw `<br>` tags inside markdown (especially
-// inside table cells, where it's the only way to force a line break within
-// a single cell). react-markdown treats content as plain markdown, not
-// HTML, so those tags were showing up as literal "<br>" text instead of
-// breaking the line. Swapping them for a real newline before rendering
-// fixes that without needing to turn on raw-HTML parsing (which would open
-// the door to arbitrary HTML/script injection from model output).
 function normalizeMarkdown(content: string): string {
   return content.replace(/<br\s*\/?>/gi, '\n');
 }
@@ -124,12 +92,11 @@ function normalizeMarkdown(content: string): string {
 function getAttachments(message?: ChatMessage): MessageAttachment[] {
   const raw = (message as unknown as { attachments?: MessageAttachment[] | null } | undefined)?.attachments;
   return raw?.map(att => {
-    // Fix: Convert "image" to "image/png" for display
     let fixedType = att.type;
     if (att.type === 'image') fixedType = 'image/png';
     if (att.type === 'pdf') fixedType = 'application/pdf';
     if (att.type === 'document') fixedType = 'application/octet-stream';
-    
+
     return {
       ...att,
       type: fixedType
@@ -183,13 +150,40 @@ function AttachmentList({ attachments, variant }: { attachments: MessageAttachme
   );
 }
 
+// ── Citations (NEW — audit §5.6/§7.1) ────────────────────────
+// Small pill links under a web-search-informed reply. Persisted on
+// ChatMessage.citations server-side instead of being computed and thrown
+// away — see streaming.js / chat.js.
+function hostnameOf(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return url;
+  }
+}
+
+function CitationList({ citations }: { citations?: string[] | null }) {
+  if (!citations?.length) return null;
+  return (
+    <div className="flex flex-wrap gap-1.5 mt-2">
+      {citations.map((url, i) => (
+        <a
+          key={`${url}-${i}`}
+          href={url}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex items-center gap-1 text-[11px] text-brand bg-brand-50 hover:bg-brand-100 px-2 py-0.5 rounded-full truncate max-w-[220px]"
+          title={url}
+        >
+          <ExternalLink size={10} className="shrink-0" />
+          <span className="truncate">{hostnameOf(url)}</span>
+        </a>
+      ))}
+    </div>
+  );
+}
+
 // ── Thinking indicator ──────────────────────────────────────
-// Fills the gap between hitting Send (or Regenerate) and the first token
-// actually arriving over the wire — that gap is real network/model latency
-// (context assembly, queueing, time-to-first-token), not a rendering delay,
-// so an empty streaming bubble sitting there with just a blinking cursor
-// read as broken/stalled. Matches the assistant bubble's avatar so it reads
-// as "the same message, still arriving" rather than a separate UI element.
 function ThinkingIndicator() {
   return (
     <div className="flex gap-2.5">
@@ -206,13 +200,8 @@ function ThinkingIndicator() {
 }
 
 // ── Message bubble ────────────────────────────────────────────
-// User turns keep a compact bubble (they're short, and the contrast
-// helps you scan who said what). Assistant turns are set flush,
-// like a written answer rather than a chat balloon — closer to how
-// Linear/Notion render AI responses, and it reads less "app-generated"
-// over long, multi-paragraph replies.
 function ChatBubble({
-  message, isStreaming, streamContent, isLastMessage, isEditing,
+  message, isStreaming, streamContent, isLastMessage, isLastUserMessage, isEditing,
   onStartEdit, onCancelEdit, onSaveEdit, isSavingEdit,
   onRegenerate, isRegenerating,
 }: {
@@ -220,6 +209,7 @@ function ChatBubble({
   isStreaming?:  boolean;
   streamContent?: string;
   isLastMessage?: boolean;
+  isLastUserMessage?: boolean;
   isEditing?:    boolean;
   onStartEdit?:  (message: ChatMessage) => void;
   onCancelEdit?: () => void;
@@ -253,6 +243,7 @@ function ChatBubble({
           <div className="max-w-[85%] w-full rounded-lg rounded-br-sm bg-brand text-white px-3.5 py-2">
             <textarea
               autoFocus
+              aria-label="Edit your message"
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => {
@@ -293,13 +284,15 @@ function ChatBubble({
           <AttachmentList attachments={attachments} variant="user" />
           {content && <p className="text-sm leading-relaxed whitespace-pre-wrap">{content}</p>}
           <div className="flex justify-end items-center gap-1.5 mt-1">
-            <button
-  onClick={() => onStartEdit?.(message)}
-  title="Edit message"
-  className="text-brand-200 hover:text-white"
->
-  <Pencil size={11} />
-</button>
+            {isLastUserMessage && (
+              <button
+                onClick={() => onStartEdit?.(message)}
+                title="Edit message"
+                className="opacity-0 group-hover:opacity-100 transition-opacity text-brand-200 hover:text-white"
+              >
+                <Pencil size={11} />
+              </button>
+            )}
             {message && (
               <CopyButton
                 text={content}
@@ -322,10 +315,16 @@ function ChatBubble({
       </div>
       <div className="flex-1 min-w-0 group">
         <AttachmentList attachments={attachments} variant="assistant" />
-        <div className={cn(
-          'prose prose-sm max-w-none text-text-primary',
-          isStreaming && 'streaming-cursor',
-        )}>
+        {/* aria-live region (audit §10) — only meaningfully "live" while
+            streaming; for settled messages this is just a static region,
+            which is harmless. */}
+        <div
+          aria-live={isStreaming ? 'polite' : 'off'}
+          className={cn(
+            'prose prose-sm max-w-none text-text-primary',
+            isStreaming && 'streaming-cursor',
+          )}
+        >
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
             components={{
@@ -335,11 +334,6 @@ function ChatBubble({
               li:   ({ children }) => <li className="mb-0.5">{children}</li>,
               code: ({ children }) => <code className="bg-surface-base px-1 py-0.5 rounded text-xs font-mono">{children}</code>,
               strong: ({ children }) => <strong className="font-semibold text-text-primary">{children}</strong>,
-              // remark-gfm parses pipe tables; these give them real table
-              // styling instead of rendering as one long run-on line of
-              // text with stray "|" characters (what was happening before,
-              // since the base react-markdown setup here had no GFM plugin
-              // and no table components at all).
               table: ({ children }) => (
                 <div className="mb-2 overflow-x-auto rounded-md border border-surface-border">
                   <table className="w-full text-sm border-collapse">{children}</table>
@@ -358,6 +352,7 @@ function ChatBubble({
             {normalizeMarkdown(content)}
           </ReactMarkdown>
         </div>
+        {!isStreaming && message && <CitationList citations={message.citations} />}
         {!isStreaming && message && (
           <div className="flex items-center gap-2 mt-1">
             <span className="text-xs text-text-muted">{formatRelativeDate(message.created_at)}</span>
@@ -393,25 +388,15 @@ export default function ChatPage() {
   const [message,       setMessage]       = useState('');
   const [forceSearch,   setForceSearch]   = useState(false);
   const [isStreaming,   setIsStreaming]   = useState(false);
-  // True from the moment a send/regenerate request goes out until the first
-  // token actually arrives over the wire. Distinct from isStreaming (which
-  // covers the whole reply, including the reveal-pacing tail after the
-  // network has already finished) — this one is specifically the "dead air"
-  // gap: request sent, nothing back yet.
   const [awaitingFirstToken, setAwaitingFirstToken] = useState(false);
   const [localMessages, setLocalMessages] = useState<ChatMessage[]>([]);
   const [attachments,   setAttachments]   = useState<Array<{ name: string; type: string; url: string }>>([]);
   const [uploadingFile, setUploadingFile] = useState(false);
 
-  // Whether the scroll pane is (close enough to) the bottom. Auto-scroll
-  // only fires while this is true, so scrolling up to re-read something —
-  // including while a reply is mid-stream — doesn't get fought by the
-  // page pulling the view back down on every new chunk.
   const [isNearBottom,     setIsNearBottom]     = useState(true);
   const [showScrollButton, setShowScrollButton] = useState(false);
   const BOTTOM_THRESHOLD_PX = 120;
 
-  // In-chat search
   const [showSearch,    setShowSearch]    = useState(false);
   const [searchQuery,   setSearchQuery]   = useState('');
   const [searchResults, setSearchResults] = useState<ChatMessage[] | null>(null);
@@ -419,27 +404,17 @@ export default function ChatPage() {
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const messageRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
-  // Delete chat
   const [isDeleting, setIsDeleting] = useState(false);
-
-  // New chat (header shortcut)
   const [isCreatingChat, setIsCreatingChat] = useState(false);
 
-  // Edit last message
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [isSavingEdit,     setIsSavingEdit]     = useState(false);
 
-  // Regenerate last response
   const [isRegenerating, setIsRegenerating] = useState(false);
-  // id of the stale assistant message being replaced — hidden from
-  // `visibleMessages` while its streaming replacement renders in its place.
   const [regeneratingMessageId, setRegeneratingMessageId] = useState<string | null>(null);
 
-  // Fires once a streamed reply has fully finished revealing on screen —
-  // not the moment the network says it's done, but after every buffered
-  // character has actually been drawn. See useSmoothStream for why that
-  // distinction matters. Shared by both the normal send flow and regenerate,
-  // since only one of them is ever active at a time.
+  const stopRequestedRef = useRef(false);
+
   const handleStreamRevealComplete = useCallback(() => {
     setIsStreaming(false);
     setIsRegenerating(false);
@@ -451,12 +426,27 @@ export default function ChatPage() {
 
   const smooth = useSmoothStream(handleStreamRevealComplete);
 
-  // Fetch chat + messages
-  const { data, isLoading } = useQuery({
+  // ── FIX §4.1: infinite-scroll message pagination ────────────
+  // Initial page has no `before_seq` → backend returns the LATEST
+  // messages. `getNextPageParam` reads `oldest_seq` off the last-fetched
+  // page so "load earlier" pages backward in time via a stable keyset
+  // cursor instead of the old (broken) oldest-50-with-no-way-forward
+  // behavior.
+  const {
+    data: messagesData,
+    isLoading,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInfiniteQuery({
     queryKey: queryKeys.chat(chatId!),
-    queryFn:  () => chatApi.getById(chatId!).then((r) => r.data),
-    enabled:  !!chatId,
+    queryFn: ({ pageParam }: { pageParam?: number }) =>
+      chatApi.getById(chatId!, pageParam ? { before_seq: pageParam } : undefined).then((r) => r.data),
+    enabled: !!chatId,
     staleTime: 30_000,
+    initialPageParam: undefined as number | undefined,
+    getNextPageParam: (lastPage: ChatMessagesResponse) =>
+      lastPage.has_more ? lastPage.oldest_seq ?? undefined : undefined,
   });
 
   const { data: suggestions } = useQuery({
@@ -465,28 +455,46 @@ export default function ChatPage() {
     staleTime: 5 * 60_000,
   });
 
-  const chat     = data?.chat;
-  const dbMessages = data?.messages ?? [];
-  // Memoized on the actual message arrays (not recreated every render) so
-  // the auto-scroll effect below doesn't fire on unrelated re-renders, e.g.
-  // every keystroke while typing in the composer.
+  // Newest page is fetched first (data.pages[0]); older pages get
+  // appended after via fetchNextPage. Reverse before flattening so the
+  // final array is in chronological (oldest-first) order for display.
+  const chat        = messagesData?.pages[0]?.chat;
+  const linkedEvent = messagesData?.pages[0]?.linked_event ?? null;
+  const dbMessages  = useMemo(
+    () => [...(messagesData?.pages ?? [])].reverse().flatMap((p) => p.messages),
+    [messagesData],
+  );
+
   const visibleMessages = useMemo(() => {
     return [...dbMessages, ...localMessages]
-      .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
       .filter((m) => m.role !== 'system');
   }, [dbMessages, localMessages]);
 
-  // What actually renders: same as visibleMessages, but with the message
-  // currently being regenerated hidden — its streaming replacement is
-  // appended separately, below.
   const displayMessages = useMemo(() => {
     if (!regeneratingMessageId) return visibleMessages;
     return visibleMessages.filter((m) => m.id !== regeneratingMessageId);
   }, [visibleMessages, regeneratingMessageId]);
 
-  // Track how close to the bottom the user currently is, so we know
-  // whether to auto-stick on the next message/chunk and whether to show
-  // the "scroll to bottom" button.
+  // Preserve scroll position when older messages get prepended — without
+  // this, fetching an earlier page yanks the view because new content is
+  // inserted above what's currently visible.
+  const preservedScrollRef = useRef<{ height: number; top: number } | null>(null);
+  const handleLoadEarlier = useCallback(() => {
+    const el = scrollContainerRef.current;
+    if (el) preservedScrollRef.current = { height: el.scrollHeight, top: el.scrollTop };
+    fetchNextPage();
+  }, [fetchNextPage]);
+
+  useEffect(() => {
+    if (!preservedScrollRef.current) return;
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const { height, top } = preservedScrollRef.current;
+    const delta = el.scrollHeight - height;
+    el.scrollTop = top + delta;
+    preservedScrollRef.current = null;
+  }, [messagesData]);
+
   const handleScroll = useCallback(() => {
     const el = scrollContainerRef.current;
     if (!el) return;
@@ -509,10 +517,6 @@ export default function ChatPage() {
     setShowScrollButton(false);
   }, []);
 
-  // Auto-scroll — only while the user is already near the bottom. A new
-  // user message they just sent always snaps the view down (they expect
-  // to see it); an incoming streamed chunk only pulls the view if they
-  // haven't scrolled away.
   const messageCountRef = useRef(visibleMessages.length);
   useEffect(() => {
     const messageCountGrew = visibleMessages.length > messageCountRef.current;
@@ -525,17 +529,15 @@ export default function ChatPage() {
     } else if (isNearBottom) {
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [visibleMessages, smooth.displayed, isNearBottom, scrollToBottom]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleMessages, isNearBottom, scrollToBottom]);
 
-  // Cleanup streaming on unmount
   useEffect(() => () => abort(), [abort]);
 
   const handleSend = async () => {
     const text = message.trim();
     if ((!text && attachments.length === 0) || isStreaming || isRegenerating) return;
 
-    // Optimistic user message — includes attachments so they render
-    // immediately, before the round trip that persists them completes.
     const tempId = `temp-${generateId()}`;
     const tempMsg: ChatMessage = {
       id:              tempId,
@@ -552,6 +554,7 @@ export default function ChatPage() {
     setAttachments([]);
     setIsStreaming(true);
     setAwaitingFirstToken(true);
+    stopRequestedRef.current = false;
     smooth.reset();
 
     try {
@@ -567,21 +570,24 @@ export default function ChatPage() {
             },
             {
               onChunk: (chunk) => {
+                if (stopRequestedRef.current) return;
                 setAwaitingFirstToken(false);
                 smooth.push(chunk);
               },
-              onDone:  () => smooth.finish(),
-              onError: (err) => {
+              onDone:  (_messageId: string, _citations?: string[]) => { if (!stopRequestedRef.current) smooth.finish(); },
+              onError: (errMsg) => {
+                if (stopRequestedRef.current) return;
                 smooth.reset();
                 setIsStreaming(false);
                 setAwaitingFirstToken(false);
-                showToast(err || 'Message failed.', 'error');
+                showToast(errMsg || 'Message failed.', 'error');
               },
             },
           ),
         (attemptNumber) => showToast(`Connection dropped, retrying (${attemptNumber}/${SEND_RETRY_ATTEMPTS})…`, 'warning'),
       );
     } catch {
+      if (stopRequestedRef.current) return;
       smooth.reset();
       setIsStreaming(false);
       setAwaitingFirstToken(false);
@@ -589,21 +595,17 @@ export default function ChatPage() {
     }
   };
 
-  // Stop button — interrupts an in-flight stream. `abort()` cancels the
-  // underlying fetch/reader (see useSSE); `smooth.finish()` immediately
-  // flushes whatever content has already arrived instead of waiting for
-  // the reveal animation to catch up, so the bubble doesn't look "stuck"
-  // after the user has asked it to stop.
-  // NOTE: this assumes the backend's streamAndSave persists whatever the
-  // model had generated up to the point the client disconnects (typically
-  // via the response's 'close' event). Worth double-checking that in
-  // services/streaming.js — if it only saves on a clean/full completion,
-  // a stopped reply won't be there on refresh even though it was visible
-  // on screen.
   const handleStop = useCallback(() => {
+    stopRequestedRef.current = true;
     abort();
     smooth.finish();
-  }, [abort, smooth]);
+    setIsStreaming(false);
+    setIsRegenerating(false);
+    setRegeneratingMessageId(null);
+    setAwaitingFirstToken(false);
+    if (chatId) queryClient.invalidateQueries({ queryKey: queryKeys.chat(chatId) });
+    setLocalMessages([]);
+  }, [abort, smooth, chatId]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -612,7 +614,6 @@ export default function ChatPage() {
     }
   };
 
-  // ── In-chat search ──────────────────────────────────────────
   const runSearch = useCallback((query: string) => {
     if (!chatId || !query.trim()) {
       setSearchResults(null);
@@ -642,9 +643,6 @@ export default function ChatPage() {
     const el = messageRefs.current[messageId];
     if (el) {
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      // Brief highlight flash so the jumped-to message is easy to spot —
-      // done via inline style rather than a CSS class so this doesn't
-      // depend on any global stylesheet addition.
       const previousTransition = el.style.transition;
       const previousBackground = el.style.backgroundColor;
       el.style.transition = 'background-color 0.3s ease';
@@ -657,7 +655,6 @@ export default function ChatPage() {
     closeSearch();
   };
 
-  // ── Delete chat ─────────────────────────────────────────────
   const handleDeleteChat = async () => {
     if (!chatId) return;
     const confirmed = window.confirm('Delete this chat? This can\u2019t be undone from here.');
@@ -665,7 +662,9 @@ export default function ChatPage() {
     setIsDeleting(true);
     try {
       await chatApi.delete(chatId);
-      queryClient.invalidateQueries({ queryKey: queryKeys.chat(chatId) });
+      // Invalidate the chats list (not the deleted chat's own key) so the
+      // sidebar / list page reflects the removal immediately.
+      queryClient.invalidateQueries({ queryKey: queryKeys.chats() });
       showToast('Chat deleted.', 'success');
       navigate('/chat');
     } catch {
@@ -675,9 +674,6 @@ export default function ChatPage() {
     }
   };
 
-  // ── New chat (header shortcut) ──────────────────────────────
-  // Same behavior as the "New chat" button on ChatListPage: create a chat,
-  // then jump straight into it rather than routing back through the list.
   const handleNewChat = async () => {
     if (isCreatingChat) return;
     setIsCreatingChat(true);
@@ -691,11 +687,6 @@ export default function ChatPage() {
     }
   };
 
-  // ── Regenerate last response ────────────────────────────────
-  // Streams the replacement in, matching handleSend, rather than blocking
-  // on a single non-streaming request. The stale assistant message is
-  // hidden (via regeneratingMessageId) the moment the request goes out,
-  // and a streaming bubble takes its place until the new reply finishes.
   const handleRegenerate = async () => {
     if (!chatId || isStreaming || isRegenerating) return;
     const lastAssistant = [...visibleMessages].reverse().find((m) => m.role === 'assistant');
@@ -704,6 +695,7 @@ export default function ChatPage() {
     setIsRegenerating(true);
     setRegeneratingMessageId(lastAssistant.id);
     setAwaitingFirstToken(true);
+    stopRequestedRef.current = false;
     smooth.reset();
 
     try {
@@ -714,22 +706,25 @@ export default function ChatPage() {
             { stream: true },
             {
               onChunk: (chunk) => {
+                if (stopRequestedRef.current) return;
                 setAwaitingFirstToken(false);
                 smooth.push(chunk);
               },
-              onDone:  () => smooth.finish(),
-              onError: (err) => {
+              onDone:  (_messageId: string, _citations?: string[]) => { if (!stopRequestedRef.current) smooth.finish(); },
+              onError: (errMsg) => {
+                if (stopRequestedRef.current) return;
                 smooth.reset();
                 setIsRegenerating(false);
                 setRegeneratingMessageId(null);
                 setAwaitingFirstToken(false);
-                showToast(err || 'Could not regenerate that response.', 'error');
+                showToast(errMsg || 'Could not regenerate that response.', 'error');
               },
             },
           ),
         (attemptNumber) => showToast(`Connection dropped, retrying (${attemptNumber}/${SEND_RETRY_ATTEMPTS})…`, 'warning'),
       );
     } catch {
+      if (stopRequestedRef.current) return;
       smooth.reset();
       setIsRegenerating(false);
       setRegeneratingMessageId(null);
@@ -738,19 +733,70 @@ export default function ChatPage() {
     }
   };
 
-  // ── Edit last message ───────────────────────────────────────
   const handleStartEdit = (msg: ChatMessage) => setEditingMessageId(msg.id);
   const handleCancelEdit = () => setEditingMessageId(null);
 
   const handleSaveEdit = async (msg: ChatMessage, newText: string) => {
-    if (!chatId) return;
+    if (!chatId || isStreaming || isRegenerating || isSavingEdit) return;
+    const trimmed = newText.trim();
+    if (!trimmed) return;
+
+    const staleReply = [...visibleMessages]
+      .reverse()
+      .find((m) => m.role === 'assistant' && new Date(m.created_at) > new Date(msg.created_at));
+
+    queryClient.setQueryData(queryKeys.chat(chatId), (old: any) => {
+      if (!old?.pages) return old;
+      return {
+        ...old,
+        pages: old.pages.map((page: ChatMessagesResponse) => ({
+          ...page,
+          messages: page.messages.map((m: ChatMessage) => (m.id === msg.id ? { ...m, content: trimmed } : m)),
+        })),
+      };
+    });
+
+    setEditingMessageId(null);
     setIsSavingEdit(true);
+    setIsRegenerating(true);
+    setRegeneratingMessageId(staleReply?.id ?? null);
+    setAwaitingFirstToken(true);
+    stopRequestedRef.current = false;
+    smooth.reset();
+
     try {
-      await chatApi.editMessage(chatId, msg.id, newText);
-      setEditingMessageId(null);
-      queryClient.invalidateQueries({ queryKey: queryKeys.chat(chatId) });
+      await withSendRetry(
+        () =>
+          stream(
+            `/api/chat/${chatId}/message/${msg.id}`,
+            { message: trimmed, stream: true },
+            {
+              onChunk: (chunk) => {
+                if (stopRequestedRef.current) return;
+                setAwaitingFirstToken(false);
+                smooth.push(chunk);
+              },
+              onDone:  (_messageId: string, _citations?: string[]) => { if (!stopRequestedRef.current) smooth.finish(); },
+              onError: (errMsg) => {
+                if (stopRequestedRef.current) return;
+                smooth.reset();
+                setIsRegenerating(false);
+                setRegeneratingMessageId(null);
+                setAwaitingFirstToken(false);
+                setIsSavingEdit(false);
+                showToast(errMsg || 'Could not save your edit. Please try again.', 'error');
+              },
+            },
+          ),
+        (attemptNumber) => showToast(`Connection dropped, retrying (${attemptNumber}/${SEND_RETRY_ATTEMPTS})…`, 'warning'),
+      );
     } catch {
-      showToast('Could not save your edit. Please try again.', 'error');
+      if (stopRequestedRef.current) return;
+      smooth.reset();
+      setIsRegenerating(false);
+      setRegeneratingMessageId(null);
+      setAwaitingFirstToken(false);
+      showToast('Could not reach the server. Check your connection and try again.', 'error');
     } finally {
       setIsSavingEdit(false);
     }
@@ -759,9 +805,6 @@ export default function ChatPage() {
   const handleFileSelect = async (files: FileList | null) => {
     if (!files) return;
     const fileList = Array.from(files);
-    // Reset immediately so selecting the same file again (e.g. after
-    // removing it) still fires a change event — browsers won't re-fire
-    // onChange if the input's value hasn't changed.
     if (fileInputRef.current) fileInputRef.current.value = '';
     for (const file of fileList) {
       if (!ALLOWED_FILE_TYPES.includes(file.type)) {
@@ -807,9 +850,9 @@ export default function ChatPage() {
             <p className="text-xs text-text-muted mt-0.5 capitalize">{chat.chat_mode.replace('_', ' ')}</p>
           )}
         </div>
-        {isMeetingNotes && data?.linked_event && (
+        {isMeetingNotes && linkedEvent && (
           <button
-            onClick={() => navigate(`/calendar/${data.linked_event!.id}`)}
+            onClick={() => navigate(`/calendar/${linkedEvent.id}`)}
             className="text-text-muted hover:text-brand flex items-center gap-1 text-xs"
           >
             <Calendar size={13} /> Event
@@ -851,6 +894,7 @@ export default function ChatPage() {
               <Search size={13} className="text-text-muted shrink-0" />
               <input
                 autoFocus
+                aria-label="Search messages in this chat"
                 value={searchQuery}
                 onChange={(e) => handleSearchInputChange(e.target.value)}
                 onKeyDown={(e) => e.key === 'Escape' && closeSearch()}
@@ -888,13 +932,6 @@ export default function ChatPage() {
       )}
 
       {/* Messages */}
-      {/* min-h-0 is load-bearing here: without it, a flex child with
-          overflow-y-auto next to fixed-size siblings (the header/footer)
-          won't actually cap its own height to the available space — its
-          min-height defaults to the size of its content, so it can grow
-          past the footer boundary instead of scrolling internally. That's
-          what was letting the last message visually bleed in behind the
-          composer. */}
       <div className="relative flex-1 min-h-0">
         <div ref={scrollContainerRef} className="h-full overflow-y-auto px-4 py-4">
           <div className="max-w-4xl ml-0 mr-auto w-full space-y-4">
@@ -905,7 +942,6 @@ export default function ChatPage() {
               </div>
             ))
           ) : displayMessages.length === 0 ? (
-            /* Suggestion chips for empty chat */
             <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4 pb-8">
               <div className="w-10 h-10 rounded-md bg-brand-50 border border-surface-border flex items-center justify-center">
                 <MessageCircle size={18} className="text-brand" />
@@ -925,24 +961,47 @@ export default function ChatPage() {
             </div>
           ) : (
             <>
-              {displayMessages.map((m, i) => {
-                const isLastMessage = i === displayMessages.length - 1 && !isStreaming && !isRegenerating;
-                return (
-                  <div key={m.id} ref={(el) => { messageRefs.current[m.id] = el; }}>
-                    <ChatBubble
-                      message={m}
-                      isLastMessage={isLastMessage}
-                      isEditing={editingMessageId === m.id}
-                      onStartEdit={handleStartEdit}
-                      onCancelEdit={handleCancelEdit}
-                      onSaveEdit={handleSaveEdit}
-                      isSavingEdit={isSavingEdit}
-                      onRegenerate={handleRegenerate}
-                      isRegenerating={isRegenerating}
-                    />
-                  </div>
-                );
-              })}
+              {/* FIX §4.1: "load earlier" affordance for the keyset cursor */}
+              {hasNextPage && (
+                <div className="flex justify-center pb-2">
+                  <button
+                    onClick={handleLoadEarlier}
+                    disabled={isFetchingNextPage}
+                    className="flex items-center gap-1.5 text-xs text-text-muted hover:text-brand px-3 py-1.5 rounded-full border border-surface-border hover:border-brand-300 hover:bg-brand-50 transition-colors disabled:opacity-50"
+                  >
+                    {isFetchingNextPage
+                      ? <Loader2 size={12} className="animate-spin" />
+                      : <ChevronUp size={12} />}
+                    {isFetchingNextPage ? 'Loading…' : 'Load earlier messages'}
+                  </button>
+                </div>
+              )}
+              {(() => {
+                let lastUserIdx = -1;
+                for (let j = displayMessages.length - 1; j >= 0; j--) {
+                  if (displayMessages[j].role === 'user') { lastUserIdx = j; break; }
+                }
+                return displayMessages.map((m, i) => {
+                  const isLastMessage = i === displayMessages.length - 1 && !isStreaming && !isRegenerating;
+                  const isLastUserMessage = i === lastUserIdx && !isStreaming && !isRegenerating;
+                  return (
+                    <div key={m.id} ref={(el) => { messageRefs.current[m.id] = el; }}>
+                      <ChatBubble
+                        message={m}
+                        isLastMessage={isLastMessage}
+                        isLastUserMessage={isLastUserMessage}
+                        isEditing={editingMessageId === m.id}
+                        onStartEdit={handleStartEdit}
+                        onCancelEdit={handleCancelEdit}
+                        onSaveEdit={handleSaveEdit}
+                        isSavingEdit={isSavingEdit}
+                        onRegenerate={handleRegenerate}
+                        isRegenerating={isRegenerating}
+                      />
+                    </div>
+                  );
+                });
+              })()}
               {(isStreaming || isRegenerating) && (
                 awaitingFirstToken
                   ? <ThinkingIndicator />
@@ -968,7 +1027,6 @@ export default function ChatPage() {
       {/* Input */}
       <div className="relative z-10 shrink-0 bg-white border-t border-surface-border px-4 py-3">
         <div className="max-w-4xl ml-0 mr-auto w-full">
-          {/* Attachments preview */}
           {attachments.length > 0 && (
             <div className="flex gap-2 flex-wrap mb-2">
               {attachments.map((a, i) => (
@@ -983,10 +1041,6 @@ export default function ChatPage() {
             </div>
           )}
 
-          {/* Composer: textarea + toolbar live inside one bordered surface.
-              Background is solid (not translucent) so nothing behind it —
-              e.g. a message that hasn't scrolled out of view yet — can
-              show through. */}
           <div className="rounded-2xl border border-surface-border bg-white">
             <textarea
               ref={inputRef}
@@ -994,6 +1048,7 @@ export default function ChatPage() {
               onChange={(e) => setMessage(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder="Message Clutch AI…"
+              aria-label="Message Clutch AI"
               maxLength={CHAT_MESSAGE_MAX_LENGTH}
               rows={1}
               className={cn(
@@ -1012,7 +1067,6 @@ export default function ChatPage() {
 
             <div className="flex items-center justify-between px-2 pb-2 pt-1">
               <div className="flex items-center gap-1">
-                {/* File attach */}
                 <button
                   onClick={() => fileInputRef.current?.click()}
                   title="Attach file"
@@ -1029,7 +1083,6 @@ export default function ChatPage() {
                   onChange={(e) => handleFileSelect(e.target.files)}
                 />
 
-                {/* Web search toggle — now embedded in the input box itself */}
                 <button
                   onClick={() => setForceSearch((v) => !v)}
                   title={forceSearch ? 'Web search on' : 'Search the web'}

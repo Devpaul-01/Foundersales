@@ -1,5 +1,5 @@
-// src/config/constants.js — v5.2
-// FIXES:
+// src/config/constants.js — v5.3
+// FIXES (v5.2, kept):
 //  MED-01: FOLLOW_UP_THRESHOLDS was `const` (not exported). Any file
 //          importing it received `undefined`, causing TypeError at runtime
 //          when reading `.contacted`, `.replied`, `.call_demo`.
@@ -9,6 +9,21 @@
 //          OPP_STATUS is now a live alias reference to OPPORTUNITY_STATUS.
 //          All existing `OPP_STATUS` imports continue to work unchanged.
 //  MED-03: PIPELINE_STAGE_VALUES already fixed to Object.values(PIPELINE_STAGES).
+//
+// NEW (v5.3 — chat audit implementation):
+//  - CHAT_HISTORY_WINDOW raised from 8 to 20 messages (audit §11 / task
+//    instruction #9), paired with background summarization (below) so
+//    token cost doesn't grow unbounded as conversations get longer.
+//  - CHAT_SUMMARIZE_EVERY_N_MESSAGES: how many new non-system messages
+//    accumulate before a rolling summary job is enqueued for a chat.
+//  - CHAT_MESSAGES_PAGE_SIZE / CHAT_LIST_PAGE_SIZE: pagination page sizes
+//    for the two audit-fixed pagination bugs (message list + chat list).
+//  - CHAT_MAX_TOKENS: single shared token budget for both the streaming
+//    and non-streaming generation paths (previously 1200 vs 800 — audit
+//    §5.4 — which meant reply length silently depended on which code
+//    path served the request).
+//  - BACKGROUND_JOB_TYPES.CHAT_SUMMARIZE: new background job type for the
+//    conversation-summarization worker.
 
 // ── Follow-up timing (days since last stage change) ─────────
 // FIX MED-01: was `const` — now `export const` so followupSequenceJob
@@ -28,6 +43,7 @@ export const INVITE_EXPIRY_DAYS = 7;
 export const DEFAULT_INVITE_ROLE = 'member';
 export const WORKSPACE_PERPLEXITY_LIMITS = { free: 5, pro: 50, enterprise: 200 };
 export const CHAT_MODES = { GENERAL: 'general', MEETING_NOTES: 'meeting_notes', PREP: 'prep', FOLLOWUP_COACH: 'followup_coach' };
+export const CHAT_MODE_VALUES = Object.values(CHAT_MODES);
 export const MEETING_OUTCOMES = { HOT: 'hot', POSITIVE: 'positive', NEUTRAL: 'neutral', COLD: 'cold', DEAD: 'dead' };
 export const MEETING_OUTCOME_LABELS = { hot: '🔥 Hot', positive: '✅ Positive', neutral: '😐 Neutral', cold: '❄️ Cold', dead: '💀 Dead end' };
 export const SIGNAL_TYPES = { BUYING: 'buying', RISK: 'risk', TIMING: 'timing', ENGAGEMENT: 'engagement' };
@@ -51,16 +67,12 @@ export const STAGE_LABELS = { new: 'New', contacted: 'Contacted', replied: 'Repl
 export const STAGE_COLORS = { new: '#64748B', contacted: '#3B82F6', replied: '#8B5CF6', call_demo: '#F59E0B', closed_won: '#10B981', closed_lost: '#F43F5E' };
 
 // FIX MED-02: OPP_STATUS is now a live alias of OPPORTUNITY_STATUS.
-// Both names export the same object reference — updating OPPORTUNITY_STATUS
-// automatically updates OPP_STATUS. Prefer OPPORTUNITY_STATUS in new code.
-// Status lifecycle: pending (untouched) → viewed (auto on open) → sent (feedback logged)
-// ACTED and DONE removed — simplified to 3 states.
 export const OPPORTUNITY_STATUS = { PENDING: 'pending', VIEWED: 'viewed', SENT: 'sent' };
 export const OPP_STATUS = OPPORTUNITY_STATUS; // @deprecated — use OPPORTUNITY_STATUS
 
 export const FEEDBACK_OUTCOMES = { POSITIVE: 'positive', NEGATIVE: 'negative' };
 export const CHAT_TYPES = { GENERAL: 'general', OPPORTUNITY: 'opportunity', PRACTICE: 'practice' };
-export const DELIVERY_STATUS = { PENDING: 'pending', DELIVERED: 'delivered', SEEN: 'seen', REPLIED: 'replied', GHOSTED: 'ghosted' };
+export const DELIVERY_STATUS = { PENDING: 'pending', DELIVERED: 'delivered', SEEN: 'seen', REPLIED: 'replied', GHOSTED: 'ghosted', FAILED: 'failed' };
 export const PRACTICE_SCENARIOS = [
   { type: 'interested',     weight: 25, label: 'Interested Lead',  reply_delay_range: [30, 120] },
   { type: 'polite_decline', weight: 25, label: 'Polite No',        reply_delay_range: [60, 300] },
@@ -126,6 +138,8 @@ export const QUEUE_JOB_TYPES = {
 // FIX Issue 14: CALENDAR_PREP_GENERATE and CALENDAR_RESEARCH_PROSPECT added
 // so calendar.js can enqueue via constant and backgroundWorker.js can dispatch
 // by the same constant — eliminates fire-and-forget for prep/research.
+// NEW (chat audit): CHAT_SUMMARIZE — background conversation summarization,
+// see backgroundWorker.js and chat.js's maybeEnqueueSummarization().
 export const BACKGROUND_JOB_TYPES = {
   TIP_CARD_GENERATE:          'tip_card_generate',
   OPPORTUNITIES_REFRESH:      'opportunities_refresh',
@@ -135,6 +149,7 @@ export const BACKGROUND_JOB_TYPES = {
   CHECKIN_TIP_GENERATE:       'checkin_tip_generate',
   CALENDAR_PREP_GENERATE:     'calendar_prep_generate',      // Issue 14
   CALENDAR_RESEARCH_PROSPECT: 'calendar_research_prospect',  // Issue 14
+  CHAT_SUMMARIZE:             'chat_summarize',              // Chat audit §11
 };
 
 // Gap 3: activity event types
@@ -142,3 +157,22 @@ export const ACTIVITY_EVENTS = { PRACTICE_COMPLETED: 'practice_completed', DEAL_
 export const MAX_FILE_SIZE = 10*1024*1024;
 export const ALLOWED_FILE_TYPES = ['image/jpeg','image/png','image/gif','image/webp','application/pdf','text/plain','text/csv'];
 export const UPLOAD_LIMITS = { MAX_SIZE_BYTES: 10*1024*1024, ALLOWED_TYPES: ['image/jpeg','image/png','image/gif','image/webp','application/pdf','text/plain','text/csv'], SUPABASE_BUCKET: 'clutch-uploads' };
+
+// ── Chat audit implementation constants ───────────────────────
+// CHAT_HISTORY_WINDOW: how many recent non-system messages get replayed
+// verbatim to the model on each turn. Raised from 8 → 20 per the audit's
+// AI-infra recommendation (§11) and the task's explicit instruction (#9).
+// Paired with CHAT_SUMMARIZE_EVERY_N_MESSAGES so cost stays bounded: once
+// a chat has more than CHAT_HISTORY_WINDOW non-system messages, anything
+// older is progressively folded into chats.summary instead of resent raw.
+export const CHAT_HISTORY_WINDOW = 20;
+export const CHAT_SUMMARIZE_EVERY_N_MESSAGES = 20;
+
+// Shared token budget for BOTH the streaming and non-streaming generation
+// paths (audit §5.4 — these used to be 1200 vs 800, so reply length
+// silently depended on which code path served a given request).
+export const CHAT_MAX_TOKENS = 1000;
+
+// Pagination page sizes (audit §4.1 / task instructions #5, #6).
+export const CHAT_MESSAGES_PAGE_SIZE = 30;
+export const CHAT_LIST_PAGE_SIZE = 30;

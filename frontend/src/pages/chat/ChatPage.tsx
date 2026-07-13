@@ -47,7 +47,7 @@ import {
   Send, Globe, Paperclip, ArrowLeft,
   Calendar, MessageCircle, X, FileText, ChevronDown, ChevronUp,
   Search, Trash2, RotateCw, Pencil, Check, Loader2,
-  Square, Plus, ExternalLink,
+  Square, Plus, ExternalLink, Download, FileDown,
 } from 'lucide-react';
 
 // ── Attachments ─────────────────────────────────────────────
@@ -87,6 +87,102 @@ async function withSendRetry(attempt: () => Promise<void>, onRetry?: (attemptNum
 
 function normalizeMarkdown(content: string): string {
   return content.replace(/<br\s*\/?>/gi, '\n');
+}
+
+// ── Conversation export (NEW) ────────────────────────────────
+// The server only produces Markdown (no PDF engine in that service — see
+// chat.js). "Export as PDF" reuses the same markdown and turns it into a
+// PDF locally via the browser's print dialog, so users don't need a
+// second round trip or a heavy client-side PDF library for something
+// they'll mostly just save-as from the print sheet anyway.
+function downloadTextFile(filename: string, content: string, mimeType: string) {
+  const blob = new Blob([content], { type: mimeType });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+// Deliberately narrow: this only needs to handle the specific markdown
+// subset chat.js's buildChatExportMarkdown produces (headers, hr rules,
+// bold "Sources:" label, bullet lists, plain paragraphs) — not general
+// CommonMark.
+function chatExportMarkdownToHtml(markdown: string): string {
+  const lines = markdown.split('\n');
+  const htmlParts: string[] = [];
+  let inList = false;
+
+  const closeList = () => {
+    if (inList) { htmlParts.push('</ul>'); inList = false; }
+  };
+
+  const inlineFormat = (text: string) =>
+    escapeHtml(text).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) { closeList(); continue; }
+    if (line === '---') { closeList(); htmlParts.push('<hr />'); continue; }
+    if (line.startsWith('### ')) { closeList(); htmlParts.push(`<h3>${inlineFormat(line.slice(4))}</h3>`); continue; }
+    if (line.startsWith('# ')) { closeList(); htmlParts.push(`<h1>${inlineFormat(line.slice(2))}</h1>`); continue; }
+    if (line.startsWith('- ')) {
+      if (!inList) { htmlParts.push('<ul>'); inList = true; }
+      htmlParts.push(`<li>${inlineFormat(line.slice(2))}</li>`);
+      continue;
+    }
+    if (line.startsWith('_') && line.endsWith('_') && line.length > 1) {
+      closeList();
+      htmlParts.push(`<p class="muted">${inlineFormat(line.slice(1, -1))}</p>`);
+      continue;
+    }
+    closeList();
+    htmlParts.push(`<p>${inlineFormat(line)}</p>`);
+  }
+  closeList();
+
+  return htmlParts.join('\n');
+}
+
+function openPrintableExport(title: string, markdown: string) {
+  const win = window.open('', '_blank');
+  if (!win) return false;
+  const bodyHtml = chatExportMarkdownToHtml(markdown);
+  win.document.write(`<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>${escapeHtml(title)}</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #1a1a1a; max-width: 720px; margin: 2rem auto; padding: 0 1.5rem; line-height: 1.55; }
+  h1 { font-size: 1.4rem; margin-bottom: 0.25rem; }
+  h3 { font-size: 0.95rem; margin: 1.25rem 0 0.35rem; color: #444; }
+  p { font-size: 0.9rem; margin: 0.35rem 0; white-space: pre-wrap; }
+  p.muted { color: #888; font-size: 0.8rem; }
+  ul { margin: 0.35rem 0; padding-left: 1.25rem; font-size: 0.85rem; }
+  hr { border: none; border-top: 1px solid #e2e2e2; margin: 1rem 0; }
+  @media print { body { margin: 0; padding: 1rem; } }
+</style>
+</head>
+<body>
+${bodyHtml}
+</body>
+</html>`);
+  win.document.close();
+  win.focus();
+  // Give the new document a beat to lay out before the print dialog opens.
+  setTimeout(() => win.print(), 250);
+  return true;
 }
 
 function getAttachments(message?: ChatMessage): MessageAttachment[] {
@@ -184,17 +280,28 @@ function CitationList({ citations }: { citations?: string[] | null }) {
 }
 
 // ── Thinking indicator ──────────────────────────────────────
-function ThinkingIndicator() {
+// NEW: accepts an optional `label`. Plain "waiting on the model" turns
+// still get the classic bouncing dots; force_search turns pass a label
+// so the gap while Exa runs (before any token has streamed back) reads
+// as "Searching the web…" instead of unexplained silence.
+function ThinkingIndicator({ label }: { label?: string }) {
   return (
     <div className="flex gap-2.5">
       <div className="w-6 h-6 rounded-md bg-brand-50 border border-surface-border flex items-center justify-center text-brand text-[10px] font-semibold shrink-0 mt-0.5">
         C
       </div>
-      <div className="flex items-center gap-1 h-6">
-        <span className="w-1.5 h-1.5 rounded-full bg-text-muted/50 animate-bounce [animation-delay:-0.3s]" />
-        <span className="w-1.5 h-1.5 rounded-full bg-text-muted/50 animate-bounce [animation-delay:-0.15s]" />
-        <span className="w-1.5 h-1.5 rounded-full bg-text-muted/50 animate-bounce" />
-      </div>
+      {label ? (
+        <div className="flex items-center gap-1.5 h-6 text-xs text-text-muted">
+          <Globe size={12} className="text-brand animate-pulse" />
+          <span>{label}</span>
+        </div>
+      ) : (
+        <div className="flex items-center gap-1 h-6">
+          <span className="w-1.5 h-1.5 rounded-full bg-text-muted/50 animate-bounce [animation-delay:-0.3s]" />
+          <span className="w-1.5 h-1.5 rounded-full bg-text-muted/50 animate-bounce [animation-delay:-0.15s]" />
+          <span className="w-1.5 h-1.5 rounded-full bg-text-muted/50 animate-bounce" />
+        </div>
+      )}
     </div>
   );
 }
@@ -359,7 +466,7 @@ function ChatBubble({
             <CopyButton text={content} className="opacity-0 group-hover:opacity-100" />
             {isLastMessage && (
               <button
-                onClick={onRegenerate}
+                onClick={() => onRegenerate?.()}
                 disabled={isRegenerating}
                 title="Regenerate response"
                 className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1 text-xs text-text-muted hover:text-brand disabled:opacity-50"
@@ -389,9 +496,18 @@ export default function ChatPage() {
   const [forceSearch,   setForceSearch]   = useState(false);
   const [isStreaming,   setIsStreaming]   = useState(false);
   const [awaitingFirstToken, setAwaitingFirstToken] = useState(false);
+  // NEW: true only while a force_search turn is waiting on Exa, before
+  // the model has started streaming a single token — lets the loading
+  // state say "Searching the web…" instead of the generic thinking dots.
+  const [awaitingWebSearch, setAwaitingWebSearch] = useState(false);
   const [localMessages, setLocalMessages] = useState<ChatMessage[]>([]);
   const [attachments,   setAttachments]   = useState<Array<{ name: string; type: string; url: string }>>([]);
   const [uploadingFile, setUploadingFile] = useState(false);
+
+  // NEW: conversation export (Markdown / print-to-PDF)
+  const [showExportMenu, setShowExportMenu] = useState(false);
+  const [isExporting,    setIsExporting]    = useState<'markdown' | 'pdf' | null>(null);
+  const exportMenuRef = useRef<HTMLDivElement>(null);
 
   const [isNearBottom,     setIsNearBottom]     = useState(true);
   const [showScrollButton, setShowScrollButton] = useState(false);
@@ -420,6 +536,7 @@ export default function ChatPage() {
     setIsRegenerating(false);
     setRegeneratingMessageId(null);
     setAwaitingFirstToken(false);
+    setAwaitingWebSearch(false);
     queryClient.invalidateQueries({ queryKey: queryKeys.chat(chatId!) });
     setLocalMessages([]);
   }, [chatId]);
@@ -517,21 +634,26 @@ export default function ChatPage() {
     setShowScrollButton(false);
   }, []);
 
-  const messageCountRef = useRef(visibleMessages.length);
-  useEffect(() => {
-    const messageCountGrew = visibleMessages.length > messageCountRef.current;
-    messageCountRef.current = visibleMessages.length;
-    const lastMessage = visibleMessages[visibleMessages.length - 1];
-    const justSentByUser = messageCountGrew && lastMessage?.role === 'user';
+  // Replace lines ~304-316 with:
+const messageCountRef = useRef(visibleMessages.length);
+const isStreamingRef = useRef(isStreaming);
 
-    if (justSentByUser) {
-      scrollToBottom();
-    } else if (isNearBottom) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleMessages, isNearBottom, scrollToBottom]);
+useEffect(() => {
+  const messageCountGrew = visibleMessages.length > messageCountRef.current;
+  messageCountRef.current = visibleMessages.length;
+  const lastMessage = visibleMessages[visibleMessages.length - 1];
+  const justSentByUser = messageCountGrew && lastMessage?.role === 'user';
 
+  // NEW: Auto-scroll during streaming if we were at bottom or just sent a message
+  const shouldScroll = 
+    justSentByUser ||                                    // User just sent message
+    (isStreaming && messageCountGrew) ||                 // Streaming new content
+    (isNearBottom && messageCountGrew);                  // Already at bottom
+
+  if (shouldScroll) {
+    scrollToBottom();
+  }
+}, [visibleMessages, isNearBottom, scrollToBottom, isStreaming]);
   useEffect(() => () => abort(), [abort]);
 
   const handleSend = async () => {
@@ -548,12 +670,14 @@ export default function ChatPage() {
       created_at:      new Date().toISOString(),
       attachments:     attachments.length > 0 ? attachments : undefined,
     } as ChatMessage;
+    const searchRequested = forceSearch;
     setLocalMessages((prev) => [...prev, tempMsg]);
     setMessage('');
     setForceSearch(false);
     setAttachments([]);
     setIsStreaming(true);
     setAwaitingFirstToken(true);
+    setAwaitingWebSearch(searchRequested);
     stopRequestedRef.current = false;
     smooth.reset();
 
@@ -565,13 +689,14 @@ export default function ChatPage() {
             {
               message:      text || '[attachment]',
               stream:       true,
-              force_search: forceSearch,
+              force_search: searchRequested,
               attachments:  attachments.length > 0 ? attachments : undefined,
             },
             {
               onChunk: (chunk) => {
                 if (stopRequestedRef.current) return;
                 setAwaitingFirstToken(false);
+                setAwaitingWebSearch(false);
                 smooth.push(chunk);
               },
               onDone:  (_messageId: string, _citations?: string[]) => { if (!stopRequestedRef.current) smooth.finish(); },
@@ -580,6 +705,7 @@ export default function ChatPage() {
                 smooth.reset();
                 setIsStreaming(false);
                 setAwaitingFirstToken(false);
+                setAwaitingWebSearch(false);
                 showToast(errMsg || 'Message failed.', 'error');
               },
             },
@@ -591,6 +717,7 @@ export default function ChatPage() {
       smooth.reset();
       setIsStreaming(false);
       setAwaitingFirstToken(false);
+      setAwaitingWebSearch(false);
       showToast('Could not reach the server. Check your connection and try again.', 'error');
     }
   };
@@ -603,6 +730,7 @@ export default function ChatPage() {
     setIsRegenerating(false);
     setRegeneratingMessageId(null);
     setAwaitingFirstToken(false);
+    setAwaitingWebSearch(false);
     if (chatId) queryClient.invalidateQueries({ queryKey: queryKeys.chat(chatId) });
     setLocalMessages([]);
   }, [abort, smooth, chatId]);
@@ -687,14 +815,22 @@ export default function ChatPage() {
     }
   };
 
-  const handleRegenerate = async () => {
+  // FIX: regenerate now accepts an optional force_search override so a
+  // regenerated reply can pull fresh Exa results too, mirroring handleSend.
+  // Reuses the composer's existing `forceSearch` toggle by default (if the
+  // person left "Search" on before clicking Regenerate, the regenerated
+  // reply searches too) — callers can also pass an explicit value.
+  const handleRegenerate = async (forceSearchOverride?: boolean) => {
     if (!chatId || isStreaming || isRegenerating) return;
     const lastAssistant = [...visibleMessages].reverse().find((m) => m.role === 'assistant');
     if (!lastAssistant) return;
 
+    const searchRequested = forceSearchOverride ?? forceSearch;
+
     setIsRegenerating(true);
     setRegeneratingMessageId(lastAssistant.id);
     setAwaitingFirstToken(true);
+    setAwaitingWebSearch(searchRequested);
     stopRequestedRef.current = false;
     smooth.reset();
 
@@ -703,11 +839,12 @@ export default function ChatPage() {
         () =>
           stream(
             `/api/chat/${chatId}/regenerate`,
-            { stream: true },
+            { stream: true, force_search: searchRequested },
             {
               onChunk: (chunk) => {
                 if (stopRequestedRef.current) return;
                 setAwaitingFirstToken(false);
+                setAwaitingWebSearch(false);
                 smooth.push(chunk);
               },
               onDone:  (_messageId: string, _citations?: string[]) => { if (!stopRequestedRef.current) smooth.finish(); },
@@ -717,6 +854,7 @@ export default function ChatPage() {
                 setIsRegenerating(false);
                 setRegeneratingMessageId(null);
                 setAwaitingFirstToken(false);
+                setAwaitingWebSearch(false);
                 showToast(errMsg || 'Could not regenerate that response.', 'error');
               },
             },
@@ -729,6 +867,7 @@ export default function ChatPage() {
       setIsRegenerating(false);
       setRegeneratingMessageId(null);
       setAwaitingFirstToken(false);
+      setAwaitingWebSearch(false);
       showToast('Could not reach the server. Check your connection and try again.', 'error');
     }
   };
@@ -835,6 +974,77 @@ export default function ChatPage() {
     }
   };
 
+  // ── NEW: conversation export (Markdown / print-to-PDF) ───────
+  const handleExport = async (format: 'markdown' | 'pdf') => {
+    if (!chatId || isExporting) return;
+    setShowExportMenu(false);
+    setIsExporting(format);
+    try {
+      const { data } = await chatApi.export(chatId);
+      if (format === 'markdown') {
+        downloadTextFile(data.filename, data.content, 'text/markdown;charset=utf-8');
+      } else {
+        const opened = openPrintableExport(chat?.title || data.filename, data.content);
+        if (!opened) showToast('Could not open the print window. Check your pop-up blocker.', 'error');
+      }
+    } catch {
+      showToast('Could not export this chat. Please try again.', 'error');
+    } finally {
+      setIsExporting(null);
+    }
+  };
+
+  useEffect(() => {
+    if (!showExportMenu) return;
+    const handleOutsideClick = (e: MouseEvent) => {
+      if (exportMenuRef.current && !exportMenuRef.current.contains(e.target as Node)) {
+        setShowExportMenu(false);
+      }
+    };
+    document.addEventListener('mousedown', handleOutsideClick);
+    return () => document.removeEventListener('mousedown', handleOutsideClick);
+  }, [showExportMenu]);
+
+  // ── NEW: keyboard shortcuts (§ audit — Enter-to-send and
+  // Escape-to-cancel-edit existed; stop/new-chat/focus-composer didn't) ─
+  // Escape: stop an in-flight generation, else cancel an in-progress
+  //   edit, else close the in-chat search panel — first one that applies.
+  // Ctrl/Cmd+Shift+O: start a new chat (matches the convention several
+  //   comparable chat products use for this action).
+  // Ctrl/Cmd+/: focus the composer from anywhere in the page.
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      const isModified = e.metaKey || e.ctrlKey;
+
+      if (isModified && e.shiftKey && e.key.toLowerCase() === 'o') {
+        e.preventDefault();
+        handleNewChat();
+        return;
+      }
+
+      if (isModified && e.key === '/') {
+        e.preventDefault();
+        inputRef.current?.focus();
+        return;
+      }
+
+      if (e.key === 'Escape') {
+        if (isStreaming || isRegenerating) {
+          handleStop();
+        } else if (editingMessageId) {
+          handleCancelEdit();
+        } else if (showExportMenu) {
+          setShowExportMenu(false);
+        } else if (showSearch) {
+          closeSearch();
+        }
+      }
+    };
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isStreaming, isRegenerating, editingMessageId, showSearch, showExportMenu, handleStop]);
+
   const isMeetingNotes = chat?.chat_mode === 'meeting_notes';
 
   return (
@@ -868,10 +1078,42 @@ export default function ChatPage() {
         >
           <Search size={15} />
         </button>
+        {/* NEW: conversation export (Markdown / print-to-PDF) */}
+        <div className="relative" ref={exportMenuRef}>
+          <button
+            onClick={() => setShowExportMenu((v) => !v)}
+            disabled={!chatId || visibleMessages.length === 0}
+            title="Export conversation"
+            className={cn(
+              'p-1.5 rounded-md transition-colors disabled:opacity-40',
+              showExportMenu ? 'text-brand bg-brand-50' : 'text-text-muted hover:text-brand hover:bg-brand-50',
+            )}
+          >
+            {isExporting ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
+          </button>
+          {showExportMenu && (
+            <div className="absolute right-0 top-full mt-1 w-44 rounded-lg border border-surface-border bg-white shadow-md py-1 z-20">
+              <button
+                onClick={() => handleExport('markdown')}
+                disabled={!!isExporting}
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-text-secondary hover:bg-surface-base hover:text-text-primary disabled:opacity-50"
+              >
+                <FileText size={13} /> Export as Markdown
+              </button>
+              <button
+                onClick={() => handleExport('pdf')}
+                disabled={!!isExporting}
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-text-secondary hover:bg-surface-base hover:text-text-primary disabled:opacity-50"
+              >
+                <FileDown size={13} /> Export as PDF
+              </button>
+            </div>
+          )}
+        </div>
         <button
           onClick={handleNewChat}
           disabled={isCreatingChat}
-          title="New chat"
+          title="New chat (Ctrl/Cmd+Shift+O)"
           className="p-1.5 rounded-md text-text-muted hover:text-brand hover:bg-brand-50 transition-colors disabled:opacity-50"
         >
           {isCreatingChat ? <Loader2 size={15} className="animate-spin" /> : <Plus size={15} />}
@@ -1004,7 +1246,7 @@ export default function ChatPage() {
               })()}
               {(isStreaming || isRegenerating) && (
                 awaitingFirstToken
-                  ? <ThinkingIndicator />
+                  ? <ThinkingIndicator label={awaitingWebSearch ? 'Searching the web…' : undefined} />
                   : <ChatBubble streamContent={smooth.displayed} isStreaming />
               )}
             </>
@@ -1047,7 +1289,7 @@ export default function ChatPage() {
               value={message}
               onChange={(e) => setMessage(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Message Clutch AI…"
+              placeholder="Message Clutch AI… (Ctrl/Cmd+/ to focus)"
               aria-label="Message Clutch AI"
               maxLength={CHAT_MESSAGE_MAX_LENGTH}
               rows={1}
@@ -1103,7 +1345,7 @@ export default function ChatPage() {
                 leftIcon={isStreaming ? <Square size={12} className="fill-current" /> : <Send size={13} />}
                 disabled={isRegenerating || (!isStreaming && !message.trim() && attachments.length === 0)}
                 onClick={isStreaming ? handleStop : handleSend}
-                title={isStreaming ? 'Stop generating' : 'Send'}
+                title={isStreaming ? 'Stop generating (Esc)' : 'Send'}
                 className="!rounded-full shrink-0"
               >
                 {isStreaming ? 'Stop' : 'Send'}

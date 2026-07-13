@@ -377,17 +377,37 @@ Return ONLY this JSON:
 // smart observation or clarifying question. Fast model only.
 // ──────────────────────────────────────────────────────────────────────────────
 export const generateMeetingNotesResponse = async (noteFragment, conversationHistory = [], eventContext = {}) => {
-  const history = conversationHistory.slice(-6).map(m => ({
+  const history = conversationHistory.map(m => ({
     role:    m.role,
     content: m.content,
   }));
 
-  const systemPrompt = `You are a silent partner helping a founder capture notes DURING or RIGHT AFTER a live sales meeting.
-
+  // ── Build rich event context ──────────────────────────────────────────────
+  const eventDetails = `
 MEETING CONTEXT:
 Title: ${eventContext.title || 'Sales meeting'}
-With: ${eventContext.attendee_name || 'prospect'}
-Type: ${eventContext.event_type || 'meeting'}
+Attendee: ${eventContext.attendee_name || 'prospect'}
+Company/Context: ${eventContext.attendee_context || 'Not specified'}
+Event Type: ${eventContext.event_type || 'meeting'}
+Date: ${eventContext.event_date || 'Not specified'}
+Time: ${eventContext.start_time ? new Date(eventContext.start_time).toLocaleString() : 'Not specified'}
+Duration: ${eventContext.end_time ? `${new Date(eventContext.end_time).toLocaleTimeString()} (end)` : 'Not specified'}
+
+PRIOR KNOWLEDGE:
+${eventContext.notes ? `- Pre-meeting notes: ${eventContext.notes}` : ''}
+${eventContext.outcome ? `- Outcome: ${eventContext.outcome}` : ''}
+${eventContext.prep_content ? `- Prep content: ${JSON.stringify(eventContext.prep_content, null, 2)}` : ''}
+${eventContext.perplexity_research ? `- Research available: ${JSON.stringify(eventContext.perplexity_research, null, 2)}` : ''}
+${eventContext.follow_up_options ? `- Follow-up options: ${JSON.stringify(eventContext.follow_up_options, null, 2)}` : ''}
+
+MEETING STATUS:
+${eventContext.prep_generated ? '✅ Prep was generated' : '❌ No prep generated'}
+${eventContext.signals_extracted ? '✅ Signals extracted' : '❌ Signals not extracted'}
+`;
+
+  const systemPrompt = `You are a silent partner helping a founder capture notes DURING or RIGHT AFTER a live sales meeting.
+
+${eventDetails}
 
 YOUR JOB:
 - Accept raw, fragmented notes from the founder
@@ -401,21 +421,39 @@ RULES:
 - 1-2 sentences MAXIMUM
 - If a note mentions a number, pricing, timeline, or competitor — flag it
 - If a note sounds like a buying signal — surface it briefly
-- Sound like a sharp colleague, not an AI assistant`;
+- Reference the attendee by name if you know it
+- If the founder mentions the attendee's company, connect it to context
+- Sound like a sharp colleague, not an AI assistant
+- If you notice a gap between the pre-meeting notes and what's being captured, ask about it
+- Flag any inconsistencies or new information that contradicts the prep`;
 
   // Check if founder is ending the meeting
   const trimmed = noteFragment.trim().toLowerCase();
-  if (['done', 'end', 'finished', 'meeting over', 'that\'s it', 'end meeting'].some(k => trimmed.includes(k))) {
-    return { content: '__END_MEETING__', is_end: true };
+  const endKeywords = ['done', 'end', 'finished', 'meeting over', 'that\'s it', 'end meeting', 'wrap up'];
+  if (endKeywords.some(k => trimmed.includes(k))) {
+    // ── Generate a quick summary before ending ──────────────────────────────
+    try {
+      const summaryPrompt = `Based on this meeting, provide a 1-sentence summary of the outcome and next step for ${eventContext.attendee_name || 'the prospect'}: "${noteFragment}"`;
+      const { content: summary } = await callWithFallbackGroq({
+        systemPrompt: 'You are a sharp colleague summarizing a sales meeting outcome in 1 sentence. Include: key outcome + next step.',
+        messages: [{ role: 'user', content: summaryPrompt }],
+        temperature: 0.4,
+        maxTokens: 40,
+        tier: 'fast',
+      });
+      return { content: `__END_MEETING__`, is_end: true, summary: summary.trim() };
+    } catch {
+      return { content: '__END_MEETING__', is_end: true };
+    }
   }
 
   try {
     const { content } = await callWithFallbackGroq({
       systemPrompt,
-      messages:    [...history, { role: 'user', content: noteFragment }],
+      messages: [...history, { role: 'user', content: noteFragment }],
       temperature: 0.6,
-      maxTokens:   100,
-      tier:        'fast',
+      maxTokens: 120,
+      tier: 'fast',
     });
 
     const isEnd = content.trim() === '__END_MEETING__';

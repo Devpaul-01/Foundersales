@@ -39,6 +39,24 @@ const TYPE_DOT: Record<string, string> = {
   practice:    'bg-purple-500',
 };
 
+// FIX: chat list filters (type + mode). Values match chatApi.list()'s
+// `type`/`mode` params, which the server (chat.js GET /) applies as
+// `.eq('chat_type', type)` / `.eq('chat_mode', mode)` when present.
+const TYPE_FILTER_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: '',            label: 'All types' },
+  { value: 'general',     label: 'General' },
+  { value: 'opportunity', label: 'Opportunity' },
+  { value: 'practice',    label: 'Practice' },
+];
+
+const MODE_FILTER_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: '',               label: 'All modes' },
+  { value: 'general',        label: 'General' },
+  { value: 'meeting_notes',  label: 'Meeting notes' },
+  { value: 'prep',           label: 'Prep' },
+  { value: 'followup_coach', label: 'Follow-up coach' },
+];
+
 function useDebouncedValue<T>(value: T, delayMs: number): T {
   const [debounced, setDebounced] = useState(value);
   useEffect(() => {
@@ -250,14 +268,20 @@ export default function ChatListPage() {
   const [searchInput, setSearchInput] = useState('');
   const debouncedSearch = useDebouncedValue(searchInput, 300);
 
+  // FIX: chat type / mode filters, sent through to chatApi.list() as
+  // `type`/`mode`. Empty string means "no filter" (all types/modes).
+  const [typeFilter, setTypeFilter] = useState('');
+  const [modeFilter, setModeFilter] = useState('');
+
   const [openMenuId, setOpenMenuId]           = useState<string | null>(null);
   const [editingId, setEditingId]             = useState<string | null>(null);
   const [renameValue, setRenameValue]         = useState('');
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
-  // FIX (task #6): paginated chat list. Re-keyed on `debouncedSearch` so
-  // changing the search term starts a fresh paginated result set instead
-  // of trying to splice pages fetched under a different query.
+  // FIX (task #6): paginated chat list. Re-keyed on `debouncedSearch` /
+  // `typeFilter` / `modeFilter` so changing any of them starts a fresh
+  // paginated result set instead of trying to splice pages fetched under
+  // different filters.
   const {
     data,
     isLoading,
@@ -265,10 +289,15 @@ export default function ChatListPage() {
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteQuery({
-    queryKey: [...queryKeys.chats(), { search: debouncedSearch }],
+    queryKey: [...queryKeys.chats(), { search: debouncedSearch, type: typeFilter, mode: modeFilter }],
     queryFn: ({ pageParam }: { pageParam?: number }) =>
-      chatApi.list({ limit: CHAT_LIST_PAGE_SIZE, offset: pageParam ?? 0, search: debouncedSearch || undefined })
-        .then((r) => r.data),
+      chatApi.list({
+        limit:  CHAT_LIST_PAGE_SIZE,
+        offset: pageParam ?? 0,
+        search: debouncedSearch || undefined,
+        type:   (typeFilter || undefined) as 'general' | 'opportunity' | 'practice' | undefined,
+        mode:   (modeFilter || undefined) as 'general' | 'meeting_notes' | 'prep' | 'followup_coach' | undefined,
+      }).then((r) => r.data),
     staleTime: 30_000,
     initialPageParam: 0,
     getNextPageParam: (lastPage) => (lastPage.has_more ? lastPage.next_offset ?? undefined : undefined),
@@ -308,7 +337,8 @@ export default function ChatListPage() {
     renameMutation.mutate({ chatId, title: trimmed });
   };
 
-  const hasSearch = debouncedSearch.trim().length > 0;
+  const hasSearch  = debouncedSearch.trim().length > 0;
+  const hasFilters = hasSearch || !!typeFilter || !!modeFilter;
 
   return (
     <div className="page-container space-y-4">
@@ -352,6 +382,46 @@ export default function ChatListPage() {
         )}
       </div>
 
+      <div className="flex items-center gap-2">
+        <select
+          value={typeFilter}
+          onChange={(e) => setTypeFilter(e.target.value)}
+          aria-label="Filter by chat type"
+          className={cn(
+            'text-xs border border-surface-border rounded-md pl-2.5 pr-7 py-1.5 outline-none focus:border-brand bg-white',
+            typeFilter ? 'text-text-primary font-medium' : 'text-text-muted',
+          )}
+        >
+          {TYPE_FILTER_OPTIONS.map((opt) => (
+            <option key={opt.value || 'all'} value={opt.value}>{opt.label}</option>
+          ))}
+        </select>
+
+        <select
+          value={modeFilter}
+          onChange={(e) => setModeFilter(e.target.value)}
+          aria-label="Filter by chat mode"
+          className={cn(
+            'text-xs border border-surface-border rounded-md pl-2.5 pr-7 py-1.5 outline-none focus:border-brand bg-white',
+            modeFilter ? 'text-text-primary font-medium' : 'text-text-muted',
+          )}
+        >
+          {MODE_FILTER_OPTIONS.map((opt) => (
+            <option key={opt.value || 'all'} value={opt.value}>{opt.label}</option>
+          ))}
+        </select>
+
+        {(typeFilter || modeFilter) && (
+          <button
+            type="button"
+            onClick={() => { setTypeFilter(''); setModeFilter(''); }}
+            className="text-xs text-text-muted hover:text-brand px-1.5 py-1 rounded hover:bg-surface-hover"
+          >
+            Clear filters
+          </button>
+        )}
+      </div>
+
       <div
         className={cn(
           'bg-white border border-surface-border rounded-lg',
@@ -371,12 +441,19 @@ export default function ChatListPage() {
             ))}
           </div>
         ) : !chats.length ? (
-          hasSearch ? (
+          hasFilters ? (
             <EmptyState
               icon={<Search size={22} />}
               headline="No matching chats"
-              subline={`Nothing matches "${debouncedSearch}". Try a different search.`}
-              action={{ label: 'Clear search', onClick: () => setSearchInput('') }}
+              subline={
+                hasSearch
+                  ? `Nothing matches "${debouncedSearch}". Try a different search or filter.`
+                  : 'No chats match the selected filters.'
+              }
+              action={{
+                label: 'Clear filters',
+                onClick: () => { setSearchInput(''); setTypeFilter(''); setModeFilter(''); },
+              }}
             />
           ) : (
             <EmptyState

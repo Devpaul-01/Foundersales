@@ -58,6 +58,19 @@
 //        (needsChatSearch itself is left intact in exa.js in case it's
 //        wired up deliberately later — just no longer imported here.)
 //
+// NEW (this revision):
+//  — POST /:chatId/regenerate now accepts `force_search` (validated via
+//    the new regenerateSchema/validateRegenerate), mirroring the Exa
+//    search flow already used by POST /:chatId/message. Since regenerate
+//    has no new message text, the query is the last user turn already
+//    present in the replayed history; if there's no prior user turn,
+//    force_search is a no-op. Citations from a regenerate-triggered
+//    search are persisted the same way as on /message.
+//  — GET / (list) `type`/`mode` filters were already implemented
+//    server-side (see below); the client (chat.ts) previously sent
+//    mistyped/loosely-typed params — now typed against the same
+//    chat_type/chat_mode enums used elsewhere.
+//
 // NEW (task instructions):
 //  #8 — CHAT_SUMMARIZE background job: maybeEnqueueSummarization() fires
 //       (fire-and-forget) after every successful assistant reply. Once a
@@ -77,8 +90,7 @@ import { CHAT_TYPES, CHAT_MODES, CHAT_MODE_VALUES, CHAT_HISTORY_WINDOW,
          BACKGROUND_JOB_TYPES } from '../config/constants.js';
 import { buildUserContext } from '../middleware/workspace.js';
 import { createLogger } from '../utils/logger.js';
-import { backgroundQueue } from '../config/bullmq.js';
-
+import { backgroundQueue }            from '../jobs/queues.js';
 import { callWithFallbackGroq, streamWithFallback } from '../services/multiProvider.js';
 import groqService from '../services/groq.js';
 import { streamAndSave, initSSE, sendSSE, endSSE } from '../services/streaming.js';
@@ -171,32 +183,108 @@ function buildOpportunityContextMessage(opp) {
 // isn't hammering the queue on every single turn. The jobId makes
 // duplicate enqueues for the same chat/count a safe no-op in BullMQ.
 async function maybeEnqueueSummarization(chatId, workspaceId, userId) {
+  const startTime = Date.now();
+  log('CHAT_SUMMARIZE_CHECK', { chatId, workspaceId, userId });
+
   try {
+    // ── Step 1: Fetch chat data ──────────────────────────────────────────
     const { data: chat, error: chatErr } = await supabaseAdmin
       .from('chats')
-      .select('last_summarized_message_count')
+      .select('last_summarized_message_count, title, message_count')
       .eq('id', chatId)
       .single();
-    if (chatErr || !chat) return;
 
+    if (chatErr) {
+      logError('maybeEnqueueSummarization_chat_fetch', chatErr, { chatId, workspaceId });
+      return;
+    }
+
+    if (!chat) {
+      log('CHAT_SUMMARIZE_SKIP', { chatId, reason: 'Chat not found' });
+      return;
+    }
+
+    log('CHAT_SUMMARIZE_CHAT_FETCHED', {
+      chatId,
+      lastSummarized: chat.last_summarized_message_count,
+      totalMessages: chat.message_count,
+      title: chat.title?.slice(0, 50),
+    });
+
+    // ── Step 2: Count non-system messages ──────────────────────────────
     const { count: nonSystemCount, error: countErr } = await supabaseAdmin
       .from('chat_messages')
       .select('id', { count: 'exact', head: true })
       .eq('chat_id', chatId)
       .neq('role', 'system');
-    if (countErr) { logError('maybeEnqueueSummarization_count', countErr, { chatId }); return; }
 
-    const newSince = (nonSystemCount || 0) - (chat.last_summarized_message_count || 0);
-    if (newSince < CHAT_SUMMARIZE_EVERY_N_MESSAGES) return;
+    if (countErr) {
+      logError('maybeEnqueueSummarization_count', countErr, { chatId, workspaceId });
+      return;
+    }
+
+    log('CHAT_SUMMARIZE_MESSAGE_COUNT', {
+      chatId,
+      nonSystemCount,
+      lastSummarized: chat.last_summarized_message_count || 0,
+    });
+
+    // ── Step 3: Determine if summarization is needed ────────────────────
+    const lastSummarized = chat.last_summarized_message_count || 0;
+    const newSince = (nonSystemCount || 0) - lastSummarized;
+
+    const shouldSummarize = newSince >= CHAT_SUMMARIZE_EVERY_N_MESSAGES;
+
+    log('CHAT_SUMMARIZE_EVALUATION', {
+      chatId,
+      newSince,
+      threshold: CHAT_SUMMARIZE_EVERY_N_MESSAGES,
+      shouldSummarize,
+      elapsed: `${Date.now() - startTime}ms`,
+    });
+
+    if (!shouldSummarize) {
+      log('CHAT_SUMMARIZE_SKIP', {
+        chatId,
+        reason: `Only ${newSince} new messages, threshold is ${CHAT_SUMMARIZE_EVERY_N_MESSAGES}`,
+      });
+      return;
+    }
+
+    // ── Step 4: Enqueue background job ──────────────────────────────────
+    const jobId = `chat_summarize:${chatId}:${nonSystemCount}`;
+    const payload = { chatId, workspaceId, userId };
+
+    log('CHAT_SUMMARIZE_ENQUEUE_ATTEMPT', {
+      chatId,
+      jobId,
+      payload,
+      nonSystemCount,
+    });
 
     await backgroundQueue.add(
       BACKGROUND_JOB_TYPES.CHAT_SUMMARIZE,
-      { chatId, workspaceId, userId },
-      { jobId: `chat_summarize:${chatId}:${nonSystemCount}` },
+      payload,
+      { jobId },
     );
-    log('CHAT_SUMMARIZE_ENQUEUED', { chatId, workspaceId, nonSystemCount });
+
+    log('CHAT_SUMMARIZE_ENQUEUED', {
+      chatId,
+      workspaceId,
+      userId,
+      jobId,
+      nonSystemCount,
+      elapsed: `${Date.now() - startTime}ms`,
+      threshold: CHAT_SUMMARIZE_EVERY_N_MESSAGES,
+    });
+
   } catch (err) {
-    logError('maybeEnqueueSummarization', err, { chatId, workspaceId });
+    logError('maybeEnqueueSummarization_unexpected', err, {
+      chatId,
+      workspaceId,
+      userId,
+      elapsed: `${Date.now() - startTime}ms`,
+    });
   }
 }
 
@@ -406,6 +494,25 @@ const chatMessageSchema = z.object({
 const validateChatMessage = (req, res, next) => {
   try {
     chatMessageSchema.parse(req.body);
+    next();
+  } catch (err) {
+    return res.status(400).json({
+      error:   'VALIDATION_ERROR',
+      message: err.errors?.[0]?.message || 'Invalid request body',
+    });
+  }
+};
+
+// FIX: validation for the regenerate body, now that it accepts
+// force_search alongside stream (previously unvalidated `req.body || {}`).
+const regenerateSchema = z.object({
+  stream:       z.boolean().optional(),
+  force_search: z.boolean().optional(),
+});
+
+const validateRegenerate = (req, res, next) => {
+  try {
+    regenerateSchema.parse(req.body || {});
     next();
   } catch (err) {
     return res.status(400).json({
@@ -782,6 +889,114 @@ router.get('/:chatId/search', asyncHandler(async (req, res) => {
 }));
 
 // ──────────────────────────────────────────
+// GET /api/chat/:chatId/export?format=markdown
+//
+// NEW — a chat's output (e.g. a drafted follow-up sequence) is often the
+// actual deliverable a sales user wants to take elsewhere, so this hands
+// back the full transcript as Markdown. There's no PDF engine in this
+// service (no puppeteer/pdfkit in the dependency graph), so `format=pdf`
+// is intentionally rejected with a clear message — the client turns the
+// same markdown into a PDF locally via the browser's print dialog
+// instead of us maintaining a second rendering pipeline server-side. If
+// server-rendered PDF ever becomes a real requirement, this is the seam
+// to add it at.
+// ──────────────────────────────────────────
+function slugifyForFilename(title) {
+  const slug = (title || 'chat')
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return slug || 'chat';
+}
+
+function formatExportTimestamp(isoString) {
+  try {
+    return new Date(isoString).toLocaleString('en-US', {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    });
+  } catch {
+    return isoString || '';
+  }
+}
+
+const EXPORT_ROLE_LABELS = { user: 'You', assistant: 'Clutch AI' };
+
+function buildChatExportMarkdown(chat, messages) {
+  const lines = [];
+  lines.push(`# ${chat.title || 'Untitled chat'}`);
+  lines.push('');
+  lines.push(`_Exported ${formatExportTimestamp(new Date().toISOString())}_`);
+  lines.push('');
+  lines.push('---');
+
+  for (const msg of messages) {
+    const label = EXPORT_ROLE_LABELS[msg.role] || msg.role;
+    lines.push('');
+    lines.push(`### ${label} — ${formatExportTimestamp(msg.created_at)}`);
+    lines.push('');
+    lines.push((msg.content || '').trim());
+
+    if (Array.isArray(msg.citations) && msg.citations.length) {
+      lines.push('');
+      lines.push('**Sources:**');
+      for (const url of msg.citations) lines.push(`- ${url}`);
+    }
+    lines.push('');
+    lines.push('---');
+  }
+
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim() + '\n';
+}
+
+router.get('/:chatId/export', asyncHandler(async (req, res) => {
+  const { chatId }  = req.params;
+  const { format = 'markdown' } = req.query;
+  const userId      = req.user.id;
+  const workspaceId = req.workspace.id;
+
+  if (format !== 'markdown') {
+    return res.status(400).json({
+      error:   'UNSUPPORTED_FORMAT',
+      message: 'Server-side export only supports format=markdown. Generate a PDF client-side from the markdown via print-to-PDF.',
+    });
+  }
+
+  const { data: chat, error: chatError } = await supabaseAdmin
+    .from('chats')
+    .select('id, title')
+    .eq('id', chatId)
+    .eq('user_id', userId)
+    .eq('workspace_id', workspaceId)
+    .single();
+
+  if (chatError || !chat) {
+    log('EXPORT_CHAT_NOT_FOUND', { userId, chatId });
+    return res.status(404).json({ error: 'NOT_FOUND', message: 'Chat not found' });
+  }
+
+  const { data: messages, error: msgError } = await supabaseAdmin
+    .from('chat_messages')
+    .select('role, content, citations, created_at, seq')
+    .eq('chat_id', chatId)
+    .eq('workspace_id', workspaceId)
+    .neq('role', 'system')
+    .order('seq', { ascending: true });
+
+  if (msgError) {
+    logError('EXPORT_CHAT_MESSAGES', msgError, { userId, chatId });
+    throw msgError;
+  }
+
+  const content  = buildChatExportMarkdown(chat, messages || []);
+  const filename = `${slugifyForFilename(chat.title)}.md`;
+
+  log('EXPORT_CHAT_OK', { userId, chatId, format: 'markdown', messageCount: messages?.length || 0 });
+  res.json({ chat_id: chat.id, format: 'markdown', filename, content });
+}));
+
+// ──────────────────────────────────────────
 // POST /api/chat/:chatId/message
 // ──────────────────────────────────────────
 router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, res) => {
@@ -1029,13 +1244,19 @@ router.post('/:chatId/message', validateChatMessage, asyncHandler(async (req, re
 // ──────────────────────────────────────────
 // POST /api/chat/:chatId/regenerate
 // ──────────────────────────────────────────
-router.post('/:chatId/regenerate', asyncHandler(async (req, res) => {
+router.post('/:chatId/regenerate', validateRegenerate, asyncHandler(async (req, res) => {
   const { chatId } = req.params;
-  const { stream = false } = req.body || {};
+  // FIX: regenerate now supports the same `force_search` toggle as
+  // POST /:chatId/message, so a regenerated reply can pull fresh Exa
+  // results too (e.g. the first answer was stale/wrong because search
+  // wasn't triggered originally). Since regenerate has no new message
+  // text of its own, the last user turn's content is used as the query
+  // — see below, after history is fetched.
+  const { stream = false, force_search = false } = req.body || {};
   const userId      = req.user.id;
   const workspaceId = req.workspace.id;
 
-  log('REGENERATE_MESSAGE', { userId, workspaceId, chatId, stream });
+  log('REGENERATE_MESSAGE', { userId, workspaceId, chatId, stream, force_search });
 
   const { data: chat, error: chatError } = await supabaseAdmin
     .from('chats')
@@ -1079,10 +1300,42 @@ router.post('/:chatId/regenerate', asyncHandler(async (req, res) => {
   const { finalSystemPrompt, userCtx } = await buildSystemPromptForChat(req, chat, effectiveChatMode);
   const messagesForAI = await getHistoryMessages(chatId);
 
+  // FIX: force_search support (mirrors POST /:chatId/message). The query
+  // is the last user turn already present in messagesForAI — regenerate
+  // doesn't receive new message text, so there's nothing else to search
+  // on. If there's no prior user turn to search from, force_search is a
+  // no-op rather than an error.
+  let citations = [];
+  if (force_search) {
+    const lastUserTurn = [...messagesForAI].reverse().find(m => m.role === 'user');
+    if (lastUserTurn?.content?.trim()) {
+      log('EXA_SEARCH_ATTEMPT', { userId, workspaceId, chatId, tier: userCtx.tier, sourceJob: 'chat_regenerate' });
+      try {
+        const exaCheck = await checkWorkspaceExaUsage(workspaceId, userCtx.tier);
+        if (!exaCheck?.allowed) {
+          log('EXA_SEARCH_SKIPPED_NOT_ALLOWED', { userId, workspaceId, chatId, exaCheck });
+        } else {
+          const { content: searchText, citations: searchCitations } = await searchForChat(
+            lastUserTurn.content, finalSystemPrompt, { workspaceId, userId, sourceJob: 'search_for_chat' },
+          );
+          if (searchText?.trim()) {
+            messagesForAI[messagesForAI.length - 1] = {
+              ...lastUserTurn,
+              content: lastUserTurn.content + `\n\nWeb search results:\n${searchText}`,
+            };
+            citations = searchCitations || [];
+          }
+        }
+      } catch (err) {
+        logError('perplexitySearch', err, { userId, workspaceId, chatId, force_search, sourceJob: 'chat_regenerate' });
+      }
+    }
+  }
+
   try {
     await generateAndSaveAssistantReply({
       res, stream, finalSystemPrompt, messagesForAI, chatId, userId, workspaceId, userCtx,
-      sourceJob: 'chat_regenerate',
+      sourceJob: 'chat_regenerate', citations,
     });
     if (!stream) log('REGENERATE_MESSAGE_OK', { userId, chatId });
   } catch (err) {

@@ -348,6 +348,12 @@ const streamProvider = async ({
     max_tokens:  maxTokens   ?? 1024,
     temperature: temperature ?? 0.7,
     stream:      true,
+    // Required by OpenAI-compatible providers (Groq/Cerebras/Mistral/
+    // OpenRouter) to emit a final SSE chunk containing `usage` — without
+    // this, streamed responses have no token accounting at all (see
+    // onComplete below, which previously always sent tokens_in/tokens_out
+    // as undefined).
+    stream_options: { include_usage: true },
     messages: [
       ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
       ...finalMessages,
@@ -373,6 +379,10 @@ const streamProvider = async ({
   const decoder     = new TextDecoder();
   let   fullContent = '';
   let   buffer      = '';
+  // Populated from the final SSE chunk's `usage` field (present because
+  // of stream_options.include_usage above). Providers emit this on the
+  // last chunk, typically alongside an empty `choices` array.
+  let   usage       = null;
 
   while (true) {
     const { done, value } = await reader.read();
@@ -396,6 +406,9 @@ const streamProvider = async ({
           fullContent += token;
           onToken?.(token);
         }
+        if (parsed.usage) {
+          usage = parsed.usage;
+        }
       } catch {
         // Malformed SSE chunk — skip silently (upstream provider framing
         // issue, not something the caller can act on).
@@ -403,7 +416,12 @@ const streamProvider = async ({
     }
   }
 
-  onComplete?.(fullContent, { used_vision: isVisionCapable && !!images?.length });
+  onComplete?.(fullContent, {
+    used_vision:  isVisionCapable && !!images?.length,
+    tokens_in:    usage?.prompt_tokens     || 0,
+    tokens_out:   usage?.completion_tokens || 0,
+    tokens_total: usage?.total_tokens      || 0,
+  });
 };
 
 const buildProviderQueue = (tier = 'quality') => {

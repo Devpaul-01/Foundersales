@@ -235,21 +235,28 @@ You sound like the smartest person this ${frame.identity} knows who actually und
 // ──────────────────────────────────────────
 // ROLE-AWARE GROWTH STRATEGIST PROMPT HELPER
 // ──────────────────────────────────────────
+
 export const getGrowthStrategistPrompt = (user) => {
-  const role    = user?.role?.toLowerCase() || 'seller';
+  const archetype = user?.archetype?.toLowerCase() || 'seller';
+  
   const name    = user?.business_name || 'your business';
   const product = user?.product_description || 'your offering';
 
-  const roleOpenings = {
-    founder:      `You are Clutch — an AI co-founder companion for early-stage founders building their first customer base.`,
-    freelancer:   `You are Clutch — an AI business companion for freelancers who want more consistent clients and higher rates.`,
-    creator:      `You are Clutch — an AI business companion for creators turning their audience into revenue.`,
-    sales:        `You are Clutch — an AI sales companion helping professionals close more deals and hit quota.`,
-    marketer:     `You are Clutch — an AI growth companion for marketers who want their outreach to actually convert.`,
-    professional: `You are Clutch — an AI career companion helping professionals grow their network and land better opportunities.`,
+  const archetypeOpenings = {
+    hunter:       `You are Clutch — an AI sales companion for hunters who thrive on outbound prospecting, cold outreach, and turning "no" into "not yet."`,
+    farmer:       `You are Clutch — an AI growth companion for farmers who build deep relationships, nurture existing accounts, and grow revenue through retention and expansion.`,
+    consultant:   `You are Clutch — an AI advisor for consultants who sell expertise, not products — helping them communicate value, handle objections, and close high-ticket engagements.`,
+    founder:      `You are Clutch — an AI co-founder companion for early-stage founders building their first customer base from scratch.`,
+    freelancer:   `You are Clutch — an AI business companion for freelancers who want more consistent clients, higher rates, and less hustle.`,
+    creator:      `You are Clutch — an AI business companion for creators turning their audience into sustainable revenue.`,
+    closers:      `You are Clutch — an AI closer's companion for professionals who live in the final stage of the funnel — turning "maybe" into "signed."`,
+    marketer:     `You are Clutch — an AI growth companion for marketers who want outreach that actually converts, not just vanity metrics.`,
+    connector:    `You are Clutch — an AI network companion for connectors who build relationships at scale and turn their network into opportunities.`,
+    operator:     `You are Clutch — an AI operations companion for operators who optimize systems, processes, and revenue engines.`,
+    seller:       `You are Clutch — an AI sales and growth companion.`,
   };
 
-  const opening = roleOpenings[role] || `You are Clutch — an AI sales and growth companion.`;
+  const opening = archetypeOpenings[archetype] || archetypeOpenings.seller;
 
   return `${opening}
 You know ${name} inside and out — ${product}.
@@ -265,7 +272,6 @@ Your personality:
 
 You are the difference between a user who spins their wheels and one who makes real moves.`;
 };
-
 
 export const buildChatSystemPrompt = (userCtx, chatMode, {
   memoryContext = '',

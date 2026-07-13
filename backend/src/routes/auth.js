@@ -402,52 +402,120 @@ router.post('/logout', asyncHandler(async (req, res) => {
   });
 }));
 
-// ──────────────────────────────────────────
-// GET /api/auth/me (unchanged)
-// ──────────────────────────────────────────
+
 router.get('/me', authenticate, asyncHandler(async (req, res) => {
+  console.log("auth me called");
+  const startTime = Date.now();
   const userId = req.user.id;
+  const workspaceId = req.user.active_workspace_id;
 
-  const [profileResult, workspaceResult] = await Promise.all([
-    supabaseAdmin
-      .from('users')
-      .select(
-        'id, name, email, tier,check_in_streak, active_workspace_id, ' +
-        'onboarding_completed, onboarding_step, debug_mode, fcm_token, ' +
-        'notification_preferences, memory_enabled, email_digest_enabled'
-      )
-      .eq('id', userId)
-      .single(),
-    req.user.active_workspace_id
-      ? supabaseAdmin
-          .from('workspace_members')
-          .select(`
-            role, status, joined_at,
-            workspaces!inner(id, name, slug, plan, owner_user_id)
-          `)
-          .eq('workspace_id', req.user.active_workspace_id)
-          .eq('user_id', userId)
-          .eq('status', 'active')
-          .single()
-      : Promise.resolve({ data: null }),
-  ]);
-
-  if (!profileResult.data) {
-    return res.status(404).json({ error: 'PROFILE_NOT_FOUND', message: 'User profile not found' });
-  }
-
-  const profile = profileResult.data;
-  const membership = workspaceResult.data;
-
-  res.json({
-    user: profile,
-    active_workspace: membership?.workspaces || null,
-    active_membership: membership
-      ? { role: membership.role, status: membership.status, joined_at: membership.joined_at }
-      : null,
+  log('GET /me START', { 
+    userId, 
+    workspaceId,
+    hasActiveWorkspace: !!workspaceId,
+    timestamp: new Date().toISOString(),
   });
-}));
 
+  try {
+    // ── Step 1: Fetch user profile ──────────────────────────────────────────
+    log('GET /me FETCH_PROFILE', { userId });
+
+    const [profileResult, workspaceResult] = await Promise.all([
+      supabaseAdmin
+        .from('users')
+        .select(
+          'id, name, email, tier, check_in_streak, active_workspace_id, ' +
+          'onboarding_completed, onboarding_step, debug_mode, fcm_token, ' +
+          'notification_preferences, memory_enabled, email_digest_enabled'
+        )
+        .eq('id', userId)
+        .single(),
+      
+      req.user.active_workspace_id
+        ? supabaseAdmin
+            .from('workspace_members')
+            .select(`
+              role, status, joined_at,
+              workspaces!inner(id, name, slug, plan, owner_user_id)
+            `)
+            .eq('workspace_id', req.user.active_workspace_id)
+            .eq('user_id', userId)
+            .eq('status', 'active')
+            .single()
+        : Promise.resolve({ data: null }),
+    ]);
+
+    // ── Step 2: Log query results ──────────────────────────────────────────
+    log('GET /me QUERY_RESULTS', {
+      userId,
+      profileFound: !!profileResult.data,
+      profileError: profileResult.error?.message || null,
+      membershipFound: !!workspaceResult.data,
+      membershipError: workspaceResult.error?.message || null,
+      elapsed: `${Date.now() - startTime}ms`,
+    });
+
+    // ── Step 3: Handle missing profile ─────────────────────────────────────
+    if (!profileResult.data) {
+      log('GET /me PROFILE_NOT_FOUND', {
+        userId,
+        error: profileResult.error?.message || 'No profile found',
+        elapsed: `${Date.now() - startTime}ms`,
+      });
+
+      return res.status(404).json({
+        error: 'PROFILE_NOT_FOUND',
+        message: 'User profile not found',
+        details: profileResult.error?.message || null,
+      });
+    }
+
+    // ── Step 4: Build response ──────────────────────────────────────────────
+    const profile = profileResult.data;
+    const membership = workspaceResult.data;
+
+    // ── Step 5: Log successful response ────────────────────────────────────
+    log('GET /me SUCCESS', {
+      userId,
+      email: profile.email,
+      tier: profile.tier,
+      activeWorkspaceId: profile.active_workspace_id,
+      onboardingCompleted: profile.onboarding_completed,
+      onboardingStep: profile.onboarding_step,
+      hasActiveMembership: !!membership,
+      membershipRole: membership?.role || null,
+      workspaceName: membership?.workspaces?.name || null,
+      workspaceSlug: membership?.workspaces?.slug || null,
+      elapsed: `${Date.now() - startTime}ms`,
+    });
+
+    res.json({
+      user: profile,
+      active_workspace: membership?.workspaces || null,
+      active_membership: membership
+        ? {
+            role: membership.role,
+            status: membership.status,
+            joined_at: membership.joined_at,
+          }
+        : null,
+    });
+
+  } catch (err) {
+    // ── Step 6: Handle unexpected errors ──────────────────────────────────
+    logError('GET /me UNEXPECTED_ERROR', err, {
+      userId,
+      workspaceId,
+      elapsed: `${Date.now() - startTime}ms`,
+      stack: err.stack,
+    });
+
+    return res.status(500).json({
+      error: 'INTERNAL_ERROR',
+      message: 'Could not fetch user profile. Please try again.',
+    });
+  }
+}));
 // ──────────────────────────────────────────
 // POST /api/auth/profile/ensure
 // ──────────────────────────────────────────

@@ -65,8 +65,29 @@ export interface ChatMessagesResponse {
   oldest_seq: number | null;
 }
 
+// Conversation export (Markdown today; PDF is generated client-side from
+// this same markdown via print-to-PDF — see ChatPage.tsx's handleExport).
+export interface ChatExportResponse {
+  chat_id:  string;
+  format:   'markdown';
+  filename: string;
+  content:  string;
+}
+
 export const chatApi = {
-  list: (params?: { type?: string; mode?: string; limit?: number; offset?: number; search?: string }) =>
+  // FIX: `type`/`mode` are now typed against the same enums used by
+  // create()/createWithMessage() (previously loose `string`). Param
+  // names stay `type`/`mode` to match chat.js's GET / handler
+  // (`const { type, mode, ... } = req.query`), which filters with
+  // `.eq('chat_type', type)` / `.eq('chat_mode', mode)` when present.
+  // Either, both, or neither may be supplied alongside search/pagination.
+  list: (params?: {
+    type?:   'general' | 'opportunity' | 'practice';
+    mode?:   'general' | 'meeting_notes' | 'prep' | 'followup_coach';
+    limit?:  number;
+    offset?: number;
+    search?: string;
+  }) =>
     retryRead(() => apiClient.get<ChatListResponse>('/api/chat', { params })),
 
   create: (body: {
@@ -127,6 +148,12 @@ export const chatApi = {
   rename: (chatId: string, title: string) =>
     retryWrite(() => apiClient.patch<{ chat: Chat }>(`/api/chat/${chatId}`, { title })),
 
+  // NEW: conversation export. Server only produces markdown (no PDF
+  // engine in this service); the client turns that markdown into a PDF
+  // itself via the browser's print dialog. See ChatPage.tsx handleExport.
+  export: (chatId: string) =>
+    retryRead(() => apiClient.get<ChatExportResponse>(`/api/chat/${chatId}/export`, { params: { format: 'markdown' } })),
+
   searchMessages: (chatId: string, query: string, params?: { limit?: number }) =>
     retryRead(() =>
       apiClient.get<{ messages: ChatMessage[]; query: string }>(
@@ -134,7 +161,11 @@ export const chatApi = {
       ),
     ),
 
-  regenerate: (chatId: string, body?: { stream?: false }) =>
+  // FIX: regenerate now accepts `force_search`, mirroring sendMessage's
+  // exa-search override — see chat.js's POST /:chatId/regenerate, which
+  // now runs the same checkWorkspaceExaUsage → searchForChat → citations
+  // flow as POST /:chatId/message when force_search is true.
+  regenerate: (chatId: string, body?: { stream?: false; force_search?: boolean }) =>
     apiClient.post<{ message: ChatMessage }>(`/api/chat/${chatId}/regenerate`, { stream: false, ...body }),
 
   editMessage: (chatId: string, messageId: string, message: string, stream: boolean = true) =>

@@ -174,5 +174,5 @@ export const CHAT_SUMMARIZE_EVERY_N_MESSAGES = 20;
 export const CHAT_MAX_TOKENS = 1000;
 
 // Pagination page sizes (audit §4.1 / task instructions #5, #6).
-export const CHAT_MESSAGES_PAGE_SIZE = 30;
+export const CHAT_MESSAGES_PAGE_SIZE = 50;
 export const CHAT_LIST_PAGE_SIZE = 30;

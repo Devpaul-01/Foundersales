@@ -226,13 +226,23 @@ export const buildGrokAttachmentPrompt = (processedAttachments) => {
   }
 
   const parts = processedAttachments.map(att => {
+    // Include the full content for ALL attachment types, including images
+    // For images, we include the content (likely base64 or extracted text) along with the filename
     if (att.type === 'image') {
-      return `[Image attached: "${att.filename}" — if the model answering this turn supports vision it has been given the actual image; otherwise, note that you cannot see it and ask the user to describe it]`;
+      // Check if content exists (could be base64, extracted text, or other representation)
+      if (att.content) {
+        return `\n--- Image: "${att.filename}" ---\n${att.inline_data}\n--- End of image ---`;
+      }
+      // Fallback if content is missing but we still want to acknowledge the image
+      return `[Image attached: "${att.filename}" — content not available in text form]`;
     }
+    
     if (att.type === 'document' || att.type === 'pdf') {
       return `\n--- Document: "${att.filename}" ---\n${att.content}\n--- End of document ---`;
     }
-    return att.content || '';
+    
+    // Default case for any other attachment types
+    return att.content || `[Attachment: "${att.filename}" — content not available]`;
   });
 
   const prompt = `\n\nATTACHED FILES:\n${parts.join('\n')}`;

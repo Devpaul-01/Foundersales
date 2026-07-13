@@ -105,6 +105,7 @@ export const buildUserContext = (req) => ({
   user_id:             req.user.id,
   email:               req.user.email,
   name:                req.user.name,
+  archetype: req.user.archetype,
   tier:                req.user.tier,
   fcm_token:           req.user.fcm_token,
   debug_mode:          req.user.debug_mode,

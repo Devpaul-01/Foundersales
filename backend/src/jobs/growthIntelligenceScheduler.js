@@ -533,19 +533,47 @@ export const runSkillProfileAggregationJob = async () => {
 export const detectAndSaveArchetype = async (userId, workspaceId, userCtx) => {
   try {
     const result = await groqService.detectUserArchetype(userCtx, userCtx.onboarding_answers || {});
-    await supabaseAdmin
+    const detectedArchetype = result.archetype || 'seller';
+    const detectedAt = new Date().toISOString();
+
+    // ── 1. Save to workspace_profiles (workspace-specific) ──
+    const { error: profileError } = await supabaseAdmin
       .from('workspace_profiles')
-      .update({ archetype: result.archetype, archetype_detected_at: new Date().toISOString() })
+      .update({ 
+        archetype: detectedArchetype, 
+        archetype_detected_at: detectedAt 
+      })
       .eq('workspace_id', workspaceId)
       .eq('user_id', userId);
-    console.log(`[GrowthScheduler] Archetype detected for ${userId}: ${result.archetype}`);
-    return result.archetype;
+
+    if (profileError) {
+      console.error(`[GrowthScheduler] workspace_profiles update failed:`, profileError.message);
+    } else {
+      console.log(`[GrowthScheduler] ✅ workspace_profiles: ${detectedArchetype}`);
+    }
+
+    // ── 2. Save to users table (global/fallback) ──
+    const { error: userError } = await supabaseAdmin
+      .from('users')
+      .update({ 
+        archetype: detectedArchetype,
+        archetype_detected_at: detectedAt 
+      })
+      .eq('id', userId);
+
+    if (userError) {
+      console.error(`[GrowthScheduler] users table update failed:`, userError.message);
+    } else {
+      console.log(`[GrowthScheduler] ✅ users table: ${detectedArchetype}`);
+    }
+
+    return detectedArchetype;
+
   } catch (err) {
     console.error(`[GrowthScheduler] Archetype detection failed for ${userId}:`, err.message);
     return 'seller';
   }
 };
-
 export default {
   runDailyTipGeneration, runCheckInScheduler, runWeeklyPlanGeneration,
   detectAndSaveArchetype, runGoalNudgeJob, runAdaptiveCurriculumJob, runSkillProfileAggregationJob,

@@ -2,9 +2,19 @@
 // Issue 16: aiRateLimiter added to /api/practice
 // Bug G:    coachRoutes was imported but never mounted — now at /api/coach
 // Issue 8:  clearProfileCache is async; call sites use fire-and-forget .catch(()=>{})
+//
+// IMPL-SENTRY-01 (Phase 2 refactor / L4): Sentry is now initialized as the
+// very first meaningful statement (right after dotenv/validateEnv), and
+// its error-capturing middleware is registered after every route but
+// before errorHandler.js's own error handling — see config/sentry.js for
+// the full reasoning and for why this is fully optional at runtime
+// (no-ops entirely if SENTRY_DSN is unset).
 import 'dotenv/config';
 import { validateEnv }                from './config/validateEnv.js';
 validateEnv();
+import { initSentry, setupSentryErrorHandler } from './config/sentry.js';
+initSentry();
+import { createRateLimitStore } from './config/rateLimitStore.js';
 import cookieParser from 'cookie-parser';
 
 // Add this before your routes
@@ -45,31 +55,67 @@ import supabaseAdmin from './config/supabase.js';
 const app  = express();
 const PORT = 3001;
 
+// IMPL-RATELIMIT-01 (Phase 2 refactor / C2 + horizontal-scaling
+// instruction): every limiter below now uses the shared Redis-backed
+// store (config/rateLimitStore.js) instead of express-rate-limit's
+// default in-memory store, so limits are enforced correctly across every
+// instance in a horizontally-scaled deployment rather than each instance
+// independently allowing up to `max` requests (meaning the effective
+// limit a user experienced was previously closer to
+// (configured limit) × (instance count), not the configured limit
+// itself). sharedStore is `undefined` if Redis was unreachable at
+// startup — express-rate-limit falls back to its own in-memory store in
+// that case, degraded but functional (see rateLimitStore.js for the
+// fail-open reasoning).
+const sharedStore = await createRateLimitStore();
+
+// IMPL-RATELIMIT-01: this limiter was already defined here previously,
+// but was NEVER ACTUALLY MOUNTED on the /api/auth router — discovered
+// during this refactor's endpoint-by-endpoint rate-limit review. Every
+// auth route (login, register, password reset, email verification) was
+// running with ZERO rate limiting despite this configuration existing in
+// the file. Now correctly applied — see the app.use('/api/auth', ...)
+// line below.
 const authRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false,
   keyGenerator: (req) => req.ip,
   message: { error: 'RATE_LIMIT_EXCEEDED', message: 'Too many attempts. Try again in 15 minutes.' },
   skip: (req) => req.path === '/refresh',
+  store: sharedStore,
 });
 
 const aiRateLimiter = rateLimit({
   windowMs: 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false,
   keyGenerator: (req) => req.user?.id || req.ip,
   message: { error: 'RATE_LIMIT_EXCEEDED', message: 'Too many AI requests. Please slow down.' },
+  store: sharedStore,
 });
 
 const pipelineRateLimiter = rateLimit({
   windowMs: 60 * 1000, max: 120, standardHeaders: true, legacyHeaders: false,
   keyGenerator: (req) => req.user?.id || req.ip,
   message: { error: 'RATE_LIMIT_EXCEEDED', message: 'Too many pipeline requests.' },
+  store: sharedStore,
 });
+
+
 app.use(cookieParser());
 app.use(helmet({ crossOriginEmbedderPolicy: false }));
 app.use(cors({
   origin: (origin, callback) => {
+    // IMPL-FRONTEND-URL-01 (Phase 2 refactor): this previously read
+    // process.env.FRONTEND_URL_2 — a variable used nowhere else in the
+    // codebase (auth.js, email.js, and emailDigestJob.js all already read
+    // the singular, unsuffixed FRONTEND_URL for the same purpose). Unless
+    // FRONTEND_URL_2 happened to be manually set to the same value as
+    // FRONTEND_URL in every deployed environment, the real deployed
+    // frontend origin was very likely never actually present in this
+    // allowlist, since only the hardcoded localhost entries below would
+    // have masked the problem during local development. Renamed to match
+    // every other reference in the codebase.
     const allowed = [
       'http://localhost:5173',
-      process.env.FRONTEND_URL_2 || null,
+      process.env.FRONTEND_URL || null,
       'http://localhost:5173',
       'http://localhost:3000',
     ].filter(Boolean);
@@ -100,7 +146,10 @@ app.get('/health', (req, res) => res.json({
   timestamp: new Date().toISOString(),
 }));
 
-app.use('/api/auth', authRoutes);
+// IMPL-RATELIMIT-01: authRateLimiter is now actually applied here — see
+// its definition above for why this was previously a no-op despite being
+// configured.
+app.use('/api/auth', authRateLimiter, authRoutes);
 
 // Issue 8: clearProfileCache is now async — fire-and-forget from the synchronous
 // 'finish' event callback so we don't need to await in an event handler.
@@ -120,9 +169,24 @@ app.use('/api/workspaces', authenticate, resolveWorkspace, workspaceRoutes);
 
 const ws = [authenticate, resolveWorkspace];
 
-app.use('/api/onboarding',  ...ws, onboardingRoutes);
+// IMPL-RATELIMIT-01: aiRateLimiter added — discovered during the
+// endpoint-by-endpoint rate-limit review that /api/onboarding's routes
+// (GET /questions, POST /answers' final-burst voice-profile generation,
+// POST /sample-message, POST /rebuild-voice-profile) call Groq directly,
+// same as every other AI-calling router, but this one was the sole
+// AI-calling router mounted with NO aiRateLimiter at all — every other
+// AI router (opportunities, goals, growth, calendar, chat, practice)
+// already had it.
+app.use('/api/onboarding',  ...ws, aiRateLimiter, onboardingRoutes);
 app.use('/api/suggestions', ...ws, suggestionsRoutes);
 app.use('/api/feedback',    ...ws, feedbackRoutes);
+// IMPL-RATELIMIT-01: upload's rate limiter is applied INSIDE upload.js,
+// scoped to POST / only (the actual expensive operation) rather than
+// here at the router-mount level — GET / (list files) and DELETE /:id
+// are cheap DB-only operations that shouldn't share a budget with file
+// uploads. See upload.js for the limiter definition, following the same
+// file-local convention already used by calendar.js/opportunities.js/
+// auth.js's own dedicated limiters.
 app.use('/api/upload',      ...ws, uploadRoutes);
 
 // IMP-03: aiRateLimiter on all AI-calling routes
@@ -168,6 +232,13 @@ app.use('*', (req, res) => res.status(404).json({
   error:   'NOT_FOUND',
   message: `${req.method} ${req.originalUrl} not found`,
 }));
+
+// IMPL-SENTRY-01: registered after every route above but before
+// errorHandler.js's own error-handling middleware below, so Sentry
+// captures first and then hands off to the existing custom error handler
+// unchanged. No-op if SENTRY_DSN is unset — see config/sentry.js.
+setupSentryErrorHandler(app);
+
 app.use(errorHandler);
 
 const startServer = async () => {

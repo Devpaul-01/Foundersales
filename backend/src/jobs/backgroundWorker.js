@@ -19,6 +19,13 @@
 //  system prompt. This keeps effective conversation memory extending
 //  indefinitely without resending the entire raw transcript every turn.
 //  Idempotent per chat/message-count via the jobId passed at enqueue time.
+//
+// IMPL-SENTRY-01 (Phase 2 refactor / L4): the existing 'failed' handler's
+// logError call is now paired with a Sentry.captureException call, tagged
+// with the job name/id, matching the same change applied to
+// scheduledWorker.js and practiceWorker.js — see scheduledWorker.js's
+// file header for the full reasoning. No-ops safely if Sentry was never
+// initialized (SENTRY_DSN unset).
 import { Worker }             from 'bullmq';
 import { bullmqConnection }   from '../config/bullmq.js';
 import { BACKGROUND_JOB_TYPES, CHAT_HISTORY_WINDOW } from '../config/constants.js';
@@ -28,6 +35,7 @@ import { callWithFallbackGroq } from '../services/multiProvider.js';
 import groqService            from '../services/groq.js';
 import { detectAndSaveArchetype } from './growthIntelligenceScheduler.js';
 import { processUserOpportunities as runOpportunitiesRefreshForUser } from './coreJobs.js';
+import * as Sentry from '@sentry/node';
 
 // Issue 14: imports for calendar prep/research handlers
 import { generateEnrichedEventPrep } from '../services/groqCalendarIntelligence.js';
@@ -318,7 +326,14 @@ export const startBackgroundWorker = () => {
     await handler(job.data);
   }, { connection: bullmqConnection, concurrency: 5 });
 
-  worker.on('failed', (job, err) => logError(`job[${job?.name}]`, err, { jobId: job?.id }));
+  worker.on('failed', (job, err) => {
+    logError(`job[${job?.name}]`, err, { jobId: job?.id });
+    // IMPL-SENTRY-01: external visibility for job failures, see
+    // scheduledWorker.js's file header for the full reasoning.
+    try {
+      Sentry.captureException(err, { tags: { source: 'backgroundWorker', jobName: job?.name, jobId: job?.id } });
+    } catch { /* Sentry itself must never be able to break a job */ }
+  });
   log('Background worker started', { concurrency: 5 });
   return worker;
 };

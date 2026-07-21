@@ -99,13 +99,29 @@ export const requirePermission = (minRole) => (req, res, next) => {
 // tier reads exclusively from req.user.tier (the billing source of truth).
 // workspaces.plan is a denormalised copy that can silently diverge from
 // users.tier after a billing event — removed from this read path entirely.
+//
+// IMPL-ARCHETYPE-01 (Phase 2 refactor): archetype previously had the exact
+// same class of problem tier's comment above describes — this function used
+// to explicitly re-set `archetype: req.user.archetype` AFTER the
+// workspaceProfile spread, which (per JS object-literal semantics) always
+// won over the correct, workspace-scoped value from the spread, silently
+// defeating per-workspace archetype divergence for every AI call built on
+// this context. Per the Phase 2 refactor's explicit instruction to
+// eliminate archetype as a user-entity concept entirely, that line is now
+// removed outright rather than given a fallback — `req.user.archetype` no
+// longer exists at all (see middleware/auth.js's matching IMPL-ARCHETYPE-01
+// comment), so there is nothing left to accidentally prefer. `archetype` is
+// now sourced exclusively from the `...(req.workspaceProfile || {})` spread
+// below: present if this workspace has detected/set one, absent (undefined)
+// otherwise — matching the `archetype || 'seller'`-style defaulting already
+// used independently by every consumer of this context (groq-coaching.js,
+// groq-prompts.js, growth.js), so no new default is introduced here.
 export const buildUserContext = (req) => ({
   ...(req.workspaceProfile || {}),
   id:                  req.user.id,
   user_id:             req.user.id,
   email:               req.user.email,
   name:                req.user.name,
-  archetype: req.user.archetype,
   tier:                req.user.tier,
   fcm_token:           req.user.fcm_token,
   debug_mode:          req.user.debug_mode,

@@ -21,10 +21,18 @@
 //      worker.close(), killing the process before practiceWorker's
 //      shutdown handler could drain in-flight jobs. Shutdown is now
 //      cooperative — the process exits naturally when all workers close.
+//
+// IMPL-SENTRY-01 (Phase 2 refactor / L4): the existing 'failed' handler's
+// console.error is now paired with a Sentry.captureException call, tagged
+// with the job name/id, so a scheduled job failure has external
+// visibility instead of only ever being seen if someone happens to be
+// watching server logs at the moment it fails. No-ops safely if Sentry
+// was never initialized (SENTRY_DSN unset) — see config/sentry.js.
 // ============================================================
 
 import { Worker } from 'bullmq';
 import { bullmqConnection } from '../config/bullmq.js';
+import * as Sentry from '@sentry/node';
 
 // Scheduled/recurring jobs
 import { runMemoryExtractionJob }        from './memoryExtractionJob.js';
@@ -115,6 +123,10 @@ export const startScheduledWorker = () => {
 
   worker.on('failed', (job, err) => {
     console.error(`[ScheduledWorker] ✗ Failed: ${job?.name} — ${err.message}`);
+    // IMPL-SENTRY-01: external visibility for job failures, see file header.
+    try {
+      Sentry.captureException(err, { tags: { source: 'scheduledWorker', jobName: job?.name, jobId: job?.id } });
+    } catch { /* Sentry itself must never be able to break a job */ }
   });
 
   worker.on('error', (err) => {

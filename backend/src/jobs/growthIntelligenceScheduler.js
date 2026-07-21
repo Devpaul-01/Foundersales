@@ -18,6 +18,13 @@
 //           the metrics passed to generateWeeklyPlan could belong to
 //           a different workspace.
 //  Token tracking: recordTokenUsage uses workspaceId throughout.
+//
+// IMPL-ARCHETYPE-01 (Phase 2 refactor): detectAndSaveArchetype previously
+// wrote the detected archetype to BOTH workspace_profiles (workspace-scoped,
+// correct) AND users (global, unscoped) in the same call. The global write
+// was the actual source of cross-workspace data pollution — see that
+// function's own comment below for the full explanation. It has been
+// removed; workspace_profiles is now the sole persistence point.
 
 import supabaseAdmin from '../config/supabase.js';
 import groqService from '../services/groq.js';
@@ -529,6 +536,22 @@ export const runSkillProfileAggregationJob = async () => {
 
 // ─────────────────────────────────────────────────────────────
 // ARCHETYPE DETECTION — writes to workspace_profiles
+//
+// IMPL-ARCHETYPE-01 (Phase 2 refactor): this function previously ALSO
+// wrote the detected archetype to the global `users` table ("save to
+// users table (global/fallback)") in addition to workspace_profiles.
+// That second write was the actual source of the cross-workspace data
+// pollution the Phase 2 refactor set out to eliminate: for any user who
+// is a member of more than one workspace, whichever workspace's
+// detection happened to run most recently would silently overwrite a
+// single shared "global" value on `users.archetype` — a value that was
+// only ever correct for the one workspace that produced it, and that
+// workspace.js's buildUserContext used to (incorrectly, per its own
+// IMPL-ARCHETYPE-01 comment) prefer over the correct workspace-scoped
+// value. Per the explicit instruction to remove archetype as a
+// user-entity concept entirely, the write to `users` is removed here.
+// workspace_profiles is now the only place a detected archetype is ever
+// persisted, for any user, in any workspace.
 // ─────────────────────────────────────────────────────────────
 export const detectAndSaveArchetype = async (userId, workspaceId, userCtx) => {
   try {
@@ -536,7 +559,7 @@ export const detectAndSaveArchetype = async (userId, workspaceId, userCtx) => {
     const detectedArchetype = result.archetype || 'seller';
     const detectedAt = new Date().toISOString();
 
-    // ── 1. Save to workspace_profiles (workspace-specific) ──
+    // ── Save to workspace_profiles (workspace-specific) ──
     const { error: profileError } = await supabaseAdmin
       .from('workspace_profiles')
       .update({ 
@@ -550,21 +573,6 @@ export const detectAndSaveArchetype = async (userId, workspaceId, userCtx) => {
       console.error(`[GrowthScheduler] workspace_profiles update failed:`, profileError.message);
     } else {
       console.log(`[GrowthScheduler] ✅ workspace_profiles: ${detectedArchetype}`);
-    }
-
-    // ── 2. Save to users table (global/fallback) ──
-    const { error: userError } = await supabaseAdmin
-      .from('users')
-      .update({ 
-        archetype: detectedArchetype,
-        archetype_detected_at: detectedAt 
-      })
-      .eq('id', userId);
-
-    if (userError) {
-      console.error(`[GrowthScheduler] users table update failed:`, userError.message);
-    } else {
-      console.log(`[GrowthScheduler] ✅ users table: ${detectedArchetype}`);
     }
 
     return detectedArchetype;

@@ -5,6 +5,7 @@
 // (sometimes aliased as sleep4, logJob4, etc.) — LOW-09 fix.
 
 import supabaseAdmin from '../config/supabase.js';
+import * as Sentry from '@sentry/node';
 
 /**
  * Pause execution for `ms` milliseconds.
@@ -36,5 +37,15 @@ export const logJob = async (name, status, data = {}) => {
   } catch (err) {
     // Still must never kill a job — but now at least visible in logs.
     console.warn(`[jobHelpers] logJob failed for "${name}" (${status}):`, err.message);
+    // IMPL-SENTRY-01 (Phase 2 refactor / L4): this was the original,
+    // specific gap L4 flagged — if job_logs itself becomes unwritable
+    // (a migration issue, an RLS misconfiguration), this failure had
+    // zero external visibility beyond a console line nobody may ever
+    // see. Reported to Sentry alongside the existing console.warn
+    // (not replacing it) so a broken job_logs table actually alerts
+    // someone instead of silently blinding all job observability.
+    try {
+      Sentry.captureException(err, { tags: { source: 'jobHelpers.logJob', jobName: name, jobStatus: status } });
+    } catch { /* Sentry itself must never be able to break a job */ }
   }
 };

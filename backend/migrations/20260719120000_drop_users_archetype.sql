@@ -1,0 +1,65 @@
+-- migrations/20260719120000_drop_users_archetype.sql
+--
+-- IMPL-ARCHETYPE-01 (Phase 2 refactor)
+--
+-- Why needed:
+--   `archetype` on the `users` table was a global, unscoped duplicate of
+--   `workspace_profiles.archetype`. Application code has been changed
+--   (middleware/auth.js, middleware/workspace.js, jobs/growthIntelligenceScheduler.js)
+--   to no longer read or write this column at all — workspace_profiles.archetype
+--   is now the sole source of truth. This migration removes the now-dead column.
+--
+-- What it changes:
+--   ALTER TABLE users DROP COLUMN archetype;
+--   (users.archetype_detected_at, if it exists as a separate column, is left
+--   untouched by this migration — confirm whether that column is also
+--   users-table-scoped and dead, or was only ever written on workspace_profiles;
+--   the application code changes in this refactor only ever wrote
+--   archetype_detected_at to workspace_profiles, so if a users-table copy of
+--   that column also exists, it was likely already dead before this refactor
+--   and can be assessed/dropped separately.)
+--
+-- Rollback considerations:
+--   This is a destructive, one-directional change — dropping a column loses
+--   any data in it permanently. A rollback would require re-adding the column
+--   (ALTER TABLE users ADD COLUMN archetype text;) but the original values
+--   would NOT be recoverable from anywhere else, since workspace_profiles.archetype
+--   is a per-workspace value, not a 1:1 restoration of whatever the global
+--   users.archetype value happened to be for a given user. Practically: there is
+--   no meaningful rollback for this migration beyond re-adding an empty column.
+--   Treat this as irreversible in effect, even though the DDL itself could be
+--   undone structurally.
+--
+-- Deployment considerations (READ BEFORE RUNNING):
+--   1. Deploy the application code changes in this refactor FIRST
+--      (middleware/auth.js, middleware/workspace.js,
+--      jobs/growthIntelligenceScheduler.js) and let them run in production
+--      for a period before running this migration. This follows the standard
+--      expand/contract pattern for safe schema changes: stop reading/writing
+--      a column in application code first, confirm nothing breaks, THEN
+--      remove the column in a separate, later deployment.
+--   2. Before running this migration, do a repository-wide search (not just
+--      the files reviewed during this refactor) for any remaining reference
+--      to `.archetype` on a `users`-sourced object, `users.archetype`, or
+--      any Supabase query selecting `archetype` from the `users` table, to
+--      confirm no other code path (including any file not covered by this
+--      refactor) still depends on this column.
+--   3. If you use Supabase-generated TypeScript types or a Postgrest schema
+--      cache, regenerate/refresh them after this migration runs, since the
+--      column's removal changes the generated types.
+--
+-- Zero-downtime feasible: YES, provided step 1 above is followed (application
+--   code must stop referencing the column before it's dropped, not simultaneously
+--   with dropping it — running old application code against a schema that's
+--   already missing this column would cause query failures on any code path
+--   that still SELECTs or writes it). Once application code no longer
+--   references the column at all, dropping it is a fast, low-risk DDL
+--   operation with no table lock implications beyond Postgres's normal
+--   metadata-only column drop (no full table rewrite is triggered by
+--   DROP COLUMN in Postgres).
+
+BEGIN;
+
+ALTER TABLE users DROP COLUMN IF EXISTS archetype;
+
+COMMIT;

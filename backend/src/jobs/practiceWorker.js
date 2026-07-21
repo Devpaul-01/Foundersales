@@ -31,11 +31,19 @@
 //     export { executeJob };
 //
 //   The executeJob function is already defined — just make it a named export.
+//
+// IMPL-SENTRY-01 (Phase 2 refactor / L4): the existing 'failed' handler's
+// console.error is now paired with a Sentry.captureException call, tagged
+// with the job name/id, matching the same change applied to
+// scheduledWorker.js and backgroundWorker.js — see scheduledWorker.js's
+// file header for the full reasoning. No-ops safely if Sentry was never
+// initialized (SENTRY_DSN unset).
 // ============================================================
 
 import { Worker } from 'bullmq';
 import { bullmqConnection } from '../config/bullmq.js';
 import { practiceQueue }    from './queues.js';
+import * as Sentry from '@sentry/node';
 
 // Reuses the existing switch-case dispatch from messageQueueWorker.js.
 // ⚠️  Requires `export { executeJob }` to be added to messageQueueWorker.js.
@@ -97,6 +105,11 @@ export const startPracticeWorker = () => {
 
   worker.on('failed', (job, err) => {
     console.error(`[PracticeWorker] ✗ Failed: ${job?.name} (id=${job?.id}) — ${err.message}`);
+    // IMPL-SENTRY-01: external visibility for job failures, see
+    // scheduledWorker.js's file header for the full reasoning.
+    try {
+      Sentry.captureException(err, { tags: { source: 'practiceWorker', jobName: job?.name, jobId: job?.id } });
+    } catch { /* Sentry itself must never be able to break a job */ }
   });
 
   worker.on('error', (err) => {

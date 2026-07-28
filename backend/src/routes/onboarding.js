@@ -23,40 +23,42 @@ import supabaseAdmin       from '../config/supabase.js';
 import { clearWorkspaceCache, buildUserContext } from '../middleware/workspace.js';
 import { backgroundQueue } from '../jobs/queues.js';
 import { BACKGROUND_JOB_TYPES } from '../config/constants.js';
-import { incrementCounter, decrementCounter } from '../services/redis.js';
+import { createConcurrencyGuard } from '../utils/concurrencyGuard.js';
 
 const router = Router();
 const { log, logError, logDB, logAI, logJob } = createLogger('Onboarding');
 const timer = () => { const s = Date.now(); return () => `${Date.now() - s}ms`; };
 
 // ── ConcurrencyGuard (Redis-backed) ─────────────────────────
-const MAX_CONCURRENT_GROQ = 15, STAGGER_MS_PER_SLOT = 150;
-const REDIS_GROQ_KEY = 'groq_queue:running', REDIS_GROQ_TTL_S = 120;
-
-class ConcurrencyGuard {
-  #localRunning = 0; #pending = [];
-  async run(label, fn) {
-    const globalRunning = await incrementCounter(REDIS_GROQ_KEY, REDIS_GROQ_TTL_S);
-    if (globalRunning > MAX_CONCURRENT_GROQ) {
-      await decrementCounter(REDIS_GROQ_KEY);
-      logJob('GroqQueue', { status: 'queued', label, globalRunning });
-      await new Promise((resolve, reject) => this.#pending.push({ resolve, reject }));
-      await incrementCounter(REDIS_GROQ_KEY, REDIS_GROQ_TTL_S);
-    }
-    this.#localRunning++;
-    if (this.#localRunning > 1) {
-      await new Promise(r => setTimeout(r, STAGGER_MS_PER_SLOT * Math.min(this.#localRunning - 1, 6)));
-    }
-    try { return await fn(); }
-    finally {
-      this.#localRunning--;
-      await decrementCounter(REDIS_GROQ_KEY);
-      const next = this.#pending.shift();
-      if (next) next.resolve();
-    }
-  }
-}
-const groqQueue = new ConcurrencyGuard();
+// IMPL-H5-01 (Phase 2 refactor): replaced the previous inline
+// ConcurrencyGuard class, which had two independent bugs only visible
+// under real multi-instance load:
+//   1. When the global Redis counter was over cap, this process pushed
+//      itself into a LOCAL, per-process #pending array and awaited a
+//      Promise that could only ever be resolved by this SAME process's
+//      own later completions. A process with zero in-flight local work,
+//      hitting a cap saturated by OTHER instances, could hang forever —
+//      nothing local would ever exist to service its own pending queue.
+//   2. incrementCounter's TTL-refresh-only-on-0→1-transition behavior
+//      (correct for a windowed rate-limit counter, the helper's original
+//      intended use) is the wrong fit for a live "how many things are
+//      running right now" gauge — under continuous traffic the counter
+//      might never return to zero, so its TTL could silently lapse while
+//      the application still believed slots were held.
+// Now uses the generic, Redis sorted-set-backed createConcurrencyGuard
+// (utils/concurrencyGuard.js), which is self-healing (no reliance on a
+// single shared TTL) and correctly coordinates across every instance.
+// Same public run(label, fn) interface, same constants — every call site
+// below is unchanged.
+const groqQueue = createConcurrencyGuard({
+  redisKey:         'stagger:groq_queue:active',
+  maxConcurrent:    15,
+  staggerMsPerSlot: 150,
+  staggerCapSlots:  6,
+  staleMs:          90_000, // comfortably above the longest onboarding AI call (buildVoiceProfile, ~2500 max tokens)
+  pollIntervalMs:   250,
+  maxWaitMs:        20_000, // fail-open beyond this — never block a real onboarding request indefinitely
+});
 
 // ── Section 6: Zod schemas ───────────────────────────────────
 const onboardingBasicSchema = z.object({

@@ -25,6 +25,7 @@ import {
   assignOpportunitySchema,
 } from '../validators/opportunities.js';
 import { sendDealAssignedEmail } from '../services/email.js';
+import { createRateLimitStore } from '../config/rateLimitStore.js';
 import {
   PIPELINE_STAGES,
   OPPORTUNITY_STATUS,
@@ -50,11 +51,38 @@ import supabaseAdmin        from '../config/supabase.js';
 const router = Router();
 const { log, logError, logDB, logAI } = createLogger('Opportunities');
 
+// IMPL-RATELIMIT-01 (Phase 2 refactor): now backed by the shared Redis
+// store instead of express-rate-limit's default in-memory store, so
+// this limit is enforced correctly across every instance in a
+// horizontally-scaled deployment.
+const sharedRateLimitStore = await createRateLimitStore();
+
 const refreshRateLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, max: 5, standardHeaders: true, legacyHeaders: false,
   keyGenerator: (req) => req.user?.id || req.ip,
   message: { error: 'RATE_LIMIT_EXCEEDED', message: 'You can refresh up to 5 times per hour.' },
+  store: sharedRateLimitStore,
 });
+
+// IMPL-RATELIMIT-01 (new — C2): GET /:id/intel triggers THREE external
+// paid calls per request (one Exa/web search, two parallel Groq calls),
+// and was previously covered only by the blanket router-level
+// aiRateLimiter (30 req/min/user, applied at the app.js mount point) —
+// sized for this router's TYPICAL request cost, not for this specific
+// endpoint's much higher per-request cost. A user hitting many different
+// opportunity IDs (freely creatable) could still generate significant
+// real-dollar spend within that general limit. Sized similarly to
+// refreshRateLimiter above (a comparably expensive multi-call
+// operation), slightly more generous since /intel is triggered more
+// incidentally (viewing a detail page) than /refresh (a deliberate,
+// occasional action).
+const intelRateLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false,
+  keyGenerator: (req) => req.user?.id || req.ip,
+  message: { error: 'RATE_LIMIT_EXCEEDED', message: 'Too many prospect-intel requests. Please wait a bit before trying again.' },
+  store: sharedRateLimitStore,
+});
+
 
 const computeIntelNeeded = (targetContext = '', targetName = '') => {
   if (targetName?.trim()) return true;
@@ -429,7 +457,10 @@ router.put('/:id/status', requirePermission('member'), validate(updateStatusSche
 const INTEL_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 // FIX 4: Guard added — unprotected endpoint was triggering expensive AI calls for any caller.
-router.get('/:id/intel', requirePermission('member'), asyncHandler(async (req, res) => {
+// IMPL-RATELIMIT-01 (C2): intelRateLimiter added — see its definition
+// above for why this endpoint specifically needed a tighter limit than
+// the router-level aiRateLimiter alone provides.
+router.get('/:id/intel', requirePermission('member'), intelRateLimiter, asyncHandler(async (req, res) => {
   const { id } = req.params;
   const userId = req.user.id, workspaceId = req.workspace.id;
 

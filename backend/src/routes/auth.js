@@ -5,14 +5,39 @@
 
 import { Router } from 'express';
 import { z } from 'zod';
+import rateLimit from 'express-rate-limit';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { validate } from '../middleware/validate.js';
 import supabaseAdmin from '../config/supabase.js';
 import authenticate from '../middleware/auth.js';
 import { createLogger } from '../utils/logger.js';
+import { createRateLimitStore } from '../config/rateLimitStore.js';
 
 const router = Router();
 const { log, logError, logDB, logJob } = createLogger('Auth');
+
+// IMPL-RATELIMIT-01 (Phase 2 refactor): the router-level authRateLimiter
+// (app.js, 10 req / 15 min / IP) covers general auth abuse (login,
+// register brute-forcing) but was the ONLY protection on this whole
+// router, and — per this refactor's endpoint-by-endpoint rate-limit
+// review — was until now not even actually being applied (see app.js's
+// IMPL-RATELIMIT-01 comment). Two specific endpoints here warrant an
+// ADDITIONAL, tighter, purpose-specific limit beyond the general one:
+// /forgot-password and /resend-verification both send an email to a
+// caller-supplied address on every request. Without a tighter bound,
+// the general 10/15min-per-IP limit would still allow someone to
+// email-bomb up to 10 different addresses per IP per 15 minutes — a
+// real abuse vector distinct from login brute-forcing, and one where
+// the cost lands on a third party (the recipient's inbox / your email
+// provider's reputation), not just on this API. 5/hour/IP is
+// deliberately tighter than the general auth limiter and keyed the same
+// way (by IP, since these endpoints are unauthenticated by definition).
+const emailSendingRateLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, max: 5, standardHeaders: true, legacyHeaders: false,
+  keyGenerator: (req) => req.ip,
+  message: { error: 'RATE_LIMIT_EXCEEDED', message: 'Too many requests. Please wait before trying again.' },
+  store: await createRateLimitStore(),
+});
 
 const elapsedMs = (startMs) => `${Date.now() - startMs}ms`;
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -827,7 +852,10 @@ router.post('/google/callback', asyncHandler(async (req, res) => {
 // ──────────────────────────────────────────
 // POST /api/auth/resend-verification
 // ──────────────────────────────────────────
-router.post('/resend-verification', asyncHandler(async (req, res) => {
+// IMPL-RATELIMIT-01: emailSendingRateLimiter added — see its definition
+// at the top of this file for why this endpoint specifically needs a
+// tighter, purpose-specific limit beyond the general router-level one.
+router.post('/resend-verification', emailSendingRateLimiter, asyncHandler(async (req, res) => {
   const { email } = req.body;
   if (!email?.trim()) {
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Email is required' });
@@ -885,7 +913,9 @@ router.post('/verify-email', asyncHandler(async (req, res) => {
 // ──────────────────────────────────────────
 // POST /api/auth/forgot-password
 // ──────────────────────────────────────────
-router.post('/forgot-password', asyncHandler(async (req, res) => {
+// IMPL-RATELIMIT-01: emailSendingRateLimiter added — see its definition
+// at the top of this file.
+router.post('/forgot-password', emailSendingRateLimiter, asyncHandler(async (req, res) => {
   const { email } = req.body;
 
   if (!email?.trim()) {

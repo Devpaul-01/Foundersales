@@ -36,15 +36,23 @@ import { backgroundQueue }            from '../jobs/queues.js';
 import { BACKGROUND_JOB_TYPES }       from '../config/constants.js';
 import supabaseAdmin from '../config/supabase.js';
 import { createLogger } from '../utils/logger.js';
+import { createRateLimitStore } from '../config/rateLimitStore.js';
 
 const router = Router();
 const { log, logError, logDB, logAI } = createLogger('Calendar');
 
+// IMPL-RATELIMIT-01 (Phase 2 refactor): now backed by the shared Redis
+// store (config/rateLimitStore.js) instead of express-rate-limit's
+// default in-memory store, so this limit is enforced correctly across
+// every instance in a horizontally-scaled deployment rather than each
+// instance independently allowing up to 10 requests per 5 minutes.
 const calendarAiRateLimiter = rateLimit({
   windowMs: 5 * 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false,
   keyGenerator: (req) => req.user.id,
   message: { error: 'RATE_LIMIT_EXCEEDED', message: 'Too many AI requests. Please wait a few minutes.' },
+  store: await createRateLimitStore(),
 });
+
 
 // GET /api/calendar
 router.get('/', asyncHandler(async (req, res) => {

@@ -56,18 +56,31 @@ const app  = express();
 const PORT = 3001;
 
 // IMPL-RATELIMIT-01 (Phase 2 refactor / C2 + horizontal-scaling
-// instruction): every limiter below now uses the shared Redis-backed
-// store (config/rateLimitStore.js) instead of express-rate-limit's
-// default in-memory store, so limits are enforced correctly across every
+// instruction): every limiter below now uses a Redis-backed store
+// (config/rateLimitStore.js) instead of express-rate-limit's default
+// in-memory store, so limits are enforced correctly across every
 // instance in a horizontally-scaled deployment rather than each instance
 // independently allowing up to `max` requests (meaning the effective
 // limit a user experienced was previously closer to
 // (configured limit) × (instance count), not the configured limit
-// itself). sharedStore is `undefined` if Redis was unreachable at
-// startup — express-rate-limit falls back to its own in-memory store in
-// that case, degraded but functional (see rateLimitStore.js for the
-// fail-open reasoning).
-const sharedStore = await createRateLimitStore();
+// itself).
+//
+// IMPL-RATELIMIT-02: each limiter now gets its OWN namespaced store
+// instead of all three sharing one. A single RedisStore keys purely off
+// `prefix + keyGenerator(req)` with no notion of which limiter it
+// belongs to — and aiRateLimiter/pipelineRateLimiter both key on
+// `req.user?.id || req.ip`. Sharing one store meant a user hitting an AI
+// route and a pipeline route back-to-back was incrementing the exact
+// same Redis counter, silently merging two limits that were supposed to
+// be independent. Namespacing fixes that while still reusing a single
+// underlying Redis connection under the hood (see rateLimitStore.js).
+// Each is `undefined` if Redis was unreachable at startup —
+// express-rate-limit falls back to its own in-memory store in that case,
+// degraded but functional (see rateLimitStore.js for the fail-open
+// reasoning).
+const authRateLimitStore     = await createRateLimitStore('auth');
+const aiRateLimitStore       = await createRateLimitStore('ai');
+const pipelineRateLimitStore = await createRateLimitStore('pipeline');
 
 // IMPL-RATELIMIT-01: this limiter was already defined here previously,
 // but was NEVER ACTUALLY MOUNTED on the /api/auth router — discovered
@@ -81,21 +94,21 @@ const authRateLimiter = rateLimit({
   keyGenerator: (req) => req.ip,
   message: { error: 'RATE_LIMIT_EXCEEDED', message: 'Too many attempts. Try again in 15 minutes.' },
   skip: (req) => req.path === '/refresh',
-  store: sharedStore,
+  store: authRateLimitStore,
 });
 
 const aiRateLimiter = rateLimit({
   windowMs: 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false,
   keyGenerator: (req) => req.user?.id || req.ip,
   message: { error: 'RATE_LIMIT_EXCEEDED', message: 'Too many AI requests. Please slow down.' },
-  store: sharedStore,
+  store: aiRateLimitStore,
 });
 
 const pipelineRateLimiter = rateLimit({
   windowMs: 60 * 1000, max: 120, standardHeaders: true, legacyHeaders: false,
   keyGenerator: (req) => req.user?.id || req.ip,
   message: { error: 'RATE_LIMIT_EXCEEDED', message: 'Too many pipeline requests.' },
-  store: sharedStore,
+  store: pipelineRateLimitStore,
 });
 
 

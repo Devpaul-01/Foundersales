@@ -28,6 +28,9 @@
 // visibility instead of only ever being seen if someone happens to be
 // watching server logs at the moment it fails. No-ops safely if Sentry
 // was never initialized (SENTRY_DSN unset) — see config/sentry.js.
+//
+// NEW HANDLERS (implementation pass): calendar_reminder_scan,
+// calendar_debrief_digest, prospect_dedup_scan.
 // ============================================================
 
 import { Worker } from 'bullmq';
@@ -59,39 +62,51 @@ import {
   runPerformanceSummaryJob,
   runMetricsJob,
   runCalendarPrepJob,
+  runCalendarReminderScan,      // NEW
+  runCalendarDebriefDigest,     // NEW
 }                                        from './coreJobs.js';
+
+import { enqueueDedupScanForAllWorkspaces } from '../services/prospectDedup.js'; // NEW
 
 // ──────────────────────────────────────────
 // JOB HANDLER MAP
-// Keys must match the job names in registerSchedules.js exactly.
 // ──────────────────────────────────────────
 const HANDLERS = {
   // High frequency
-  memory_extraction:    runMemoryExtractionJob,
-  opportunity_fetch:    runOpportunityJob,
-  feedback_prompts:     runFeedbackPromptJob,
+  memory_extraction:      runMemoryExtractionJob,
+  opportunity_fetch:      runOpportunityJob,
+  feedback_prompts:       runFeedbackPromptJob,
+  calendar_reminder_scan: runCalendarReminderScan,      // NEW
 
   // Daily
-  performance_summary:  runPerformanceSummaryJob,
-  metrics_aggregation:  runMetricsJob,
-  daily_tip_generation: runDailyTipGeneration,
-  calendar_prep:        runCalendarPrepJob,
-  morning_growth_push:  runMorningGrowthPush,
-  goal_nudge:           runGoalNudgeJob,
-  follow_up_check:      runFollowupSequenceJob,
-  check_in_scheduler:   runCheckInScheduler,
-  evening_growth_push:  runEveningGrowthPush,
+  performance_summary:    runPerformanceSummaryJob,
+  metrics_aggregation:    runMetricsJob,
+  daily_tip_generation:   runDailyTipGeneration,
+  calendar_prep:          runCalendarPrepJob,
+  calendar_debrief_digest: runCalendarDebriefDigest,    // NEW
+  morning_growth_push:    runMorningGrowthPush,
+  goal_nudge:             runGoalNudgeJob,
+  follow_up_check:        runFollowupSequenceJob,
+  check_in_scheduler:     runCheckInScheduler,
+  evening_growth_push:    runEveningGrowthPush,
 
   // Sunday pipeline
-  weekly_plan:          runWeeklyPlanGeneration,
-  email_digest:         runEmailDigestJob,
-  pattern_detection:    runPatternDetectionJob,
-  // ⚠️  pattern_insights is NOT here — it is enqueued by patternDetectionJob
-  //     on completion so it always runs after detection finishes.
-  //     See patternDetectionJob.js for the enqueue call.
-  skill_progression:    runSkillProgressionJob,
-  skill_profile_agg:    runSkillProfileAggregationJob,
-  adaptive_curriculum:  runAdaptiveCurriculumJob,
+  weekly_plan:            runWeeklyPlanGeneration,
+  email_digest:           runEmailDigestJob,
+  pattern_detection:      runPatternDetectionJob,
+  // ⚠️  pattern_insights intentionally NOT registered here — per the
+  //     pre-existing comment, it is (reportedly) enqueued by
+  //     patternDetectionJob on completion. VERIFY this is actually true
+  //     in the live system before changing it either way; registering it
+  //     both ways would double-execute pattern insight generation, which
+  //     is the exact class of bug this implementation pass was written to
+  //     eliminate elsewhere. See IMPLEMENTATION_SUMMARY.md.
+  skill_progression:      runSkillProgressionJob,
+  skill_profile_agg:      runSkillProfileAggregationJob,
+  adaptive_curriculum:    runAdaptiveCurriculumJob,
+
+  // Weekly (NEW)
+  prospect_dedup_scan:    enqueueDedupScanForAllWorkspaces,
 };
 
 // ──────────────────────────────────────────
@@ -116,8 +131,8 @@ export const startScheduledWorker = () => {
     },
     {
       connection:   bullmqConnection,
-      concurrency:  1,           // prevent job overlap — one at a time
-      lockDuration: 10 * 60_000, // 10 min distributed lock; raise if jobs take longer
+      concurrency:  1,
+      lockDuration: 10 * 60_000,
     }
   );
 
@@ -133,9 +148,6 @@ export const startScheduledWorker = () => {
     console.error('[ScheduledWorker] Worker error:', err.message);
   });
 
-  // FIX MED-07: No process.exit(0) — let the application manage coordinated
-  // shutdown across all workers. Each worker signals readiness by resolving
-  // worker.close(); the process exits naturally when all workers have closed.
   const shutdown = async (signal) => {
     console.log(`[ScheduledWorker] ${signal} received — draining...`);
     await worker.close();

@@ -5,6 +5,7 @@ import { asyncHandler }      from '../middleware/errorHandler.js';
 import { requirePermission, buildUserContext } from '../middleware/workspace.js';
 import { createLogger }      from '../utils/logger.js';
 import { generateProspectSummary } from '../services/groqCalendarIntelligence.js';
+import { resolveMergeCandidate } from '../services/prospectDedup.js';
 import supabaseAdmin         from '../config/supabase.js';
 
 export const prospectsRouter = Router();
@@ -71,6 +72,39 @@ prospectsRouter.get('/', asyncHandler(async (req, res) => {
     pending_commitments: commitmentCounts[p.id] || 0,
   }));
   res.json({ prospects: enriched });
+}));
+
+// ============================================================
+// Merge-candidate review endpoints — the human-review step for Layer 3
+// of the dedup engine (services/prospectDedup.js). No UI is built for
+// this in the current pass (flagged in the implementation guide as a
+// Prospects-page item outside Calendar's scope); the endpoints exist so
+// the mechanism is actionable via API now.
+//
+// NOTE: these two routes must stay above GET /api/prospects/:id — Express
+// matches routes in registration order, and '/:id' would otherwise
+// swallow '/merge-candidates' as if "merge-candidates" were an :id.
+// ============================================================
+
+// GET /api/prospects/merge-candidates
+prospectsRouter.get('/merge-candidates', asyncHandler(async (req, res) => {
+  const { data, error } = await supabaseAdmin.from('prospect_merge_candidates')
+    .select('*, prospect_a:prospects!prospect_id_a(id, name, company), prospect_b:prospects!prospect_id_b(id, name, company)')
+    .eq('workspace_id', req.workspace.id).eq('status', 'pending')
+    .order('similarity_score', { ascending: false });
+  if (error) throw error;
+  res.json({ candidates: data || [] });
+}));
+
+// POST /api/prospects/merge-candidates/:id/resolve
+prospectsRouter.post('/merge-candidates/:id/resolve', asyncHandler(async (req, res) => {
+  const { action } = req.body; // 'merge' | 'dismiss'
+  if (!['merge', 'dismiss'].includes(action)) {
+    return res.status(400).json({ error: 'VALIDATION_ERROR', message: "action must be 'merge' or 'dismiss'" });
+  }
+  const result = await resolveMergeCandidate(req.workspace.id, req.params.id, action, req.user.id);
+  if (!result.success) return res.status(400).json({ error: result.error });
+  res.json({ success: true, action: result.action });
 }));
 
 // GET /api/prospects/:id

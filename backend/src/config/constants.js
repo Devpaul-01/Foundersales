@@ -28,6 +28,63 @@
 // ── Follow-up timing (days since last stage change) ─────────
 // FIX MED-01: was `const` — now `export const` so followupSequenceJob
 // receives the object instead of undefined.
+// ============================================================
+// ADDITIONS TO src/config/constants.js
+//
+// This is NOT a standalone file — it documents the exact additions to
+// merge into your existing constants.js. Reproducing the entire ~300 line
+// file here (mostly unrelated to Calendar: practice scenarios, pipeline
+// stages, archetypes, etc.) would risk silently dropping something during
+// a copy-paste; these are the only real changes.
+// ============================================================
+
+// 1. REPLACE the existing BACKGROUND_JOB_TYPES export with this version
+//    (adds five new job types; all prior entries unchanged):
+export const BACKGROUND_JOB_TYPES = {
+  TIP_CARD_GENERATE:          'tip_card_generate',
+  OPPORTUNITIES_REFRESH:      'opportunities_refresh',
+  ARCHETYPE_DETECT:           'archetype_detect',
+  FIRST_TIME_CARDS_GENERATE:  'first_time_cards_generate',
+  SEED_MEMORY:                'seed_memory',
+  CHECKIN_TIP_GENERATE:       'checkin_tip_generate',
+  CALENDAR_PREP_GENERATE:     'calendar_prep_generate',
+  CALENDAR_RESEARCH_PROSPECT: 'calendar_research_prospect',
+  CHAT_SUMMARIZE:             'chat_summarize',
+
+  // NEW — implementation pass
+  CALENDAR_EXTRACT_COMMITMENTS_SIGNALS: 'calendar_extract_commitments_signals',
+  CALENDAR_UPDATE_PROSPECT_HEALTH:      'calendar_update_prospect_health',
+  CALENDAR_GENERATE_FOLLOWUP:           'calendar_generate_followup',
+  PROSPECT_DEDUP_SCAN:                  'prospect_dedup_scan',
+  VOICE_MEMO_TRANSCRIBE:                'voice_memo_transcribe',
+  VOICE_MEMO_ENRICH:                    'voice_memo_enrich',
+};
+
+// 2. ADD these new standalone exports anywhere in the file (grouped here
+//    under a "Calendar — implementation pass" comment block for clarity
+//    in your actual file):
+
+// ── Calendar — implementation pass ──────────────────────────────────────
+export const CALENDAR_REMINDER_WINDOW_MINUTES = 30; // pre-meeting reminder lead time
+
+export const VOICE_MEMO_LIMITS = {
+  MAX_DURATION_SECONDS: 20 * 60,    // 20 minutes
+  MAX_SIZE_BYTES: 25 * 1024 * 1024, // 25MB — matches Groq Whisper's file-size ceiling
+  ALLOWED_MIME_TYPES: [
+    'audio/webm', 'audio/mp4', 'audio/m4a', 'audio/x-m4a',
+    'audio/wav', 'audio/mpeg', 'audio/mp3', 'audio/ogg',
+  ],
+};
+
+// 3. ADD 'follow_up_ready' and 'meeting_reminder' are intentionally NOT
+//    added as new keys to DEFAULT_NOTIFICATION_PREFS — the implementation
+//    guide deliberately reuses the existing `calendar_prep_ready` key for
+//    all "your AI output is ready" notification types (prep, follow-up,
+//    voice memo summary, meeting reminder) to avoid a notification-
+//    preferences schema migration + settings UI change outside Calendar's
+//    scope. See IMPLEMENTATION_SUMMARY.md's "Additional Recommendations"
+//    section for the tradeoff this makes and when to revisit it.
+
 export const FOLLOW_UP_THRESHOLDS = {
   contacted: 4,
   replied:   6,
@@ -140,17 +197,7 @@ export const QUEUE_JOB_TYPES = {
 // by the same constant — eliminates fire-and-forget for prep/research.
 // NEW (chat audit): CHAT_SUMMARIZE — background conversation summarization,
 // see backgroundWorker.js and chat.js's maybeEnqueueSummarization().
-export const BACKGROUND_JOB_TYPES = {
-  TIP_CARD_GENERATE:          'tip_card_generate',
-  OPPORTUNITIES_REFRESH:      'opportunities_refresh',
-  ARCHETYPE_DETECT:           'archetype_detect',
-  FIRST_TIME_CARDS_GENERATE:  'first_time_cards_generate',
-  SEED_MEMORY:                'seed_memory',
-  CHECKIN_TIP_GENERATE:       'checkin_tip_generate',
-  CALENDAR_PREP_GENERATE:     'calendar_prep_generate',      // Issue 14
-  CALENDAR_RESEARCH_PROSPECT: 'calendar_research_prospect',  // Issue 14
-  CHAT_SUMMARIZE:             'chat_summarize',              // Chat audit §11
-};
+
 
 // Gap 3: activity event types
 export const ACTIVITY_EVENTS = { PRACTICE_COMPLETED: 'practice_completed', DEAL_CLOSED: 'deal_closed', OPPORTUNITY_CREATED: 'opportunity_created', GOAL_REACHED: 'goal_reached', MEMBER_JOINED: 'member_joined', OPPORTUNITY_ASSIGNED: 'opportunity_assigned', NUDGE_SENT: 'nudge_sent' };

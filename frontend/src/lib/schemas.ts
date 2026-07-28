@@ -10,6 +10,13 @@ export const loginSchema = z.object({
   password: z.string().min(1, 'Password is required'),
 });
 export type LoginSchema = z.infer<typeof loginSchema>;
+export const rescheduleEventSchema = z.object({
+  event_date: z.string().min(1, 'Date is required'),
+  start_time: z.string().regex(/^\d{2}:\d{2}$/, 'Enter a valid time').optional().nullable().or(z.literal('')),
+  end_time:   z.string().regex(/^\d{2}:\d{2}$/, 'Enter a valid time').optional().nullable().or(z.literal('')),
+});
+export type RescheduleEventSchema = z.infer<typeof rescheduleEventSchema>;
+
 
 export const registerSchema = z.object({
   name:     z.string().max(100).optional(),
@@ -168,20 +175,21 @@ export type FeedbackSchema = z.infer<typeof feedbackSchema>;
 
 
 
-// ── Calendar ─────────────────────────────────────────────────
 export const createCalendarEventSchema = z.object({
   title:            z.string().min(1,'Title is required').max(200),
-  event_date:       z.string().min(1,'Date is required'),
-  start_time:       z.string().optional().nullable(),
-  end_time:         z.string().optional().nullable(),
+  event_date:        z.string().min(1,'Date is required'),
+  start_time:       z.string().regex(/^\d{2}:\d{2}$/, 'Enter a valid time').optional().nullable().or(z.literal('')),
+  end_time:         z.string().regex(/^\d{2}:\d{2}$/, 'Enter a valid time').optional().nullable().or(z.literal('')),
   event_type:       z.enum(['meeting','call','demo','followup','other']).default('meeting'),
   notes:            z.string().max(2000).optional().nullable(),
   attendee_name:    z.string().max(200).optional().nullable(),
   attendee_context: z.string().max(2000).optional().nullable(),
   opportunity_id:   z.string().uuid().optional().nullable(),
   prospect_id:      z.string().uuid().optional().nullable(),
+  create_prospect:  z.boolean().optional(), // explicit opt-in/out, see api/calendar.ts
 });
 export type CreateCalendarEventSchema = z.infer<typeof createCalendarEventSchema>;
+
 
 export const debriefSchema = z.object({
   outcome:   z.enum(['hot','positive','neutral','cold','dead'], {
@@ -190,6 +198,7 @@ export const debriefSchema = z.object({
   raw_notes: z.string().max(5000).optional().nullable(),
 });
 export type DebriefSchema = z.infer<typeof debriefSchema>;
+
 
 // ── Prospects ────────────────────────────────────────────────
 export const createProspectSchema = z.object({

@@ -16,7 +16,14 @@ const { log, logError } = createLogger('Metrics');
 // (PM2 cluster, Docker containers). Each worker keeps its own Map; a Redis bust is
 // invisible to workers still holding the old Map entry for up to 4h.
 // Redis is the single authoritative cache layer.
-const INTELLIGENCE_TTL_S = 4 * 60 * 60;
+// IMPL-M11-01 (Phase 2 refactor): removed a locally-scoped
+// INTELLIGENCE_TTL_S constant that was defined here but never actually
+// referenced anywhere in this file — dead code, discovered while fixing
+// the SAME constant name's genuine bug in routes/insights.js (that file
+// referenced this exact name without ever importing or defining it,
+// which threw on every request — see services/intelligenceReport.js).
+// The real, live constant now lives in config/constants.js as the single
+// canonical source, imported by insights.js where it's actually used.
 
 // GET /api/metrics/dashboard
 router.get('/dashboard', asyncHandler(async (req, res) => {

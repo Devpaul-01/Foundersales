@@ -1,31 +1,43 @@
-// src/jobs/backgroundWorker.js — IMP-02
+// src/jobs/backgroundWorker.js — IMPLEMENTATION PASS (merged)
 //
-// FIXES APPLIED (refinement plan, kept from prior revision):
-//  Issue 14: CALENDAR_PREP_GENERATE and CALENDAR_RESEARCH_PROSPECT handlers
-//            added. Previously calendar.js called generateAndSaveEnrichedPrep
-//            and researchProspectForMeeting as fire-and-forget inline calls —
-//            no retry, no observability, silently lost on Groq errors.
-//            These are now proper BullMQ jobs: retryable and visible in Bull Board.
-//            The job constants are defined in BACKGROUND_JOB_TYPES (constants.js).
-//            calendar.js enqueues them via backgroundQueue.add().
+// CHANGES IN THIS REVISION:
 //
-// NEW (chat audit §11 / task instruction #8):
-//  CHAT_SUMMARIZE — rolling conversation summarization. Triggered by
-//  chat.js's maybeEnqueueSummarization() once a chat accumulates
-//  CHAT_SUMMARIZE_EVERY_N_MESSAGES new non-system messages since the last
-//  summary run. Folds everything OLDER than the live history window
-//  (CHAT_HISTORY_WINDOW, replayed verbatim on every turn — see chat.js)
-//  into chats.summary, which buildSystemPromptForChat then prepends to the
-//  system prompt. This keeps effective conversation memory extending
-//  indefinitely without resending the entire raw transcript every turn.
-//  Idempotent per chat/message-count via the jobId passed at enqueue time.
+//  CALENDAR_PREP_GENERATE — fully consolidated. Previously this handler
+//  re-implemented buildPrepContext inline (duplicating calendar.js's copy),
+//  and a SEPARATE code path (coreJobs.js's runCalendarPrepJob) generated
+//  prep via a DIFFERENT function entirely (groqService.generateEventPrep)
+//  on its own daily sweep — meaning which prep schema a user got depended
+//  on pure timing luck of which path ran first, and NEITHER path was aware
+//  of the other. Both now converge on services/calendarPrep.js's
+//  generateAndPersistPrep, with a DB-state re-check at the top of this
+//  handler as a second, queue-independent idempotency layer (BullMQ's
+//  jobId dedup alone only protects against duplicates under the SAME
+//  jobId while a job is still queued — it does not protect against two
+//  DIFFERENT jobIds racing to generate prep for the same event, which is
+//  exactly what could happen between the sweep and the on-creation path).
 //
-// IMPL-SENTRY-01 (Phase 2 refactor / L4): the existing 'failed' handler's
-// logError call is now paired with a Sentry.captureException call, tagged
-// with the job name/id, matching the same change applied to
-// scheduledWorker.js and practiceWorker.js — see scheduledWorker.js's
-// file header for the full reasoning. No-ops safely if Sentry was never
-// initialized (SENTRY_DSN unset).
+//  Notification is now sent from EXACTLY ONE place — inside this handler,
+//  gated on the user's actual notification_preferences — closing the
+//  previous inconsistency where only the old sweep path notified.
+//
+//  NEW HANDLERS: CALENDAR_EXTRACT_COMMITMENTS_SIGNALS,
+//  CALENDAR_UPDATE_PROSPECT_HEALTH, CALENDAR_GENERATE_FOLLOWUP,
+//  VOICE_MEMO_TRANSCRIBE, VOICE_MEMO_ENRICH, PROSPECT_DEDUP_SCAN.
+//  (Integrations/calendar-sync jobs are explicitly out of scope for this
+//  pass — no CALENDAR_SYNC_PULL handler exists.)
+//
+//  worker.on('failed') now flips prep_failed/prep_failed_at/
+//  prep_failure_reason on final CALENDAR_PREP_GENERATE failure, giving the
+//  frontend a real failure state instead of an infinite "Preparing..."
+//  pulse, and giving the daily sweep a signal to stop re-enqueueing a
+//  permanently-broken event forever.
+//
+//  IMPL-SENTRY-01 (Phase 2 refactor / L4, carried forward from the prior
+//  revision): the 'failed' handler's logError call is paired with a
+//  Sentry.captureException call, tagged with the job name/id, matching
+//  scheduledWorker.js and practiceWorker.js — see scheduledWorker.js's
+//  file header for the full reasoning. No-ops safely if Sentry was never
+//  initialized (SENTRY_DSN unset).
 import { Worker }             from 'bullmq';
 import { bullmqConnection }   from '../config/bullmq.js';
 import { BACKGROUND_JOB_TYPES, CHAT_HISTORY_WINDOW } from '../config/constants.js';
@@ -35,13 +47,28 @@ import { callWithFallbackGroq } from '../services/multiProvider.js';
 import groqService            from '../services/groq.js';
 import { detectAndSaveArchetype } from './growthIntelligenceScheduler.js';
 import { processUserOpportunities as runOpportunitiesRefreshForUser } from './coreJobs.js';
+import { notifyUser } from '../services/notifications.js';
 import * as Sentry from '@sentry/node';
 
-// Issue 14: imports for calendar prep/research handlers
-import { generateEnrichedEventPrep } from '../services/groqCalendarIntelligence.js';
+// Calendar imports
+import { generateAndPersistPrep } from '../services/calendarPrep.js';
 import { researchProspectForMeeting } from '../services/exaCalendar.js';
+import { generatePostMeetingFollowUp } from '../services/groqCalendarIntelligence.js';
+import { extractCommitmentsAndSignals } from '../services/calendarCommitmentsSignals.js';
+import { shouldGenerateFollowUp, recordGateDecision } from '../services/calendarAiGate.js';
+import { FollowUpOptionsSchema, validateOrFallback } from '../schemas/calendarAiSchemas.js';
+import { runProspectDedupScanForWorkspace } from '../services/prospectDedup.js';
+import * as voiceMemoService from '../services/voiceMemoService.js';
 
 const { log, logError, logJob } = createLogger('BackgroundWorker');
+
+const loadUserCtx = async (userId, workspaceId) => {
+  const [{ data: userRow }, { data: wp }] = await Promise.all([
+    supabaseAdmin.from('users').select('*').eq('id', userId).single(),
+    supabaseAdmin.from('workspace_profiles').select('*').eq('workspace_id', workspaceId).eq('user_id', userId).maybeSingle(),
+  ]);
+  return { ...userRow, ...wp, workspace_id: workspaceId, id: userId };
+};
 
 const handlers = {
 
@@ -159,77 +186,184 @@ const handlers = {
     log('checkin_tip_generate DONE', { userId, workspaceId });
   },
 
-  // Issue 14: CALENDAR_PREP_GENERATE handler
+  // ── CALENDAR_PREP_GENERATE — consolidated, single implementation ──────
   async [BACKGROUND_JOB_TYPES.CALENDAR_PREP_GENERATE](data) {
-    const { userId, workspaceId, eventId, userCtx } = data;
-    logJob(BACKGROUND_JOB_TYPES.CALENDAR_PREP_GENERATE, { userId, workspaceId, eventId });
+    const { userId, workspaceId, eventId, source } = data;
+    logJob(BACKGROUND_JOB_TYPES.CALENDAR_PREP_GENERATE, { userId, workspaceId, eventId, source });
 
+    // Layer 1 idempotency: re-check DB state, not just enqueue-time jobId
+    // dedup. This is what actually prevents duplicate generation between
+    // the on-creation path and the daily sweep.
     const { data: event } = await supabaseAdmin
-      .from('user_events').select('*').eq('id', eventId).single();
-    if (!event) {
-      log('calendar_prep_generate skipped — event not found', { eventId });
-      return;
+      .from('user_events').select('*')
+      .eq('id', eventId).eq('workspace_id', workspaceId).single(); // workspace-scoped now
+
+    if (!event) { log('calendar_prep_generate skipped — event not found', { eventId }); return; }
+    if (event.prep_generated) {
+      log('calendar_prep_generate skipped — already generated', { eventId, source });
+      return; // expected outcome of a race, not a failure
     }
 
-    const context = {};
-    if (event.prospect_id) {
-      const [eventsRes, signalsRes, commitmentsRes] = await Promise.all([
-        supabaseAdmin.from('user_events')
-          .select('title, event_type, outcome, event_date, debrief_content')
-          .eq('prospect_id', event.prospect_id).eq('workspace_id', workspaceId).eq('user_id', userId)
-          .neq('id', eventId).order('event_date', { ascending: false }).limit(5),
-        supabaseAdmin.from('conversation_signals')
-          .select('signal_type, signal_text, detected_at')
-          .eq('prospect_id', event.prospect_id).eq('workspace_id', workspaceId).eq('user_id', userId)
-          .eq('is_active', true).order('detected_at', { ascending: false }).limit(10),
-        supabaseAdmin.from('conversation_commitments')
-          .select('commitment_text, owner, status, due_date')
-          .eq('prospect_id', event.prospect_id).eq('workspace_id', workspaceId).eq('user_id', userId)
-          .in('status', ['pending', 'overdue']).eq('owner', 'founder'),
-      ]);
-      if (eventsRes.data?.length) {
-        context.prospectTimeline = eventsRes.data
-          .map(e => `${e.event_date}: ${e.event_type} — ${e.outcome || 'no debrief'}. ${e.debrief_content?.summary || ''}`)
-          .join('\n');
-      }
-      context.previousSignals        = signalsRes.data    || [];
-      context.outstandingCommitments = commitmentsRes.data || [];
+    const userCtx = await loadUserCtx(userId, workspaceId);
+    await generateAndPersistPrep(userCtx, event, workspaceId);
+
+    // Notification sent from exactly here, exactly once.
+    if (userCtx.fcm_token && userCtx.notification_preferences?.calendar_prep_ready !== false) {
+      await notifyUser(userId, {
+        title: `Prep ready for "${event.title}" 📋`,
+        body:  'Talking points and follow-up templates are ready. Tap to review.',
+        data:  { type: 'event_prep', event_id: event.id },
+      }, userCtx.fcm_token).catch(err => logError('calendar_prep_notify', err, { eventId }));
     }
-    if (event.perplexity_research) context.perplexityResearch = event.perplexity_research;
 
-    const prep = await generateEnrichedEventPrep(userCtx, event, context);
-    await supabaseAdmin.from('user_events').update({
-      prep_content:      prep,
-      prep_generated:    true,
-      prep_generated_at: new Date().toISOString(),
-    }).eq('id', eventId).eq('workspace_id', workspaceId);
-
-    log('calendar_prep_generate DONE', { userId, workspaceId, eventId });
+    log('calendar_prep_generate DONE', { userId, workspaceId, eventId, source });
   },
 
-  // Issue 14: CALENDAR_RESEARCH_PROSPECT handler
+  // ── CALENDAR_RESEARCH_PROSPECT — workspace-scoped fetch (was missing) ──
   async [BACKGROUND_JOB_TYPES.CALENDAR_RESEARCH_PROSPECT](data) {
-    const { userId, workspaceId, eventId, userCtx } = data;
+    const { userId, workspaceId, eventId } = data;
     logJob(BACKGROUND_JOB_TYPES.CALENDAR_RESEARCH_PROSPECT, { userId, workspaceId, eventId });
 
     const { data: event } = await supabaseAdmin
-      .from('user_events').select('*').eq('id', eventId).single();
+      .from('user_events').select('*').eq('id', eventId).eq('workspace_id', workspaceId).single();
     if (!event) {
       log('calendar_research_prospect skipped — event not found', { eventId });
       return;
     }
 
+    const userCtx = await loadUserCtx(userId, workspaceId);
     await researchProspectForMeeting(userId, workspaceId, eventId, event, userCtx);
     log('calendar_research_prospect DONE', { userId, workspaceId, eventId });
   },
 
-  // ── NEW: CHAT_SUMMARIZE ─────────────────────────────────────
-  // Folds everything older than the live CHAT_HISTORY_WINDOW into a
-  // rolling chats.summary field. Re-fetches all non-system messages for
-  // the chat (ordered by the stable `seq` column, not created_at — see
-  // migration_001), keeps the newest CHAT_HISTORY_WINDOW as "live" and
-  // summarizes only what falls before that boundary, merging with any
-  // existing summary so nothing already condensed is lost.
+  // ── NEW: CALENDAR_EXTRACT_COMMITMENTS_SIGNALS ──────────────────────────
+  async [BACKGROUND_JOB_TYPES.CALENDAR_EXTRACT_COMMITMENTS_SIGNALS](data) {
+    const { userId, workspaceId, eventId, rawNotes } = data;
+    logJob(BACKGROUND_JOB_TYPES.CALENDAR_EXTRACT_COMMITMENTS_SIGNALS, { userId, workspaceId, eventId });
+
+    const { data: event } = await supabaseAdmin.from('user_events').select('*')
+      .eq('id', eventId).eq('workspace_id', workspaceId).single();
+    if (!event) return;
+    if (event.signals_extracted) {
+      log('extract_commitments_signals skipped — already extracted', { eventId });
+      return;
+    }
+
+    const { data: existingOpenCommitments } = event.prospect_id
+      ? await supabaseAdmin.from('conversation_commitments').select('commitment_text')
+          .eq('prospect_id', event.prospect_id).eq('workspace_id', workspaceId)
+          .in('status', ['pending', 'overdue']).eq('owner', 'founder')
+      : { data: [] };
+
+    const { commitments, signals } = await extractCommitmentsAndSignals(
+      rawNotes, event.attendee_name, event.outcome, existingOpenCommitments || [],
+      { workspaceId, userId, eventId }
+    );
+
+    if (commitments.length) {
+      const { error } = await supabaseAdmin.from('conversation_commitments').insert(
+        commitments.map(c => ({
+          workspace_id: workspaceId, user_id: userId, prospect_id: event.prospect_id || null,
+          source_type: 'meeting_debrief', source_id: event.id, event_id: event.id,
+          commitment_text: c.commitment_text, owner: c.owner || 'founder', status: 'pending', due_date: c.due_date || null,
+        }))
+      );
+      if (error) logError('extract_commitments_signals/commitments insert', error, { eventId });
+    }
+
+    if (signals.length) {
+      const { error } = await supabaseAdmin.from('conversation_signals').insert(
+        signals.map(s => ({
+          workspace_id: workspaceId, user_id: userId, prospect_id: event.prospect_id || null,
+          source_type: 'meeting_debrief', source_id: event.id, detected_at: new Date(), event_id: event.id,
+          signal_type: s.signal_type, signal_text: s.signal_text, confidence: s.confidence || null,
+        }))
+      );
+      if (error) logError('extract_commitments_signals/signals insert', error, { eventId });
+    }
+
+    await supabaseAdmin.from('user_events').update({ signals_extracted: true }).eq('id', eventId).eq('workspace_id', workspaceId);
+    log('extract_commitments_signals DONE', { eventId, commitmentCount: commitments.length, signalCount: signals.length });
+  },
+
+  // ── NEW: CALENDAR_UPDATE_PROSPECT_HEALTH ───────────────────────────────
+  // No idempotency guard needed — recomputes from source data each time
+  // rather than accumulating, so re-execution is naturally safe.
+  async [BACKGROUND_JOB_TYPES.CALENDAR_UPDATE_PROSPECT_HEALTH](data) {
+    const { userId, workspaceId, prospectId } = data;
+    logJob(BACKGROUND_JOB_TYPES.CALENDAR_UPDATE_PROSPECT_HEALTH, { userId, workspaceId, prospectId });
+    await updateProspectHealth(userId, workspaceId, prospectId);
+    log('calendar_update_prospect_health DONE', { userId, workspaceId, prospectId });
+  },
+
+  // ── NEW: CALENDAR_GENERATE_FOLLOWUP ─────────────────────────────────────
+  async [BACKGROUND_JOB_TYPES.CALENDAR_GENERATE_FOLLOWUP](data) {
+    const { userId, workspaceId, eventId } = data;
+    logJob(BACKGROUND_JOB_TYPES.CALENDAR_GENERATE_FOLLOWUP, { userId, workspaceId, eventId });
+
+    const { data: event } = await supabaseAdmin.from('user_events').select('*')
+      .eq('id', eventId).eq('workspace_id', workspaceId).single();
+    if (!event || event.follow_up_generated_at) return;
+
+    const gate = shouldGenerateFollowUp(event);
+    await recordGateDecision({ workspaceId, userId, eventId, aiFunction: 'follow_up', gateResult: gate });
+    if (!gate.proceed) {
+      log('calendar_generate_followup skipped by gate', { eventId, reason: gate.reason });
+      return;
+    }
+
+    const [{ data: commitments }, { data: signals }] = await Promise.all([
+      supabaseAdmin.from('conversation_commitments').select('*').eq('event_id', eventId).eq('workspace_id', workspaceId),
+      supabaseAdmin.from('conversation_signals').select('*').eq('event_id', eventId).eq('workspace_id', workspaceId),
+    ]);
+
+    const userCtx = await loadUserCtx(userId, workspaceId);
+    const rawFollowUp = await generatePostMeetingFollowUp(userCtx, event, event.debrief_content, commitments || [], signals || []);
+    const followUp = validateOrFallback(FollowUpOptionsSchema, rawFollowUp, {
+      brief: `Hey ${event.attendee_name || 'there'} — great talking today.`,
+      substantive: `Hey ${event.attendee_name || 'there'} — appreciated our conversation. What's the best next step from your side?`,
+      re_engagement: `Hey ${event.attendee_name || 'there'} — checking back in after our chat.`,
+    }, { context: `followup-job:${eventId}` });
+
+    await supabaseAdmin.from('user_events').update({
+      follow_up_options: followUp, follow_up_generated_at: new Date().toISOString(),
+    }).eq('id', eventId).eq('workspace_id', workspaceId);
+
+    if (userCtx.fcm_token && userCtx.notification_preferences?.calendar_prep_ready !== false) {
+      await notifyUser(userId, {
+        title: '✉️ Follow-up drafts ready',
+        body: `Three follow-up options are ready for "${event.title}".`,
+        data: { type: 'follow_up_ready', event_id: eventId },
+      }, userCtx.fcm_token).catch(() => {});
+    }
+    log('calendar_generate_followup DONE', { eventId });
+  },
+
+  // ── NEW: VOICE_MEMO_TRANSCRIBE ──────────────────────────────────────────
+  async [BACKGROUND_JOB_TYPES.VOICE_MEMO_TRANSCRIBE](data) {
+    const { memoId, workspaceId, userId } = data;
+    logJob(BACKGROUND_JOB_TYPES.VOICE_MEMO_TRANSCRIBE, { memoId, workspaceId });
+    await voiceMemoService.transcribeMemo({ memoId, workspaceId, userId });
+    log('voice_memo_transcribe DONE', { memoId });
+  },
+
+  // ── NEW: VOICE_MEMO_ENRICH ───────────────────────────────────────────────
+  async [BACKGROUND_JOB_TYPES.VOICE_MEMO_ENRICH](data) {
+    const { memoId, workspaceId, userId } = data;
+    logJob(BACKGROUND_JOB_TYPES.VOICE_MEMO_ENRICH, { memoId, workspaceId });
+    await voiceMemoService.enrichMemo({ memoId, workspaceId, userId });
+    log('voice_memo_enrich DONE', { memoId });
+  },
+
+  // ── NEW: PROSPECT_DEDUP_SCAN ─────────────────────────────────────────────
+  async [BACKGROUND_JOB_TYPES.PROSPECT_DEDUP_SCAN](data) {
+    const { workspaceId } = data;
+    logJob(BACKGROUND_JOB_TYPES.PROSPECT_DEDUP_SCAN, { workspaceId });
+    await runProspectDedupScanForWorkspace(workspaceId);
+    log('prospect_dedup_scan DONE', { workspaceId });
+  },
+
+  // ── NEW: CHAT_SUMMARIZE (unchanged from prior revision) ─────────────────
   async [BACKGROUND_JOB_TYPES.CHAT_SUMMARIZE](data) {
     const { chatId, workspaceId, userId } = data;
     logJob(BACKGROUND_JOB_TYPES.CHAT_SUMMARIZE, { chatId, workspaceId });
@@ -269,9 +403,6 @@ const handlers = {
       return;
     }
 
-    // Only summarize what's genuinely new since the last run — if a
-    // duplicate/late job fires for a chat that's already been summarized
-    // up to this point, this keeps it a safe no-op.
     if (toSummarize.length <= (chat.last_summarized_message_count || 0)) {
       log('chat_summarize skipped — already summarized up to this point', {
         chatId, toSummarizeCount: toSummarize.length, alreadyDone: chat.last_summarized_message_count,
@@ -319,6 +450,47 @@ ${chat.summary ? `EXISTING SUMMARY (carry forward anything still relevant):\n${c
 
 };
 
+// ── Shared helper: recompute prospect health from source data ───────────
+// (moved here from calendar.js — used only by the CALENDAR_UPDATE_PROSPECT_HEALTH
+// handler now that the debrief route enqueues a job instead of calling this
+// directly; logic is byte-for-byte unchanged from the prior implementation.)
+async function updateProspectHealth(userId, workspaceId, prospectId) {
+  const now = new Date();
+  const [eventsRes, signalsRes, commitmentsRes] = await Promise.all([
+    supabaseAdmin.from('user_events').select('outcome, energy_score, event_date')
+      .eq('prospect_id', prospectId).eq('workspace_id', workspaceId).eq('user_id', userId)
+      .order('event_date', { ascending: false }).limit(10),
+    supabaseAdmin.from('conversation_signals').select('signal_type, detected_at')
+      .eq('prospect_id', prospectId).eq('workspace_id', workspaceId).eq('user_id', userId).eq('is_active', true),
+    supabaseAdmin.from('conversation_commitments').select('owner, status, due_date')
+      .eq('prospect_id', prospectId).eq('workspace_id', workspaceId).eq('user_id', userId),
+  ]);
+
+  let score = 50;
+  const lastEvent = eventsRes.data?.[0];
+  if (lastEvent) {
+    const daysSince = (now - new Date(lastEvent.event_date)) / 86400000;
+    if (daysSince < 3)       score += 20;
+    else if (daysSince < 7)  score += 10;
+    else if (daysSince >= 30) score -= 30;
+    else if (daysSince >= 14) score -= 15;
+    const outcomeBonus = { hot: 20, positive: 10, neutral: 0, cold: -10, dead: -30 };
+    score += outcomeBonus[lastEvent.outcome] || 0;
+  }
+  const recentSignals = (signalsRes.data || []).filter(s => (now - new Date(s.detected_at)) / 86400000 < 14);
+  score += recentSignals.filter(s => s.signal_type === 'buying').length * 8;
+  score -= recentSignals.filter(s => s.signal_type === 'risk').length   * 10;
+  const overdueCount = (commitmentsRes.data || []).filter(c => c.owner === 'founder' && c.status === 'overdue').length;
+  score -= overdueCount * 12;
+
+  const finalScore = Math.max(0, Math.min(100, Math.round(score)));
+  await supabaseAdmin.from('prospects').update({
+    relationship_health_score: finalScore,
+    health_updated_at:         now.toISOString(),
+    last_contact_at:           now.toISOString(),
+  }).eq('id', prospectId).eq('workspace_id', workspaceId);
+}
+
 export const startBackgroundWorker = () => {
   const worker = new Worker('background', async (job) => {
     const handler = handlers[job.name];
@@ -326,14 +498,28 @@ export const startBackgroundWorker = () => {
     await handler(job.data);
   }, { connection: bullmqConnection, concurrency: 5 });
 
-  worker.on('failed', (job, err) => {
+  worker.on('failed', async (job, err) => {
     logError(`job[${job?.name}]`, err, { jobId: job?.id });
     // IMPL-SENTRY-01: external visibility for job failures, see
     // scheduledWorker.js's file header for the full reasoning.
     try {
       Sentry.captureException(err, { tags: { source: 'backgroundWorker', jobName: job?.name, jobId: job?.id } });
     } catch { /* Sentry itself must never be able to break a job */ }
+
+    // Final-failure handling for prep generation: gives the frontend a real
+    // failure branch instead of an infinite "Preparing..." pulse, and stops
+    // the daily sweep from re-enqueueing a permanently-broken event forever
+    // (see coreJobs.js's runCalendarPrepJob — it filters on prep_failed = false).
+    if (job?.name === BACKGROUND_JOB_TYPES.CALENDAR_PREP_GENERATE && job.attemptsMade >= (job.opts?.attempts || 1)) {
+      const { eventId, workspaceId } = job.data;
+      await supabaseAdmin.from('user_events').update({
+        prep_failed: true,
+        prep_failed_at: new Date().toISOString(),
+        prep_failure_reason: err.message?.slice(0, 500),
+      }).eq('id', eventId).eq('workspace_id', workspaceId).catch(() => {});
+    }
   });
+
   log('Background worker started', { concurrency: 5 });
   return worker;
 };

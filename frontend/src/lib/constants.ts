@@ -149,14 +149,43 @@ export const MEETING_OUTCOME_COLORS: Record<string, string> = {
   dead:     '#94a3b8',
 };
 
+// ============================================================
+// ADDITIONS / FIXES TO frontend/src/lib/constants.ts
+//
+// NOT standalone — merge into your existing constants.ts.
+// ============================================================
+
+// 1. FIX — remove the dead 'follow_up' underscore-variant key. Only
+//    'followup' is a valid enum value per schemas.ts's Zod enum; the
+//    duplicate key was leftover cruft from a past naming migration.
+//    REPLACE the existing EVENT_TYPE_LABELS with:
 export const EVENT_TYPE_LABELS: Record<string, string> = {
   meeting:  'Meeting',
   call:     'Call',
   demo:     'Demo',
   followup: 'Follow-up',
-  follow_up:'Follow-up',
   other:    'Other',
 };
+
+// 2. MEETING_OUTCOME_COLORS is UNCHANGED here — the fix is DELETING the
+//    shadowing local redefinition at the bottom of
+//    CalendarEventDetailPage.tsx (done in that file's rewrite) so the
+//    import from this file is what's actually used everywhere.
+
+// 3. ADD — standardized icon sizing (replaces the 13/14/15/16 mix
+//    previously scattered as inline magic numbers in
+//    CalendarEventDetailPage.tsx)
+export const ICON_SIZE_INLINE = 14;
+export const ICON_SIZE_SECTION = 20;
+
+// 4. ADD — voice memo transcription status labels
+export const VOICE_MEMO_STATUS_LABELS: Record<string, string> = {
+  pending:    'Queued',
+  processing: 'Transcribing…',
+  completed:  'Ready',
+  failed:     'Failed',
+};
+
 
 // ── Pipeline (alias exports expected by newer pages) ──────────
 export const PIPELINE_STAGE_COLORS: Record<string, string> = {

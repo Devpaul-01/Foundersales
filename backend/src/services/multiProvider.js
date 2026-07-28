@@ -17,7 +17,8 @@
 //   (single-key fallback: CEREBRAS_API_KEY, GROQ_API_KEY, MISTRAL_API_KEY, OPENROUTER_API_KEY)
 //
 // All four use OpenAI-compatible APIs — no separate SDKs needed.
-// Failed keys cool down for 1 hour (in-memory).
+// Failed keys cool down for 1 hour (in-memory fallback path) or via Redis
+// (default path — see IMPL-MULTIPROVIDER-01 below).
 //
 // CHAT AUDIT CHANGES (this revision):
 //   - VISION SUPPORT (audit §5.8): callWithFallback / callWithFallbackGroq /
@@ -36,7 +37,80 @@
 //     (audit §5.3). The key index is still used internally for cooldown
 //     bookkeeping and logging — it just isn't leaked into persisted data
 //     / analytics anymore.
+//
+// IMPL-MULTIPROVIDER-01 (Phase 2 refactor): key cooldown state, model
+// discovery cache, and (new, observe-only) usage counters are now backed
+// by Redis by default, so this file's runtime state is correctly shared
+// across every instance in a horizontally-scaled deployment, rather than
+// silently diverging per-process. Previously: an instance that saw a key
+// fail had no way to tell any other instance, so other instances kept
+// sending traffic to a known-bad key; and every instance independently
+// performed model discovery at boot, hitting every provider's /models
+// endpoint redundantly on every deploy.
+//
+// Pool construction (_pools, buildKeyPool) is DELIBERATELY left local /
+// per-process, unchanged — this is configuration read from process.env at
+// startup, not runtime state. Every instance in a correctly-configured
+// deployment has identical environment variables, so every instance
+// independently builds an identical pool; there is nothing to
+// synchronize, and synchronizing already-identical configuration would
+// add a Redis dependency at boot for zero benefit.
+//
+// Kill switch: MULTIPROVIDER_REDIS_STATE_ENABLED (default enabled — set
+// to the string 'false' to disable). When disabled, this file falls back
+// entirely to the original in-memory Map-based cooldown/discovery
+// behavior (kept in this file, not deleted, specifically so this switch
+// works). This file is the single highest-traffic file in the codebase —
+// every AI feature routes through it — so a single environment-variable
+// toggle that reverts to the previously-working, well-understood
+// in-memory behavior, with no code deploy required, is the highest-value
+// risk mitigation available for a change this central. Recommend running
+// with this explicitly set to 'false' for an initial canary rollout,
+// flipping to enabled (or simply unsetting it) once validated under real
+// multi-instance load. Plan to remove the in-memory fallback path
+// entirely only after the Redis-backed path has run in production for a
+// deliberate observation period (1-2 weeks of stable operation).
+//
+// IMPL-H8-01 (Phase 2 refactor): retry classification now uses
+// utils/providerErrors.js's classifyProviderError() instead of the old
+// isRetryableError/shouldCoolKey string-substring matching. See that
+// file's header comment for the full reasoning. The old functions and
+// signal-list constants are kept below (renamed with an `InMemory`/`Old`
+// suffix where they overlap with new names) for one release cycle as a
+// safety net, matching this file's own kill-switch conservatism — remove
+// them in a follow-up cleanup once the new classifier has run in
+// production without surprises.
+//
+// IMPL-SENTRY-01 (Phase 2 refactor / L4): most AI-call failures in this
+// codebase never reach Sentry's automatic Express-level error capture,
+// because the overwhelming majority of groq-*.js functions catch their
+// own errors locally and return a fallback value rather than rethrowing.
+// Relying on automatic capture alone would mean the failures most worth
+// surfacing (NON_RETRYABLE classifications, ALL_PROVIDERS_FAILED) would
+// frequently never reach Sentry at all. Explicit Sentry.captureException
+// calls are placed at exactly these two choke points below — deliberately
+// NOT scattered across every individual groq-*.js catch block, which
+// would reintroduce the kind of duplicated-logic-across-many-files
+// problem already flagged elsewhere in this codebase's audit history.
+// KEY_FAULT and PROVIDER_TRANSIENT classifications are deliberately NOT
+// sent to Sentry — these are expected, routinely-handled conditions the
+// fallback chain is specifically designed to absorb, and capturing every
+// one would generate enormous, signal-drowning volume under completely
+// normal operating conditions.
 // ============================================================
+
+import * as Sentry from '@sentry/node';
+import { ProviderCallError, classifyProviderError } from '../utils/providerErrors.js';
+import {
+  getCache, setCache, withLock, getRawClient,
+  hashIncrementField,
+  incrementCounter,
+} from './redis.js';
+import {
+  markKeyFailed, isKeyCooling, getCooldownState, isRedisStateEnabled,
+  isKeyCoolingInMemorySync, getInMemoryCooldownState,
+} from './providerCooldown.js';
+import { reportDegradedMode } from '../utils/reportDegradation.js';
 
 const MODEL_PRIORITY = {
   cerebras: [
@@ -150,94 +224,174 @@ const buildKeyPool = (providerDef) => {
   return keys;
 };
 
-const KEY_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
-const keyCooldowns    = new Map();
+// ══════════════════════════════════════════════════════════════
+// IMPL-MULTIPROVIDER-01 — Redis key builders for state that stays local
+// to THIS file (model discovery cache, usage counters, provider-health
+// counters). Key cooldown state (markKeyFailed/isKeyCooling) has been
+// extracted into services/providerCooldown.js so it can be shared
+// verbatim with exa.js's key rotation — see that module's header
+// comment for the full reasoning. isRedisStateEnabled is also sourced
+// from there, since both this file and exa.js are meant to move in
+// lockstep on the same kill switch.
+// ══════════════════════════════════════════════════════════════
 
-const cooldownId = (provider, keyIndex) => `${provider}-${keyIndex}`;
+const MODEL_CACHE_TTL_S    = 6 * 60 * 60;    // 6 hours
+const MODEL_LOCK_TTL_S     = 15;             // comfortably covers the 8s discovery HTTP timeout below
+const USAGE_COUNTER_TTL_S  = 60;             // not refreshed on each increment — rolls over naturally
+const PROVIDER_HEALTH_TTL_S = 60 * 60;
 
-const markKeyFailed = (provider, keyIndex) => {
-  const id       = cooldownId(provider, keyIndex);
-  const existing = keyCooldowns.get(id) || { failCount: 0 };
-  const next     = { failedAt: Date.now(), failCount: existing.failCount + 1 };
-  keyCooldowns.set(id, next);
-  console.warn(`[MultiProvider] ${provider} key #${keyIndex} cooling down (fail #${next.failCount}) — retrying in 1h`);
-};
+const modelsRedisKey         = (provider)         => `mp:models:${provider}`;
+const modelsLockRedisKey     = (provider)         => `mp:models:${provider}:lock`;
+const usageRedisKey          = (provider, index)  => `mp:usage:${provider}:${index}`;
+const providerHealthRedisKey = (provider)         => `mp:providerhealth:${provider}`;
 
-const isKeyCooling = (provider, keyIndex) => {
-  const id = cooldownId(provider, keyIndex);
-  const cd = keyCooldowns.get(id);
-  if (!cd) return false;
-  if (Date.now() - cd.failedAt >= KEY_COOLDOWN_MS) {
-    keyCooldowns.delete(id);
-    console.log(`[MultiProvider] ${provider} key #${keyIndex} cooldown expired — back in rotation`);
-    return false;
+// ──────────────────────────────────────────
+// IMPL-MULTIPROVIDER-01 — Redis-backed model discovery cache
+
+//
+// Shared across every instance: only one instance ever performs the real
+// /models HTTP call per provider per 6-hour window (lock-guarded); every
+// other instance either reads the shared cache or — if it loses the lock
+// race before the winner has finished writing — falls back to the static
+// MODEL_PRIORITY list for that one request cycle, exactly like the
+// pre-Redis "discovery hasn't finished yet" fallback already did. This
+// also fixes a real, if subtler, correctness gap beyond just reducing
+// redundant HTTP calls: without a shared cache, two instances could
+// independently discover slightly different model lists from a
+// transiently-inconsistent provider response, meaning two requests to the
+// same feature, routed to different instances, could silently use
+// different underlying models for reasons invisible to anyone debugging
+// a "why did this response seem different" report.
+// ──────────────────────────────────────────
+const fetchAndRankModelsFromProvider = async (providerId, baseURL, apiKey) => {
+  if (providerId === 'mistral') {
+    return MODEL_PRIORITY.mistral;
   }
-  return true;
+
+  const res = await fetch(`${baseURL}/models`, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+    signal:  AbortSignal.timeout(8000),
+  });
+
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+  const json   = await res.json();
+  const allIds = (json.data || []).map(m => m.id).filter(Boolean);
+
+  const priorityList = MODEL_PRIORITY[providerId] || [];
+  const known   = priorityList.filter(id => allIds.includes(id));
+  const unknown = allIds.filter(id =>
+    !priorityList.includes(id) && !NON_CHAT_PATTERN.test(id)
+  ).sort();
+
+  const ranked = [...known, ...unknown];
+  return ranked.length > 0 ? ranked : priorityList;
 };
 
-const RATE_LIMIT_SIGNALS = ['rate_limit', 'rate limit', '429', 'too many requests', 'quota exceeded'];
-const AUTH_ERROR_SIGNALS = ['401', 'unauthorized', 'invalid api key', 'invalid_api_key', 'authentication'];
-const UNAVAIL_SIGNALS    = ['503', '502', '500', 'unavailable', 'overloaded', 'server error'];
-const NETWORK_SIGNALS    = ['econnrefused', 'etimedout', 'enotfound', 'socket hang up', 'fetch failed'];
+const getModelsFromRedisCache = async (providerId) => {
+  const raw = await getCache(modelsRedisKey(providerId));
+  return Array.isArray(raw) ? raw : null;
+};
 
-const matchesAny = (msg, signals) =>
-  signals.some(s => msg?.toLowerCase().includes(s.toLowerCase()));
+const discoverModelsRedisBacked = async (providerId, baseURL, apiKey) => {
+  const cached = await getModelsFromRedisCache(providerId);
+  if (cached) return cached;
 
-const isRetryableError = (err) =>
-  matchesAny(err?.message, [
-    ...RATE_LIMIT_SIGNALS, ...AUTH_ERROR_SIGNALS,
-    ...UNAVAIL_SIGNALS,    ...NETWORK_SIGNALS,
-  ]);
+  const lockKey = modelsLockRedisKey(providerId);
+  const { acquired, result } = await withLock(lockKey, MODEL_LOCK_TTL_S, async () => {
+    // Re-check in case another process finished discovery while we were
+    // waiting to acquire the lock.
+    const recheck = await getModelsFromRedisCache(providerId);
+    if (recheck) return recheck;
 
-const shouldCoolKey = (err) =>
-  matchesAny(err?.message, [...RATE_LIMIT_SIGNALS, ...AUTH_ERROR_SIGNALS, ...UNAVAIL_SIGNALS]);
+    try {
+      const ranked = await fetchAndRankModelsFromProvider(providerId, baseURL, apiKey);
+      await setCache(modelsRedisKey(providerId), ranked, MODEL_CACHE_TTL_S);
+      console.log(`[MultiProvider] ${providerId}: discovered ${ranked.length} chat model(s) (Redis-cached, 6h)`);
+      return ranked;
+    } catch (err) {
+      console.warn(`[MultiProvider] ${providerId}: Redis-backed discovery failed (${err.message}) — will use static priority list`);
+      return null;
+    }
+  });
+
+  if (acquired) return result; // may be null if the fetch itself failed — falls through to static list at the call site
+  // Someone else holds the lock right now — don't perform the HTTP call
+  // ourselves this cycle.
+  return null;
+};
+
+// Evict a specific model from the Redis-backed cache (BAD_MODEL
+// classification — see providerErrors.js). Preserves the cache entry's
+// remaining TTL rather than resetting to the full 6-hour window, so this
+// eviction doesn't artificially extend the cache's natural refresh
+// schedule.
+const evictModelFromRedisCache = async (providerId, modelId) => {
+  try {
+    const current = await getModelsFromRedisCache(providerId);
+    if (!current) return;
+    const updated = current.filter(m => m !== modelId);
+    if (updated.length === current.length) return; // nothing to evict
+
+    let remainingTtl = MODEL_CACHE_TTL_S;
+    const client = await getRawClient();
+    if (client) {
+      try {
+        const ttl = await client.ttl(modelsRedisKey(providerId));
+        if (ttl > 0) remainingTtl = ttl;
+      } catch { /* fall back to full TTL if reading it fails */ }
+    }
+
+    await setCache(modelsRedisKey(providerId), updated, remainingTtl);
+    console.warn(`[MultiProvider] Evicted bad model "${modelId}" from ${providerId}'s Redis-cached model list`);
+  } catch (err) {
+    console.warn(`[MultiProvider] evictModelFromRedisCache(${providerId}, ${modelId}) failed (non-fatal):`, err.message);
+  }
+};
+
+// Fire-and-forget observability counters — never awaited at the call
+// site, never block the real request path. Observe-only in this
+// rollout: not read by any decision logic yet (see file header and
+// providerErrors.js's PROVIDER_TRANSIENT reasoning) — deliberately
+// staged this way so real production traffic data can inform sensible
+// thresholds before anything acts on these numbers.
+const recordUsageAttempt = (providerId, index) => {
+  incrementCounter(usageRedisKey(providerId, index), USAGE_COUNTER_TTL_S).catch(() => {});
+};
+
+const recordProviderTransient = (providerId) => {
+  hashIncrementField(providerHealthRedisKey(providerId), 'count', 1, PROVIDER_HEALTH_TTL_S).catch(() => {});
+};
+
+// ══════════════════════════════════════════════════════════════
+// Original in-memory implementation — kept as the fallback path when
+// MULTIPROVIDER_REDIS_STATE_ENABLED is explicitly set to 'false', or
+// when a Redis operation itself fails at runtime (fail-open: a Redis
+// hiccup degrades precision, never takes down AI features). See the
+// file header for why this is deliberately not deleted yet.
+// ══════════════════════════════════════════════════════════════
+
+// Cooldown in-memory fallback now lives in providerCooldown.js (shared
+// with exa.js) — see this file's markKeyFailed/isKeyCooling imports above.
 
 let _pools = null;
 
 const _discoveredModels = {};
 const _discoveryDone    = {};
 
-const _discoverProviderModels = async (providerId, baseURL, apiKey) => {
-  if (providerId === 'mistral') {
-    _discoveredModels[providerId] = MODEL_PRIORITY.mistral;
-    _discoveryDone[providerId] = true;
-    return;
-  }
-
+const _discoverProviderModelsInMemory = async (providerId, baseURL, apiKey) => {
   try {
-    const res = await fetch(`${baseURL}/models`, {
-      headers:  { Authorization: `Bearer ${apiKey}` },
-      signal:   AbortSignal.timeout(8000),
-    });
-
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-    const json   = await res.json();
-    const allIds = (json.data || []).map(m => m.id).filter(Boolean);
-
-    const priorityList = MODEL_PRIORITY[providerId] || [];
-    const known   = priorityList.filter(id => allIds.includes(id));
-    const unknown = allIds.filter(id =>
-      !priorityList.includes(id) && !NON_CHAT_PATTERN.test(id)
-    ).sort();
-
-    const ranked = [...known, ...unknown];
-    if (ranked.length > 0) {
-      _discoveredModels[providerId] = ranked;
-      console.log(`[MultiProvider] ${providerId}: discovered ${ranked.length} chat model(s) — using dynamic list`);
-    } else {
-      console.warn(`[MultiProvider] ${providerId}: discovery returned 0 usable models — falling back to static list`);
-      _discoveredModels[providerId] = priorityList;
-    }
+    const ranked = await fetchAndRankModelsFromProvider(providerId, baseURL, apiKey);
+    _discoveredModels[providerId] = ranked;
+    console.log(`[MultiProvider] ${providerId}: discovered ${ranked.length} chat model(s) — using dynamic list (in-memory fallback)`);
   } catch (err) {
     console.warn(`[MultiProvider] ${providerId}: model discovery failed (${err.message}) — using static priority list`);
     _discoveredModels[providerId] = MODEL_PRIORITY[providerId] || [];
   }
-
   _discoveryDone[providerId] = true;
 };
 
-const getEffectiveModels = (providerId, tier = 'quality') => {
+const getEffectiveModelsInMemory = (providerId, tier = 'quality') => {
   if (_discoveryDone[providerId] && _discoveredModels[providerId]?.length > 0) {
     if (tier === 'fast') {
       const fastIds = FAST_MODEL_PRIORITY[providerId] || [];
@@ -247,6 +401,50 @@ const getEffectiveModels = (providerId, tier = 'quality') => {
     return _discoveredModels[providerId];
   }
   return getModelPriorityForTier(providerId, tier) || PROVIDER_REGISTRY[providerId]?.models || [];
+};
+
+// ══════════════════════════════════════════════════════════════
+// IMPL-MULTIPROVIDER-01 — dispatchers: route to Redis-backed logic by
+// default, fall back to the in-memory implementation when the kill
+// switch is off OR when a Redis operation fails at runtime. Every
+// caller elsewhere in this file goes through these dispatchers rather
+// than calling either implementation directly, so the rest of the file
+// doesn't need to know which mode is active.
+// ══════════════════════════════════════════════════════════════
+
+// Local id helper used only for this file's own per-call dedup Set
+// (cooledThisCall) — not the source of truth for cooldown state itself,
+// which now lives in providerCooldown.js.
+const cooldownId = (provider, keyIndex) => `${provider}-${keyIndex}`;
+
+const getEffectiveModels = async (providerId, tier = 'quality', baseURL, apiKey) => {
+  if (isRedisStateEnabled()) {
+    try {
+      const discovered = await discoverModelsRedisBacked(providerId, baseURL, apiKey);
+      const source = discovered || (await getModelsFromRedisCache(providerId));
+      if (source?.length > 0) {
+        if (tier === 'fast') {
+          const fastIds = FAST_MODEL_PRIORITY[providerId] || [];
+          const matched = source.filter(id => fastIds.includes(id));
+          if (matched.length > 0) return matched;
+        }
+        return source;
+      }
+    } catch (err) {
+      console.warn(`[MultiProvider] Redis-backed model discovery failed, falling back to static list for this call:`, err.message);
+      reportDegradedMode('multiprovider-redis-unavailable', { operation: 'getEffectiveModels', providerId, error: err.message });
+    }
+    // Redis enabled but no cached/discovered list available yet this
+    // cycle (cache miss + lost the lock race, or discovery itself
+    // failed) — fall through to the static list, same as the original
+    // pre-Redis "discovery hasn't finished yet" behavior.
+    return getModelPriorityForTier(providerId, tier) || PROVIDER_REGISTRY[providerId]?.models || [];
+  }
+
+  // Kill switch off — original in-memory path, including its own
+  // fire-and-forget discovery kickoff (triggered from getPools() below,
+  // unchanged from the original design).
+  return getEffectiveModelsInMemory(providerId, tier);
 };
 
 const getPools = () => {
@@ -259,8 +457,13 @@ const getPools = () => {
       total += _pools[id].length;
 
       const firstKey = _pools[id][0];
-      if (firstKey) {
-        _discoverProviderModels(id, PROVIDER_REGISTRY[id].baseURL, firstKey.key)
+      if (firstKey && !isRedisStateEnabled()) {
+        // Only kick off the old fire-and-forget in-memory discovery when
+        // the Redis path is disabled — the Redis-backed path performs
+        // discovery lazily, lock-guarded, at the point getEffectiveModels
+        // is actually called (see discoverModelsRedisBacked above), not
+        // eagerly at pool-construction time.
+        _discoverProviderModelsInMemory(id, PROVIDER_REGISTRY[id].baseURL, firstKey.key)
           .catch((err) => console.warn(`[MultiProvider] ${id} discovery kickoff failed: ${err.message}`));
       }
     }
@@ -268,7 +471,7 @@ const getPools = () => {
     if (total === 0) {
       console.error('[MultiProvider] CRITICAL: No API keys found for any provider!');
     } else {
-      console.log(`[MultiProvider] Ready — ${total} total key(s) across ${PROVIDER_ORDER.length} providers: Cerebras, Groq, Mistral, OpenRouter (model discovery warming up)`);
+      console.log(`[MultiProvider] Ready — ${total} total key(s) across ${PROVIDER_ORDER.length} providers: Cerebras, Groq, Mistral, OpenRouter (Redis-backed state: ${isRedisStateEnabled() ? 'enabled' : 'disabled'})`);
     }
   }
   return _pools;
@@ -297,8 +500,16 @@ const buildMessagesForProvider = (messages, images, isVisionCapable) => {
   return [...messages.slice(0, lastIdx), { ...last, content }];
 };
 
+// IMPL-H8-01: callProvider/streamProvider now accept `providerId` (threaded
+// through from the caller's queue entry) and throw ProviderCallError with
+// the real structured status/parsedBody/networkErrorCode instead of a
+// bare Error carrying only a formatted message string. Network-level
+// failures (fetch itself throwing, before any HTTP response exists) are
+// now distinguished from HTTP-level failures (a response came back with
+// !res.ok) — the original code did not make this distinction explicitly,
+// relying on whatever shape fetch's own thrown error happened to have.
 const callProvider = async ({
-  baseURL, apiKey, model, extraHeaders,
+  baseURL, apiKey, model, extraHeaders, providerId,
   messages, systemPrompt, temperature, maxTokens, images,
 }) => {
   const isVisionCapable = VISION_CAPABLE_MODELS.has(model);
@@ -314,19 +525,29 @@ const callProvider = async ({
     ],
   };
 
-  const res = await fetch(`${baseURL}/chat/completions`, {
-    method:  'POST',
-    headers: {
-      'Content-Type':  'application/json',
-      'Authorization': `Bearer ${apiKey}`,
-      ...extraHeaders,
-    },
-    body: JSON.stringify(body),
-  });
+  let res;
+  try {
+    res = await fetch(`${baseURL}/chat/completions`, {
+      method:  'POST',
+      headers: {
+        'Content-Type':  'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+        ...extraHeaders,
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (networkErr) {
+    throw new ProviderCallError(networkErr.message, {
+      providerId,
+      networkErrorCode: networkErr.cause?.code || null,
+    });
+  }
 
   if (!res.ok) {
     const errText = await res.text().catch(() => res.statusText);
-    throw new Error(`HTTP ${res.status}: ${errText}`);
+    let parsedBody = null;
+    try { parsedBody = JSON.parse(errText); } catch { /* not JSON — parsedBody stays null, classified conservatively */ }
+    throw new ProviderCallError(`HTTP ${res.status}: ${errText}`, { status: res.status, providerId, parsedBody });
   }
 
   const data    = await res.json();
@@ -336,7 +557,7 @@ const callProvider = async ({
 };
 
 const streamProvider = async ({
-  baseURL, apiKey, model, extraHeaders,
+  baseURL, apiKey, model, extraHeaders, providerId,
   messages, systemPrompt, temperature, maxTokens, images,
   onToken, onComplete,
 }) => {
@@ -360,19 +581,29 @@ const streamProvider = async ({
     ],
   };
 
-  const res = await fetch(`${baseURL}/chat/completions`, {
-    method:  'POST',
-    headers: {
-      'Content-Type':  'application/json',
-      'Authorization': `Bearer ${apiKey}`,
-      ...extraHeaders,
-    },
-    body: JSON.stringify(body),
-  });
+  let res;
+  try {
+    res = await fetch(`${baseURL}/chat/completions`, {
+      method:  'POST',
+      headers: {
+        'Content-Type':  'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+        ...extraHeaders,
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (networkErr) {
+    throw new ProviderCallError(networkErr.message, {
+      providerId,
+      networkErrorCode: networkErr.cause?.code || null,
+    });
+  }
 
   if (!res.ok) {
     const errText = await res.text().catch(() => res.statusText);
-    throw new Error(`HTTP ${res.status}: ${errText}`);
+    let parsedBody = null;
+    try { parsedBody = JSON.parse(errText); } catch { /* not JSON — parsedBody stays null */ }
+    throw new ProviderCallError(`HTTP ${res.status}: ${errText}`, { status: res.status, providerId, parsedBody });
   }
 
   const reader      = res.body.getReader();
@@ -424,18 +655,25 @@ const streamProvider = async ({
   });
 };
 
-const buildProviderQueue = (tier = 'quality') => {
+// IMPL-MULTIPROVIDER-01: buildProviderQueue is now async — it awaits the
+// (now-async) cooldown check per key and the (now-async) effective-models
+// lookup per provider, both of which may involve a Redis round trip.
+// Every caller below (callWithFallback, streamWithFallback) awaits this.
+const buildProviderQueue = async (tier = 'quality') => {
   const pools = getPools();
   const queue = [];
 
   for (const providerId of PROVIDER_ORDER) {
     const def     = PROVIDER_REGISTRY[providerId];
     const keyPool = pools[providerId];
-    const healthy = keyPool.filter(k => !isKeyCooling(k.provider, k.index));
+
+    const coolingFlags = await Promise.all(keyPool.map(k => isKeyCooling(k.provider, k.index)));
+    const healthy = keyPool.filter((_, i) => !coolingFlags[i]);
 
     if (healthy.length === 0) continue;
 
-    const models = getEffectiveModels(providerId, tier);
+    const firstHealthyKey = healthy[0];
+    const models = await getEffectiveModels(providerId, tier, def.baseURL, firstHealthyKey.key);
 
     for (const model of models) {
       for (const keyEntry of healthy) {
@@ -460,7 +698,7 @@ const buildProviderQueue = (tier = 'quality') => {
 const cleanModelUsed = (providerId, model) => `${providerId}:${model}`;
 
 export const callWithFallback = async ({ images, ...opts }) => {
-  const queue = buildProviderQueue(opts.tier || 'quality');
+  const queue = await buildProviderQueue(opts.tier || 'quality');
 
   if (queue.length === 0) {
     throw new Error('ALL_PROVIDERS_FAILED: No healthy keys available across Cerebras, Groq, Mistral, or OpenRouter');
@@ -472,12 +710,14 @@ export const callWithFallback = async ({ images, ...opts }) => {
   for (const provider of queue) {
     try {
       console.log(`[MultiProvider] Trying ${provider.debugName}...`);
+      recordUsageAttempt(provider.providerId, provider.keyEntry.index); // fire-and-forget, observe-only
 
       const result = await callProvider({
         baseURL:      provider.baseURL,
         apiKey:       provider.keyEntry.key,
         model:        provider.model,
         extraHeaders: provider.extraHeaders,
+        providerId:   provider.providerId,
         messages:     opts.messages,
         systemPrompt: opts.systemPrompt,
         temperature:  opts.temperature,
@@ -499,17 +739,50 @@ export const callWithFallback = async ({ images, ...opts }) => {
       lastError = err;
       console.warn(`[MultiProvider] ✗ ${provider.debugName} failed: ${err.message}`);
 
+      // IMPL-H8-01: structured classification replaces the old
+      // isRetryableError/shouldCoolKey string-matching — see
+      // utils/providerErrors.js for the full taxonomy and reasoning.
+      const category = classifyProviderError(err);
       const cid = cooldownId(provider.keyEntry.provider, provider.keyEntry.index);
-      if (shouldCoolKey(err) && !cooledThisCall.has(cid)) {
-        markKeyFailed(provider.keyEntry.provider, provider.keyEntry.index);
-        cooledThisCall.add(cid);
-      }
 
-      if (!isRetryableError(err)) throw err;
+      if (category === 'KEY_FAULT') {
+        if (!cooledThisCall.has(cid)) {
+          await markKeyFailed(provider.keyEntry.provider, provider.keyEntry.index);
+          cooledThisCall.add(cid);
+        }
+      } else if (category === 'PROVIDER_TRANSIENT') {
+        // Deliberately do NOT cool the key — this failure is provider-wide
+        // or network-related, not attributable to this specific key.
+        recordProviderTransient(provider.providerId);
+      } else if (category === 'BAD_MODEL') {
+        // Deliberately do NOT cool the key — the model reference is what's
+        // wrong, not the key. Evict it so other requests/instances stop
+        // hitting the same known-dead model.
+        evictModelFromRedisCache(provider.providerId, provider.model).catch(() => {});
+      } else {
+        // NON_RETRYABLE — likely a genuine application bug in how this
+        // request was constructed. Report to Sentry (see file header for
+        // why this must happen HERE, not left to bubble up) and abort the
+        // fallback chain immediately rather than wasting time retrying
+        // the same malformed payload against every remaining provider.
+        try {
+          Sentry.captureException(err, {
+            tags: { source: 'multiProvider', provider: provider.providerId, model: provider.model, category },
+          });
+        } catch { /* Sentry must never be able to break the call path */ }
+        throw err;
+      }
+      // KEY_FAULT / PROVIDER_TRANSIENT / BAD_MODEL all fall through to the
+      // next queue entry.
     }
   }
 
   console.error('[MultiProvider] All providers exhausted:', lastError?.message);
+  try {
+    Sentry.captureException(lastError || new Error('ALL_PROVIDERS_FAILED'), {
+      tags: { source: 'multiProvider', reason: 'all_providers_failed' },
+    });
+  } catch { /* Sentry must never be able to break the call path */ }
   throw new Error(`ALL_PROVIDERS_FAILED: ${lastError?.message}`);
 };
 
@@ -534,7 +807,7 @@ export const streamWithFallback = async ({
   messages, systemPrompt, temperature, maxTokens,
   onToken, onComplete, onError, images = undefined,
 }) => {
-  const queue = buildProviderQueue();
+  const queue = await buildProviderQueue();
 
   if (queue.length === 0) {
     onError?.(new Error('ALL_PROVIDERS_FAILED: No healthy keys available across Cerebras, Groq, Mistral, or OpenRouter'));
@@ -546,12 +819,14 @@ export const streamWithFallback = async ({
   for (const provider of queue) {
     try {
       console.log(`[MultiProvider] Streaming via ${provider.debugName}`);
+      recordUsageAttempt(provider.providerId, provider.keyEntry.index); // fire-and-forget, observe-only
 
       await streamProvider({
         baseURL:      provider.baseURL,
         apiKey:       provider.keyEntry.key,
         model:        provider.model,
         extraHeaders: provider.extraHeaders,
+        providerId:   provider.providerId,
         messages,
         systemPrompt,
         temperature,
@@ -570,20 +845,44 @@ export const streamWithFallback = async ({
     } catch (err) {
       console.warn(`[MultiProvider] Stream failed for ${provider.debugName}: ${err.message}`);
 
+      const category = classifyProviderError(err);
       const cid = cooldownId(provider.keyEntry.provider, provider.keyEntry.index);
-      if (shouldCoolKey(err) && !cooledThisCall.has(cid)) {
-        markKeyFailed(provider.keyEntry.provider, provider.keyEntry.index);
-        cooledThisCall.add(cid);
-      }
 
-      if (!isRetryableError(err)) { onError?.(err); return; }
+      if (category === 'KEY_FAULT') {
+        if (!cooledThisCall.has(cid)) {
+          await markKeyFailed(provider.keyEntry.provider, provider.keyEntry.index);
+          cooledThisCall.add(cid);
+        }
+      } else if (category === 'PROVIDER_TRANSIENT') {
+        recordProviderTransient(provider.providerId);
+      } else if (category === 'BAD_MODEL') {
+        evictModelFromRedisCache(provider.providerId, provider.model).catch(() => {});
+      } else {
+        try {
+          Sentry.captureException(err, {
+            tags: { source: 'multiProvider-stream', provider: provider.providerId, model: provider.model, category },
+          });
+        } catch { /* Sentry must never be able to break the call path */ }
+        onError?.(err);
+        return;
+      }
     }
   }
 
-  onError?.(new Error('ALL_PROVIDERS_FAILED: All providers and keys exhausted'));
+  const finalErr = new Error('ALL_PROVIDERS_FAILED: All providers and keys exhausted');
+  try {
+    Sentry.captureException(finalErr, { tags: { source: 'multiProvider-stream', reason: 'all_providers_failed' } });
+  } catch { /* Sentry must never be able to break the call path */ }
+  onError?.(finalErr);
 };
 
-export const getProviderStatus = () => {
+// IMPL-MULTIPROVIDER-01: reads from Redis (or the in-memory fallback,
+// depending on the kill switch) instead of only ever reflecting this
+// one process's local view. Return shape is unchanged — this is a
+// data-source change, not a contract change. Not currently exposed via
+// any HTTP route in this codebase, so there is no external
+// backward-compatibility concern.
+export const getProviderStatus = async () => {
   const pools  = getPools();
   const status = [];
 
@@ -592,21 +891,34 @@ export const getProviderStatus = () => {
     const keyPool = pools[providerId];
 
     for (const k of keyPool) {
-      const id      = cooldownId(k.provider, k.index);
-      const cd      = keyCooldowns.get(id);
-      const cooling = isKeyCooling(k.provider, k.index);
+      let cooling = false;
+      let failCount = 0;
+      let failedAt = null;
+
+      if (isRedisStateEnabled()) {
+        try {
+          const state = await getCooldownState(k.provider, k.index);
+          cooling   = !!state;
+          failCount = state ? parseInt(state.failCount || '0', 10) : 0;
+          failedAt  = state?.failedAt ? new Date(parseInt(state.failedAt, 10)).toISOString() : null;
+        } catch {
+          cooling = isKeyCoolingInMemorySync(k.provider, k.index);
+        }
+      } else {
+        cooling = isKeyCoolingInMemorySync(k.provider, k.index);
+        const cd = getInMemoryCooldownState(k.provider, k.index);
+        failCount = cd?.failCount || 0;
+        failedAt  = cd?.failedAt ? new Date(cd.failedAt).toISOString() : null;
+      }
 
       status.push({
-        provider:         providerId,
-        models_static:    def.models,
-        models_effective: getEffectiveModels(providerId),
-        model_discovery:  _discoveryDone[providerId] ? 'complete' : 'pending',
-        key_index:        k.index,
-        status:           cooling ? 'cooling' : 'healthy',
-        fail_count:       cd?.failCount || 0,
-        cooling_until:    cooling
-          ? new Date(cd.failedAt + KEY_COOLDOWN_MS).toISOString()
-          : null,
+        provider:      providerId,
+        models_static: def.models,
+        key_index:     k.index,
+        status:        cooling ? 'cooling' : 'healthy',
+        fail_count:    failCount,
+        cooling_since: failedAt,
+        state_source:  isRedisStateEnabled() ? 'redis' : 'in-memory',
       });
     }
   }

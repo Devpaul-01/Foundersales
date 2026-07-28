@@ -22,12 +22,31 @@
 // MULTI-KEY SUPPORT (added):
 //   EXA_API_KEY_1 … EXA_API_KEY_5      (checked in order)
 //   EXA_API_KEY                        (single-key fallback, no suffix)
-// This is intentionally a lighter version of multiProvider.js's key
-// rotation — one provider (Exa), no model discovery, no streaming.
-// A key that fails with a rate-limit/auth/server error is cooled down
-// in-memory for an hour and skipped; the next key in the pool is tried.
-// This is NOT a provider fallback (the Groq fallback below is unchanged) —
-// it's just resilience across multiple Exa accounts/keys.
+//
+// IMPL-EXA-01 (Phase 2 refactor): this file previously implemented its
+// own, separate, structurally-identical-but-independent key-cooldown
+// mechanism (its own local `keyCooldowns` Map, `markKeyFailed`,
+// `isKeyCooling` — an in-memory-only "lighter version of
+// multiProvider.js's key rotation," per the original header comment).
+// That duplication meant Exa had exactly the same cross-instance
+// correctness gap multiProvider.js had before this refactor (an
+// instance that saw an Exa key fail had no way to tell any other
+// instance), and meant any future improvement to the cooldown mechanism
+// itself had to be made twice, in two different files, with real risk
+// of the two implementations drifting apart over time.
+//
+// This file now imports its cooldown logic from
+// services/providerCooldown.js — the exact same module multiProvider.js
+// uses, sharing the same Redis-backed (with in-memory fallback) design,
+// the same `mp:cooldown:{provider}:{index}` key namespace (with
+// provider = 'exa'), and the same MULTIPROVIDER_REDIS_STATE_ENABLED kill
+// switch. This is NOT a provider fallback the way multiProvider.js's
+// 4-provider chain is (Exa has no equivalent "try a different search
+// engine" fallback — Groq is still the fallback for when Exa is
+// unavailable at all, unchanged from before) — it's specifically
+// resilience across multiple Exa accounts/keys, exactly as before, just
+// now correctly coordinated across instances and no longer a parallel,
+// independently-maintained implementation of the same idea.
 // ============================================================
 
 import Exa from 'exa-js';
@@ -38,12 +57,23 @@ import {
 } from '../config/constants.js';
 import { callWithFallbackGroq } from './multiProvider.js';
 import { checkWorkspaceExaUsage, recordExaUsage } from './tokenTracker.js';
+import { markKeyFailed, isKeyCooling } from './providerCooldown.js';
 
 // ──────────────────────────────────────────────────────────────
 // EXA KEY POOL
+//
+// IMPL-EXA-01: pool construction itself remains local/per-process,
+// unchanged, and deliberately so — identical to multiProvider.js's own
+// pool-construction reasoning (see that file's header comment): this is
+// configuration read from process.env at startup, not runtime state.
+// Every instance in a correctly-configured deployment builds an
+// identical pool independently; only the COOLDOWN state (which keys are
+// currently known-bad) needs to be shared, which is exactly what moving
+// to providerCooldown.js accomplishes.
 // ──────────────────────────────────────────────────────────────
 const EXA_ENV_PREFIX = 'EXA_API_KEY';
 const EXA_MAX_KEYS   = 5;
+const EXA_PROVIDER_ID = 'exa'; // shares the `mp:cooldown:exa:{index}` Redis namespace with multiProvider.js's providers
 
 const buildExaKeyPool = () => {
   const keys = [];
@@ -78,50 +108,53 @@ const getClientForKey = (keyEntry) => {
 };
 
 // ──────────────────────────────────────────────────────────────
-// KEY COOLDOWN (in-memory) — mirrors multiProvider.js's approach,
-// scoped to just Exa keys.
+// KEY COOLDOWN — now delegates to services/providerCooldown.js.
+// See that module for the Redis-backed / in-memory-fallback design and
+// the MULTIPROVIDER_REDIS_STATE_ENABLED kill switch. isKeyCooling is now
+// async (a Redis round trip in the default configuration) — getHealthyKeys
+// below awaits it accordingly.
 // ──────────────────────────────────────────────────────────────
-const KEY_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
-const keyCooldowns    = new Map();
-
-const markKeyFailed = (keyIndex) => {
-  const existing = keyCooldowns.get(keyIndex) || { failCount: 0 };
-  keyCooldowns.set(keyIndex, { failedAt: Date.now(), failCount: existing.failCount + 1 });
-  console.warn(`[Exa] key #${keyIndex} cooling down (fail #${existing.failCount + 1}) — retrying in 1h`);
-};
-
-const isKeyCooling = (keyIndex) => {
-  const cd = keyCooldowns.get(keyIndex);
-  if (!cd) return false;
-  if (Date.now() - cd.failedAt >= KEY_COOLDOWN_MS) {
-    keyCooldowns.delete(keyIndex);
-    console.log(`[Exa] key #${keyIndex} cooldown expired — back in rotation`);
-    return false;
-  }
-  return true;
-};
-
 const RATE_LIMIT_SIGNALS = ['rate_limit', 'rate limit', '429', 'too many requests', 'quota exceeded'];
 const AUTH_ERROR_SIGNALS = ['401', 'unauthorized', 'invalid api key', 'invalid_api_key', 'authentication'];
 const UNAVAIL_SIGNALS    = ['503', '502', '500', 'unavailable', 'overloaded', 'server error'];
 
 const matchesAny = (msg, signals) => signals.some(s => msg.includes(s));
 
+// IMPL-EXA-01: kept as message-substring matching (NOT migrated to the
+// structured ProviderCallError/classifyProviderError taxonomy from
+// utils/providerErrors.js) because Exa's SDK (exa-js) throws its own
+// error shapes that don't carry a raw HTTP status the way this file's
+// hand-rolled fetch calls in multiProvider.js do — building a
+// structured classifier here would require either wrapping every exa-js
+// call in status-code extraction logic with no guarantee the SDK
+// consistently exposes one, or maintaining a second, Exa-specific
+// structured error type for uncertain benefit. This is flagged
+// explicitly as a scope boundary: full retry-classification parity
+// (H8's structured taxonomy) was requested for multiProvider.js
+// specifically; Exa's simpler shouldCoolKey heuristic is retained
+// as-is, consistent with how it worked before this refactor, while the
+// COORDINATION layer (where the actual cross-instance bug lived) is now
+// fully shared. If Exa's SDK error shapes are confirmed to reliably
+// expose a status code, this is a natural, isolated follow-up.
 const shouldCoolKey = (err) => {
   const msg = (err?.message || '').toLowerCase();
   return matchesAny(msg, RATE_LIMIT_SIGNALS) || matchesAny(msg, AUTH_ERROR_SIGNALS) || matchesAny(msg, UNAVAIL_SIGNALS);
 };
 
-const getHealthyKeys = () => EXA_KEY_POOL.filter(k => !isKeyCooling(k.index));
+const getHealthyKeys = async () => {
+  const coolingFlags = await Promise.all(EXA_KEY_POOL.map(k => isKeyCooling(EXA_PROVIDER_ID, k.index)));
+  return EXA_KEY_POOL.filter((_, i) => !coolingFlags[i]);
+};
 
 // ──────────────────────────────────────────────────────────────
 // runWithExaKeys — tries `fn(client)` against each healthy key in turn,
-// cooling down any key that fails with a rate-limit/auth/server error,
-// and moving on to the next key. Throws EXA_UNAVAILABLE if no keys are
-// configured/healthy, or the last error if every key was tried and failed.
+// cooling down (via the shared providerCooldown module) any key that
+// fails with a rate-limit/auth/server error, and moving on to the next
+// key. Throws EXA_UNAVAILABLE if no keys are configured/healthy, or the
+// last error if every key was tried and failed.
 // ──────────────────────────────────────────────────────────────
 const runWithExaKeys = async (fn) => {
-  const healthy = getHealthyKeys();
+  const healthy = await getHealthyKeys();
   if (healthy.length === 0) {
     throw new Error('EXA_UNAVAILABLE: no Exa API keys configured or all keys cooling down');
   }
@@ -134,7 +167,7 @@ const runWithExaKeys = async (fn) => {
     } catch (err) {
       lastError = err;
       console.warn(`[Exa] key #${keyEntry.index} failed: ${err.message}`);
-      if (shouldCoolKey(err)) markKeyFailed(keyEntry.index);
+      if (shouldCoolKey(err)) await markKeyFailed(EXA_PROVIDER_ID, keyEntry.index);
       // try the next key regardless of error type — a bad key shouldn't
       // block the whole search when another key is available
     }

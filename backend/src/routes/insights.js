@@ -8,6 +8,11 @@ import { callWithFallbackGroq } from '../services/multiProvider.js';
 
 import { getCache, setCache } from '../services/redis.js';
 import { parseAIJson }       from '../utils/parseAIJson.js';
+import { INTELLIGENCE_TTL_S } from '../config/constants.js';
+import {
+  gatherIntelligenceContext, deriveIntelligenceMetrics,
+  buildIntelligencePrompt, generateRuleBasedInsights,
+} from '../services/intelligenceReport.js';
 
 const router = Router();
 const { log, logError, logDB } = createLogger('Insights');
@@ -442,6 +447,14 @@ Return ONLY this JSON:
 
 
 // GET /api/insights/intelligence
+// IMPL-M11-01 (Phase 2 refactor): this handler previously did all data
+// gathering, derived-metric computation, and prompt-building inline —
+// now delegated to services/intelligenceReport.js. See that file's
+// header comment for the two real bugs discovered and fixed during this
+// extraction (an undefined INTELLIGENCE_TTL_S reference, and a call to
+// generateRuleBasedInsights that had no implementation anywhere in the
+// codebase — together, these meant this endpoint returned an uncaught
+// 500 on every request, regardless of whether the AI call succeeded).
 router.get('/intelligence', asyncHandler(async (req, res) => {
   const userId = req.user.id, workspaceId = req.workspace.id;
   const cacheKey = `metrics:intelligence:${userId}:${workspaceId}`;
@@ -451,206 +464,36 @@ router.get('/intelligence', asyncHandler(async (req, res) => {
 
   const userCtx = buildUserContext(req);
 
-  // Fetch ALL relevant data in parallel.
-  //
-  // Fix: destructure `data` directly off each Supabase response (same
-  // pattern as /dashboard) instead of carrying the full {data, error}
-  // wrapper around. The previous version kept the wrapper and then read
-  // `profile?.data?.[0]` / `pipeline?.data?.[0]` further down — but those two
-  // queries use .maybeSingle(), which resolves to a single object (or null),
-  // not an array. `[0]` on a plain object is always undefined, so every
-  // performance/pipeline stat fed into the AI prompt (and into the
-  // rule-based fallback below) was silently 0/undefined.
-  const [
-    { data: profile },
-    { data: pipeline },
-    { data: goals },
-    { data: checkIns },
-    { data: signals },
-    { data: patterns },
-    { data: objections },
-    { data: commitments },
-    { data: practice },
-    { data: skillTrends },
-    { data: recentOpps },
-    { data: unreadTips },
-  ] = await Promise.all([
-    supabaseAdmin.from('user_performance_profiles')
-      .select('*').eq('workspace_id', workspaceId).eq('user_id', userId).maybeSingle(),
-
-    supabaseAdmin.from('pipeline_metrics')
-      .select('*').eq('workspace_id', workspaceId).eq('user_id', userId).maybeSingle(),
-
-    supabaseAdmin.from('user_goals')
-      .select('*').eq('workspace_id', workspaceId).eq('user_id', userId).eq('status', 'active').limit(3),
-
-    supabaseAdmin.from('daily_check_ins')
-      .select('mood_score, answers').eq('user_id', userId).eq('workspace_id', workspaceId)
-      .order('date', { ascending: false }).limit(5),
-
-    supabaseAdmin.from('conversation_signals')
-      .select('signal_type, signal_text, confidence').eq('workspace_id', workspaceId)
-      .eq('user_id', userId).eq('is_active', true)
-      .order('detected_at', { ascending: false }).limit(10),
-
-    supabaseAdmin.from('communication_patterns')
-      .select('pattern_type, pattern_label, confidence_score, affected_outcome')
-      .eq('workspace_id', workspaceId).eq('user_id', userId).eq('is_active', true)
-      .order('confidence_score', { ascending: false }).limit(5),
-
-    supabaseAdmin.from('objection_tracker')
-      .select('objection_type, objection_phrase, occurrence_count, best_response')
-      .eq('workspace_id', workspaceId).eq('user_id', userId)
-      .order('occurrence_count', { ascending: false }).limit(5),
-
-    supabaseAdmin.from('conversation_commitments')
-      .select('commitment_text, owner, due_date, status')
-      .eq('workspace_id', workspaceId).eq('user_id', userId)
-      .in('status', ['pending', 'overdue'])
-      .order('due_date', { ascending: true }).limit(5),
-
-    supabaseAdmin.from('practice_sessions')
-      .select('scenario_type, skill_scores, outcome, difficulty_level')
-      .eq('workspace_id', workspaceId).eq('user_id', userId).eq('completed', true)
-      .order('created_at', { ascending: false }).limit(10),
-
-    supabaseAdmin.from('skill_progression')
-      .select('composite_score_avg, composite_delta, top_weakness, top_strength')
-      .eq('workspace_id', workspaceId).eq('user_id', userId)
-      .order('week_start', { ascending: false }).limit(4),
-
-    supabaseAdmin.from('opportunities')
-      .select('stage, status, marked_sent_at, feedback_prompted_at')
-      .eq('workspace_id', workspaceId).eq('user_id', userId)
-      .in('stage', ['contacted', 'replied', 'call_demo'])
-      .order('created_at', { ascending: false }).limit(10),
-
-    supabaseAdmin.from('growth_cards')
-      .select('card_type, is_read, is_dismissed, priority, created_at')
-      .eq('workspace_id', workspaceId).eq('user_id', userId)
-      .eq('is_read', false).eq('is_dismissed', false)
-      .order('priority', { ascending: false }).limit(5),
-  ]);
-
-  // Build rich context
-  const positiveRatePct   = Math.round((profile?.positive_rate || 0) * 100);
-  const recentCheckInMood = checkIns?.length
-    ? Math.round(checkIns.reduce((s, c) => s + (c.mood_score || 5), 0) / checkIns.length)
-    : null;
-
-  // Analyze stalled deals
-  const stalledDeals = recentOpps?.filter(o =>
-    o.marked_sent_at && !o.feedback_prompted_at &&
-    new Date(o.marked_sent_at) < new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
-  ) || [];
-
-  // Analyze skill trends
-  const skillTrend  = skillTrends?.[0];
-  const isImproving = skillTrend?.composite_delta > 0;
-
-  // Analyze practice weaknesses
-  const weakSkills = practice
-    ?.filter(p => p.skill_scores)
-    .flatMap(p => Object.entries(p.skill_scores || {})
-      .filter(([_, score]) => score < 60)
-      .map(([skill]) => skill)
-    ) || [];
-
-  const topWeakness = [...new Set(weakSkills)].slice(0, 3);
-
-  // Build enhanced prompt
-  const prompt = [
-    'Generate 3-5 specific, actionable intelligence insights for this seller based on ALL their data.',
-    '',
-    `Product: ${userCtx.product_description || 'not specified'}`,
-    `Target audience: ${userCtx.target_audience || 'not specified'}`,
-    `Archetype: ${userCtx.archetype || 'not specified'}`,
-    '',
-    '== Performance Profile ==',
-    `Positive reply rate: ${positiveRatePct}%`,
-    `Total sent: ${profile?.total_sent || 0}`,
-    `Positive: ${profile?.total_positive || 0}`,
-    `Negative: ${profile?.total_negative || 0}`,
-    `Best platform: ${profile?.best_platform || 'unknown'}`,
-    `Best message style: ${profile?.best_message_style || 'unknown'}`,
-    `Best message length: ${profile?.best_message_length || 'unknown'}`,
-    profile?.learned_patterns ? `Learned patterns: ${profile.learned_patterns}` : '',
-    '',
-    '== Pipeline Metrics ==',
-    `Contacted: ${pipeline?.contacted_count || 0}`,
-    `Replied: ${pipeline?.replied_count || 0}`,
-    `Call/Demo: ${pipeline?.call_demo_count || 0}`,
-    `Won: ${pipeline?.closed_won_count || 0}`,
-    `Pipeline value: $${pipeline?.pipeline_value || 0}`,
-    `Win rate: ${pipeline?.win_rate_pct || 0}%`,
-    '',
-    '== Active Goals ==',
-    (goals || []).map(g => `- ${g.goal_text} (${g.current_value || 0}/${g.target_value || 100})`).join('\n') || 'No active goals',
-    '',
-    '== Conversation Signals Detected ==',
-    (signals || []).map(s => `- ${s.signal_type}: ${s.signal_text} (${Math.round(s.confidence * 100)}% confidence)`).join('\n') || 'No signals detected',
-    '',
-    '== Communication Patterns ==',
-    (patterns || []).map(p =>
-      `- ${p.pattern_label}: ${p.affected_outcome} outcome (${Math.round(p.confidence_score * 100)}% confidence)`
-    ).join('\n') || 'No patterns detected',
-    '',
-    '== Top Objections ==',
-    (objections || []).map(o =>
-      `- "${o.objection_phrase}" (${o.occurrence_count} times)${o.best_response ? ` → Best response: ${o.best_response}` : ''}`
-    ).join('\n') || 'No objections tracked',
-    '',
-    '== Pending Commitments ==',
-    (commitments || []).map(c =>
-      `- ${c.commitment_text} (Due: ${c.due_date || 'No date'}, Status: ${c.status})`
-    ).join('\n') || 'No pending commitments',
-    '',
-    `== Practice Summary ==`,
-    `Total completed: ${practice?.length || 0}`,
-    practice?.length ? `Weakest skills: ${topWeakness.join(', ') || 'None identified'}` : '',
-    skillTrend ? `Skill trend: ${isImproving ? '✅ Improving' : '⚠️ Declining'} (${skillTrend.composite_delta > 0 ? '+' : ''}${(skillTrend.composite_delta || 0).toFixed(2)})` : '',
-    skillTrend?.top_weakness ? `Top weakness: ${skillTrend.top_weakness}` : '',
-    skillTrend?.top_strength ? `Top strength: ${skillTrend.top_strength}` : '',
-    '',
-    `== Opportunity Health ==`,
-    `Stalled deals (no feedback >7 days): ${stalledDeals.length}`,
-    recentOpps?.length ? `Recent activity: ${recentOpps.length} active opportunities` : 'No recent activity',
-    '',
-    `== Coaching Engagement ==`,
-    `Unread growth tips: ${unreadTips?.length || 0}`,
-    // Fix: mood_score is on a 1–5 scale per schema, was previously labeled "/10".
-    recentCheckInMood != null ? `Recent mood average: ${recentCheckInMood}/5` : '',
-    '',
-    'Generate insights that are SPECIFIC, ACTIONABLE, and DATA-DRIVEN. Focus on:',
-    '1. What patterns are helping or hurting the seller',
-    '2. Which objections need better responses',
-    '3. Skill gaps revealed by practice',
-    '4. Pipeline risks (stalled deals, weak win rate)',
-    '5. Behavioral adjustments for better outcomes',
-    '',
-    'Return ONLY a JSON array (no markdown):',
-    '[{"type":"pattern|opportunity|warning|coaching","icon":"emoji","title":"short, punchy title","body":"2-3 sentences with specific data","action":"one specific action or null"}]'
-  ].filter(Boolean).join('\n');
+  const context = await gatherIntelligenceContext(userId, workspaceId);
+  const metrics = deriveIntelligenceMetrics(context);
+  const prompt  = buildIntelligencePrompt(userCtx, context, metrics);
 
   try {
     const { content } = await callWithFallbackGroq({
       systemPrompt: 'You are a sales intelligence expert. Generate insights based on data. Return only valid JSON arrays.',
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.5, maxTokens: 1200,
-    tier: 'fast', workspaceId, userId, sourceJob: 'intelligence'
-
+      tier: 'fast', workspaceId, userId, sourceJob: 'intelligence',
     });
-    
 
     const insights = parseAIJson(content);
+    // IMPL-M11-01: INTELLIGENCE_TTL_S is now a real, imported constant
+    // (config/constants.js) — this line previously threw a
+    // ReferenceError on every successful AI generation, which the
+    // surrounding catch block silently mistook for an AI-call failure.
     await setCache(cacheKey, insights, INTELLIGENCE_TTL_S).catch(() => {});
     res.json({ insights, cached: false });
   } catch (err) {
     logError('intelligence', err, { userId, workspaceId });
+    // IMPL-M11-01: generateRuleBasedInsights is now a real, imported,
+    // working implementation (services/intelligenceReport.js) — this
+    // previously called a function that didn't exist anywhere in the
+    // codebase, throwing an uncaught ReferenceError inside this very
+    // catch block with no enclosing try/catch to absorb it.
     res.json({
-      insights: generateRuleBasedInsights(profile, pipeline, goals || [], objections, patterns, stalledDeals),
+      insights: generateRuleBasedInsights(context, metrics),
       cached: false,
-      fallback: true
+      fallback: true,
     });
   }
 }));

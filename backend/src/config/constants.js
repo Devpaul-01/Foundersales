@@ -176,3 +176,15 @@ export const CHAT_MAX_TOKENS = 1000;
 // Pagination page sizes (audit §4.1 / task instructions #5, #6).
 export const CHAT_MESSAGES_PAGE_SIZE = 50;
 export const CHAT_LIST_PAGE_SIZE = 30;
+
+// IMPL-M11-01 (Phase 2 refactor): canonical, shared cache TTL for
+// insights.js's GET /intelligence. Previously referenced as
+// INTELLIGENCE_TTL_S directly inside insights.js without ever being
+// defined or imported there (metrics.js had its own separate local copy
+// of this same value) — that undefined reference threw a ReferenceError
+// on every single successful AI-generation, which was then (incorrectly)
+// caught by the surrounding try/catch and treated as an AI-call failure.
+// See routes/insights.js and services/intelligenceReport.js for the full
+// fix. metrics.js should be migrated to import this constant too rather
+// than keeping its own separate local copy, as a follow-up.
+export const INTELLIGENCE_TTL_S = 4 * 60 * 60;

@@ -56,31 +56,18 @@ const app  = express();
 const PORT = 3001;
 
 // IMPL-RATELIMIT-01 (Phase 2 refactor / C2 + horizontal-scaling
-// instruction): every limiter below now uses a Redis-backed store
-// (config/rateLimitStore.js) instead of express-rate-limit's default
-// in-memory store, so limits are enforced correctly across every
+// instruction): every limiter below now uses the shared Redis-backed
+// store (config/rateLimitStore.js) instead of express-rate-limit's
+// default in-memory store, so limits are enforced correctly across every
 // instance in a horizontally-scaled deployment rather than each instance
 // independently allowing up to `max` requests (meaning the effective
 // limit a user experienced was previously closer to
 // (configured limit) × (instance count), not the configured limit
-// itself).
-//
-// IMPL-RATELIMIT-02: each limiter now gets its OWN namespaced store
-// instead of all three sharing one. A single RedisStore keys purely off
-// `prefix + keyGenerator(req)` with no notion of which limiter it
-// belongs to — and aiRateLimiter/pipelineRateLimiter both key on
-// `req.user?.id || req.ip`. Sharing one store meant a user hitting an AI
-// route and a pipeline route back-to-back was incrementing the exact
-// same Redis counter, silently merging two limits that were supposed to
-// be independent. Namespacing fixes that while still reusing a single
-// underlying Redis connection under the hood (see rateLimitStore.js).
-// Each is `undefined` if Redis was unreachable at startup —
-// express-rate-limit falls back to its own in-memory store in that case,
-// degraded but functional (see rateLimitStore.js for the fail-open
-// reasoning).
-const authRateLimitStore     = await createRateLimitStore('auth');
-const aiRateLimitStore       = await createRateLimitStore('ai');
-const pipelineRateLimitStore = await createRateLimitStore('pipeline');
+// itself). sharedStore is `undefined` if Redis was unreachable at
+// startup — express-rate-limit falls back to its own in-memory store in
+// that case, degraded but functional (see rateLimitStore.js for the
+// fail-open reasoning).
+const sharedStore = await createRateLimitStore();
 
 // IMPL-RATELIMIT-01: this limiter was already defined here previously,
 // but was NEVER ACTUALLY MOUNTED on the /api/auth router — discovered
@@ -94,21 +81,38 @@ const authRateLimiter = rateLimit({
   keyGenerator: (req) => req.ip,
   message: { error: 'RATE_LIMIT_EXCEEDED', message: 'Too many attempts. Try again in 15 minutes.' },
   skip: (req) => req.path === '/refresh',
-  store: authRateLimitStore,
+  store: sharedStore,
 });
 
 const aiRateLimiter = rateLimit({
   windowMs: 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false,
   keyGenerator: (req) => req.user?.id || req.ip,
   message: { error: 'RATE_LIMIT_EXCEEDED', message: 'Too many AI requests. Please slow down.' },
-  store: aiRateLimitStore,
+  store: sharedStore,
 });
 
 const pipelineRateLimiter = rateLimit({
   windowMs: 60 * 1000, max: 120, standardHeaders: true, legacyHeaders: false,
   keyGenerator: (req) => req.user?.id || req.ip,
   message: { error: 'RATE_LIMIT_EXCEEDED', message: 'Too many pipeline requests.' },
-  store: pipelineRateLimitStore,
+  store: sharedStore,
+});
+
+// IMPL-RATELIMIT-01 (new): metrics.js has no AI calls (DB-load-driven,
+// not AI-cost-driven), so it doesn't belong under aiRateLimiter — but it
+// was entirely unprotected despite containing several heavy manager+/
+// owner+ workspace-wide multi-query aggregation endpoints (leaderboard,
+// team-overview, workspace/dashboard). 60/min/user is deliberately more
+// generous than aiRateLimiter's 30/min (these calls are cheaper
+// individually than an LLM call) but still a real bound — sized between
+// aiRateLimiter and pipelineRateLimiter's 120/min, reflecting that this
+// router mixes cheap single-table queries with genuinely heavy
+// aggregations.
+const analyticsRateLimiter = rateLimit({
+  windowMs: 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false,
+  keyGenerator: (req) => req.user?.id || req.ip,
+  message: { error: 'RATE_LIMIT_EXCEEDED', message: 'Too many analytics requests. Please slow down.' },
+  store: sharedStore,
 });
 
 
@@ -213,12 +217,25 @@ app.use('/api/chat',          ...ws, aiRateLimiter, chatRoutes);
 // synchronously on every request; without throttling a single user can saturate quota.
 app.use('/api/practice',    ...ws, aiRateLimiter, practiceRoutes);
 
-app.use('/api/metrics',     ...ws, metricsRoutes);
 app.use('/api/pipeline',    ...ws, pipelineRateLimiter, pipelineRoutes);
 app.use('/api/followup',    ...ws, followupRoutes);
 app.use('/api/prospects',   ...ws, prospectsRoutes);
 app.use('/api/commitments', ...ws, commitmentsRoutes);
-app.use('/api/insights',    ...ws, insightsRoutes);
+// IMPL-RATELIMIT-01 (Phase 2 refactor): aiRateLimiter added — discovered
+// during this refactor's endpoint-by-endpoint rate-limit review that
+// insights.js has SIX distinct callWithFallbackGroq call sites
+// (/why-losing, /workspace/why-losing, /practice/coaching-report,
+// /intelligence, /win-story, /workspace/executive-report) and was, until
+// now, the only AI-calling router in the entire codebase mounted with
+// literally zero rate limiting of any kind.
+app.use('/api/insights',    ...ws, aiRateLimiter, insightsRoutes);
+// IMPL-RATELIMIT-01 (new): metrics.js is not AI-cost-driven (no LLM
+// calls anywhere in the file) but has 20+ endpoints including several
+// heavy manager+/owner+ workspace-wide multi-query aggregations
+// (leaderboard, team-overview, workspace/dashboard) — exactly the
+// "expensive analytics" category called out explicitly for this review.
+// See analyticsRateLimiter's definition above.
+app.use('/api/metrics',     ...ws, analyticsRateLimiter, metricsRoutes);
 
 // Bug G: coachRoutes was imported but never registered — mount point was missing entirely.
 

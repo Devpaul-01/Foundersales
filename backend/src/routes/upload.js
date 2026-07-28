@@ -6,12 +6,34 @@
 
 import { Router } from 'express';
 import multer from 'multer';
+import rateLimit from 'express-rate-limit';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { uploadFile, deleteFile } from '../services/storage.js';
 import { UPLOAD_LIMITS } from '../config/constants.js';
 import supabaseAdmin from '../config/supabase.js';
+import { createRateLimitStore } from '../config/rateLimitStore.js';
 
 const router = Router();
+
+// IMPL-RATELIMIT-01 (Phase 2 refactor): file uploads previously had ZERO
+// rate limiting of any kind — discovered during this refactor's
+// endpoint-by-endpoint rate-limit review. Upload has real resource cost
+// (multipart parsing, Supabase Storage write, bandwidth) independent of
+// AI cost, and is a classic under-protected surface. Applied to POST /
+// ONLY (see below) — GET / (list files) and DELETE /:id are cheap
+// DB-only operations that shouldn't share this budget; a user paging
+// through a file picker shouldn't be throttled by the same limit that
+// bounds actual upload volume. Redis-backed (config/rateLimitStore.js)
+// so this is enforced correctly across every instance in a
+// horizontally-scaled deployment. 20 uploads / 15 min / user is
+// deliberately generous for legitimate use (attaching a few files to a
+// conversation) while still bounding scripted abuse.
+const uploadPostRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false,
+  keyGenerator: (req) => req.user?.id || req.ip,
+  message: { error: 'RATE_LIMIT_EXCEEDED', message: 'Too many uploads. Please wait a few minutes.' },
+  store: await createRateLimitStore(),
+});
 
 // Use memory storage - we stream to Supabase Storage directly
 const upload = multer({
@@ -27,7 +49,9 @@ const upload = multer({
 });
 
 // POST /api/upload - Upload a file
-router.post('/', upload.single('file'), asyncHandler(async (req, res) => {
+// IMPL-RATELIMIT-01: uploadPostRateLimiter applied here only — see its
+// definition above.
+router.post('/', uploadPostRateLimiter, upload.single('file'), asyncHandler(async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'No file provided' });
   }

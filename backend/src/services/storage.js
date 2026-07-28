@@ -1,12 +1,14 @@
-// src/services/storage.js
-// ============================================================
-// FILE UPLOAD SERVICE
-// Uses Cloudinary as primary storage provider.
-// Returns public URL + metadata for AI access.
+// src/services/storage.js — IMPLEMENTATION PASS
 //
-// NOTE: DB metadata (file_uploads table) is still read/written via
-// supabaseAdmin — only the file STORAGE backend has moved to Cloudinary.
-// If you also want the metadata table off Supabase, that's a separate swap.
+// CHANGE: getFileType/getResourceType now recognize audio mime types
+// (previously only image/pdf/document/other were classified, so an audio
+// upload would have fallen into 'other' -> 'raw' resource type, which
+// works but doesn't get Cloudinary's audio/video-specific handling like
+// duration extraction). Everything else in this file is unchanged —
+// uploadFile/deleteFile/buildAttachmentContext are reused as-is by
+// services/voiceMemoService.js for both the "record in-app" and "upload
+// existing file" voice memo workflows; voice memos are not a separate
+// storage integration.
 // ============================================================
 
 import supabaseAdmin from '../config/supabase.js';
@@ -20,16 +22,23 @@ import { v4 as uuidv4 } from 'uuid';
 const getFileType = (mimeType) => {
   if (mimeType.startsWith('image/')) return 'image';
   if (mimeType === 'application/pdf') return 'pdf';
+  if (mimeType.startsWith('audio/')) return 'audio'; // NEW
   if (mimeType.includes('word') || mimeType === 'text/plain') return 'document';
   return 'other';
 };
 
 /**
  * Cloudinary needs a resource_type hint. Images get native image
- * handling (transformations, etc). Everything else (pdf, docs, misc)
- * must go up as 'raw' or Cloudinary will reject/mangle it.
+ * handling. Audio/video get 'video' (Cloudinary's audio handling lives
+ * under the video resource type — this is also what gives us duration
+ * metadata back in the upload response for free). Everything else (pdf,
+ * docs, misc) goes up as 'raw' or Cloudinary will reject/mangle it.
  */
-const getResourceType = (fileType) => (fileType === 'image' ? 'image' : 'raw');
+const getResourceType = (fileType) => {
+  if (fileType === 'image') return 'image';
+  if (fileType === 'audio') return 'video'; // NEW — Cloudinary convention for audio
+  return 'raw';
+};
 
 /**
  * Upload a buffer to Cloudinary via its upload_stream API,
@@ -49,16 +58,14 @@ const uploadBufferToCloudinary = (buffer, options) =>
  * Stores metadata in file_uploads table.
  *
  * @param {Buffer} buffer - File contents
- * @param {object} meta - { originalFilename, mimeType, sizeBytes, userId, chatId? }
- * @returns {{ url: string, fileRecord: object }}
+ * @param {object} meta - { originalFilename, mimeType, sizeBytes, userId, chatId?, eventId? }
+ * @returns {{ url: string, fileRecord: object, durationSeconds: number|null }}
  */
 export const uploadFile = async (buffer, { originalFilename, mimeType, sizeBytes, userId, chatId }) => {
-  // Validate file type
   if (!UPLOAD_LIMITS.ALLOWED_TYPES.includes(mimeType)) {
     throw new Error(`File type ${mimeType} is not supported. Allowed: images, PDFs, and documents.`);
   }
 
-  // Validate file size
   if (sizeBytes > UPLOAD_LIMITS.MAX_SIZE_BYTES) {
     throw new Error(`File too large. Maximum size is ${UPLOAD_LIMITS.MAX_SIZE_BYTES / 1024 / 1024}MB.`);
   }
@@ -67,8 +74,6 @@ export const uploadFile = async (buffer, { originalFilename, mimeType, sizeBytes
   const fileType = getFileType(mimeType);
   const resourceType = getResourceType(fileType);
 
-  // Cloudinary builds its own path from folder + public_id.
-  // We mirror the old `${userId}/${uuid}.${ext}` layout for continuity.
   const publicId = uuidv4();
   const folder = userId;
 
@@ -78,8 +83,6 @@ export const uploadFile = async (buffer, { originalFilename, mimeType, sizeBytes
       folder,
       public_id: publicId,
       resource_type: resourceType,
-      // Preserve original extension/format for raw files (pdf/doc/etc)
-      // so the delivered URL still ends in the right extension.
       format: resourceType === 'raw' ? ext : undefined,
       use_filename: false,
       unique_filename: false,
@@ -89,10 +92,9 @@ export const uploadFile = async (buffer, { originalFilename, mimeType, sizeBytes
     throw new Error(`Storage upload failed: ${uploadError.message}`);
   }
 
-  const storagePath = uploadResult.public_id; // e.g. "userId/uuid"
+  const storagePath = uploadResult.public_id;
   const publicUrl = uploadResult.secure_url;
 
-  // Store metadata in DB
   const { data: fileRecord, error: dbError } = await supabaseAdmin
     .from('file_uploads')
     .insert({
@@ -112,7 +114,45 @@ export const uploadFile = async (buffer, { originalFilename, mimeType, sizeBytes
 
   if (dbError) throw new Error(`Metadata save failed: ${dbError.message}`);
 
-  return { url: publicUrl, fileRecord };
+  return {
+    url: publicUrl,
+    fileRecord,
+    // Cloudinary's video/audio resource_type response includes `duration`
+    // (seconds, float) — surfaced here so callers (voiceMemoService) don't
+    // need a second probe of the file.
+    durationSeconds: resourceType === 'video' && uploadResult.duration ? Math.round(uploadResult.duration) : null,
+  };
+};
+
+/**
+ * Upload a raw audio Buffer without requiring a file_uploads row —
+ * used specifically by voiceMemoService, which maintains its OWN
+ * dedicated voice_memos table (richer schema: transcription status,
+ * transcript full-text search, AI summary) rather than reusing
+ * file_uploads, which has no fields for any of that. This still goes
+ * through the same Cloudinary upload path as uploadFile() above; it just
+ * skips the file_uploads insert since voice_memos is the record of truth
+ * for this content type.
+ */
+export const uploadAudioBuffer = async (buffer, { originalFilename, mimeType, userId }) => {
+  const ext = originalFilename?.split('.').pop() || 'webm';
+  const publicId = uuidv4();
+
+  const uploadResult = await uploadBufferToCloudinary(buffer, {
+    folder: `${userId}/voice-memos`,
+    public_id: publicId,
+    resource_type: 'video', // Cloudinary convention for audio
+    use_filename: false,
+    unique_filename: false,
+    overwrite: false,
+  });
+
+  return {
+    url: uploadResult.secure_url,
+    storagePath: uploadResult.public_id,
+    durationSeconds: uploadResult.duration ? Math.round(uploadResult.duration) : null,
+    bytes: uploadResult.bytes,
+  };
 };
 
 /**
@@ -141,10 +181,15 @@ export const deleteFile = async (fileId, userId) => {
 };
 
 /**
+ * Deletes a Cloudinary object by storage path directly (no file_uploads
+ * row involved) — used by voiceMemoService to clean up audio objects.
+ */
+export const deleteAudioObject = async (storagePath) => {
+  await cloudinary.uploader.destroy(storagePath, { resource_type: 'video' });
+};
+
+/**
  * Build attachment context for AI prompts.
- * Generates the right format based on what the model supports.
- * Grok: URL reference
- * Future models: Base64 for image models
  */
 export const buildAttachmentContext = (attachments) => {
   if (!attachments?.length) return '';
@@ -162,4 +207,4 @@ export const buildAttachmentContext = (attachments) => {
   return `\n\nATTACHED FILES:\n${parts.join('\n')}`;
 };
 
-export default { uploadFile, deleteFile, buildAttachmentContext };
+export default { uploadFile, uploadAudioBuffer, deleteFile, deleteAudioObject, buildAttachmentContext };

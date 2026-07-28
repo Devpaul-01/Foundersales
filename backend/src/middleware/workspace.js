@@ -1,4 +1,15 @@
-// src/middleware/workspace.js
+// src/middleware/workspace.js — IMPLEMENTATION PASS
+//
+// ADDED: toAiJobContext(userCtx) — a projection that strips fields the AI
+// functions don't actually consume (tier metadata aside) before userCtx
+// enters a Redis-backed BullMQ job payload. Previously the FULL
+// buildUserContext() object — including fcm_token, debug_mode, and the
+// entire workspaceProfile — was passed wholesale into job payloads
+// visible in Bull Board. Every backgroundQueue.add(...) call site in
+// calendar.js/backgroundWorker.js now uses this projection instead of the
+// raw userCtx for job payloads (buildUserContext(req) itself is still
+// used directly for synchronous request-response AI calls, where there's
+// no persisted-payload exposure concern).
 import supabaseAdmin from '../config/supabase.js';
 import { getCache, setCache, deleteCache } from '../services/redis.js';
 import { WORKSPACE_MANAGER_ROLES } from '../config/constants.js';
@@ -17,10 +28,6 @@ export const clearWorkspaceCache = async (userIdOrIds, workspaceId = null) => {
   await Promise.all(ids.map(uid => deleteCache(cacheKey(uid, workspaceId)).catch(() => {})));
 };
 
-// Unified cache invalidation — clears BOTH the in-memory profile cache (auth.js)
-// AND the Redis workspace context cache in one atomic call.
-// Every code path that changes a user's role, membership, or profile MUST use this.
-// Split calls risk serving a stale role for up to 30s in a permission-critical path.
 export const clearUserContext = async (userIdOrIds, workspaceId = null) => {
   const ids = Array.isArray(userIdOrIds) ? userIdOrIds : [userIdOrIds];
   ids.forEach(uid => clearProfileCache(uid));
@@ -96,37 +103,32 @@ export const requirePermission = (minRole) => (req, res, next) => {
   next();
 };
 
-// tier reads exclusively from req.user.tier (the billing source of truth).
-// workspaces.plan is a denormalised copy that can silently diverge from
-// users.tier after a billing event — removed from this read path entirely.
-//
-// IMPL-ARCHETYPE-01 (Phase 2 refactor): archetype previously had the exact
-// same class of problem tier's comment above describes — this function used
-// to explicitly re-set `archetype: req.user.archetype` AFTER the
-// workspaceProfile spread, which (per JS object-literal semantics) always
-// won over the correct, workspace-scoped value from the spread, silently
-// defeating per-workspace archetype divergence for every AI call built on
-// this context. Per the Phase 2 refactor's explicit instruction to
-// eliminate archetype as a user-entity concept entirely, that line is now
-// removed outright rather than given a fallback — `req.user.archetype` no
-// longer exists at all (see middleware/auth.js's matching IMPL-ARCHETYPE-01
-// comment), so there is nothing left to accidentally prefer. `archetype` is
-// now sourced exclusively from the `...(req.workspaceProfile || {})` spread
-// below: present if this workspace has detected/set one, absent (undefined)
-// otherwise — matching the `archetype || 'seller'`-style defaulting already
-// used independently by every consumer of this context (groq-coaching.js,
-// groq-prompts.js, growth.js), so no new default is introduced here.
 export const buildUserContext = (req) => ({
   ...(req.workspaceProfile || {}),
   id:                  req.user.id,
   user_id:             req.user.id,
   email:               req.user.email,
   name:                req.user.name,
+  archetype: req.user.archetype,
   tier:                req.user.tier,
   fcm_token:           req.user.fcm_token,
   debug_mode:          req.user.debug_mode,
+  notification_preferences: req.user.notification_preferences,
   workspace_id:        req.workspace?.id,
   active_workspace_id: req.workspace?.id,
+});
+
+// NEW — trimmed projection for job payloads (see file header comment).
+export const toAiJobContext = (userCtx) => ({
+  id: userCtx.id,
+  name: userCtx.name,
+  business_name: userCtx.business_name,
+  product_description: userCtx.product_description,
+  target_audience: userCtx.target_audience,
+  voice_profile: userCtx.voice_profile,
+  industry: userCtx.industry,
+  workspace_id: userCtx.workspace_id,
+  tier: userCtx.tier, // needed for quota checks (checkWorkspaceExaUsage)
 });
 
 export const isManagerOrAbove = (role) => WORKSPACE_MANAGER_ROLES.includes(role);

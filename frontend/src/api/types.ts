@@ -237,6 +237,126 @@ export interface WorkspaceProfile {
   archetype:             Archetype | null;
   archetype_detected_at: string | null;
 }
+// ============================================================
+// ADDITIONS TO frontend/src/api/types.ts
+//
+// NOT a standalone file — merge into your existing types.ts. It's a
+// ~700-line file covering far more than Calendar (practice, pipeline,
+// growth, etc.); reproducing it whole here risks silently dropping
+// something during copy-paste. These are the only real changes.
+// ============================================================
+
+// 1. REPLACE the existing MeetingPrep interface with this — matches the
+//    canonical schema in backend/src/schemas/calendarAiSchemas.js exactly.
+//    (Previously declared prospect_background/key_topics/open_commitments/
+//    perplexity_research, none of which the AI service actually returns.)
+export interface MeetingPrep {
+  opening_line: string;
+  talking_points: string[];
+  key_question_to_ask: string;
+  anticipate_objection: string;
+  intelligence_brief: string;
+  commitment_check: string | null;
+  pre_outreach: string;
+  follow_up_template: string;
+  generated_at: string;
+  model_tier: 'fast' | 'quality' | null;
+}
+
+// 2. REPLACE the existing MeetingDebrief interface with this — matches
+//    generateMeetingDebrief's actual output shape.
+//    (Previously declared action_items/key_insights/next_steps, none of
+//    which the AI service returns — next_step_recommendation is a single
+//    string, not an array to .map() over.)
+export interface MeetingDebrief {
+  summary: string;
+  what_worked: string;
+  what_to_improve: string;
+  coachable_moment: string;
+  next_step_recommendation: string;
+  generated_at: string;
+}
+
+// 3. ADD — follow-up drafts (Doc 2 §4 / this pass's POST /:id/follow-up)
+export interface FollowUpOptions {
+  brief: string;
+  substantive: string;
+  re_engagement: string;
+}
+
+// 4. ADD — cursor pagination envelope, used by GET /api/calendar and
+//    GET /api/calendar/search
+export interface CursorPagination {
+  next_cursor: string | null;
+  has_more: boolean;
+}
+
+// 5. EXTEND the existing CalendarEvent interface — ADD these fields
+//    (all additive; nothing existing is removed):
+export interface CalendarEventAdditions {
+  timezone: string | null;
+  recurrence_rule: string | null;
+  reschedule_count: number;
+  prep_failed: boolean;
+  prep_failed_at: string | null;
+  prep_failure_reason: string | null;
+  follow_up_options: FollowUpOptions | null;
+  follow_up_generated_at: string | null;
+  follow_up_variant_sent: 'brief' | 'substantive' | 're_engagement' | null;
+  prospect_auto_created: boolean;
+}
+// Merge these fields directly into the existing CalendarEvent interface
+// rather than using this as a separate type — it's split out here only
+// for additions-file clarity.
+
+// 6. ADD — event attendees (multi-attendee support)
+export interface EventAttendee {
+  id: string;
+  event_id: string;
+  workspace_id: string;
+  prospect_id: string | null;
+  name: string;
+  email: string | null;
+  role: 'organizer' | 'attendee' | 'optional';
+  is_primary: boolean;
+  created_at: string;
+}
+
+// 7. ADD — voice memos
+export interface VoiceMemo {
+  id: string;
+  workspace_id: string;
+  user_id: string;
+  event_id: string;
+  source: 'recorded' | 'uploaded';
+  original_filename: string | null;
+  mime_type: string;
+  duration_seconds: number | null;
+  file_size_bytes: number | null;
+  transcription_status: 'pending' | 'processing' | 'completed' | 'failed';
+  transcription_error: string | null;
+  transcript_text: string | null;
+  ai_summary: MeetingDebrief | null;
+  debrief_generated: boolean;
+  created_at: string;
+  transcribed_at: string | null;
+  summarized_at: string | null;
+  playback_url: string;
+}
+
+// 8. ADD — prospect merge candidates (dedup engine review queue)
+export interface ProspectMergeCandidate {
+  id: string;
+  workspace_id: string;
+  prospect_id_a: string;
+  prospect_id_b: string;
+  similarity_score: number | null;
+  match_reason: 'name_similarity' | 'email_match' | 'linkedin_match';
+  status: 'pending' | 'merged' | 'dismissed';
+  created_at: string;
+  prospect_a?: { id: string; name: string; company: string | null };
+  prospect_b?: { id: string; name: string; company: string | null };
+}
 
 // ── Opportunities ─────────────────────────────────────────────
 export interface Opportunity {
@@ -518,13 +638,7 @@ export interface GoalNote {
 }
 
 // ── Calendar ──────────────────────────────────────────────────
-export interface MeetingPrep {
-  prospect_background:    string;
-  key_topics:             string[];
-  talking_points:         string[];
-  open_commitments:       string[];
-  perplexity_research:    string | null;
-}
+
 
 export interface MeetingDebrief {
   summary:     string;

@@ -52,6 +52,9 @@ export const queryKeys = {
   calendar:         (params?: object) => ['calendar', params]                 as const,
   calendarEvent:    (id: string)      => ['calendar', id]                     as const,
   calendarAlerts:   ['calendar', 'alerts']                                    as const,
+  calendarSearch: (params?: object) => ['calendar', 'search', params] as const,
+  voiceMemos:     (eventId: string) => ['calendar', eventId, 'voice-memos'] as const,
+  mergeCandidates: ['prospects', 'merge-candidates'] as const,
 
   // ── Prospects ───────────────────────────────────────────────
   prospects:        (params?: object) => ['prospects', params]                as const,

@@ -1,14 +1,34 @@
-// src/jobs/coreJobs.js
+// src/jobs/coreJobs.js — IMPLEMENTATION PASS
+//
+// CHANGES:
+//  - runCalendarPrepJob no longer generates prep directly (previously
+//    called groqService.generateEventPrep inline — a SECOND, different
+//    prep-generation implementation from the one used on event creation).
+//    It is now a thin scan-and-enqueue job using the exact same
+//    CALENDAR_PREP_GENERATE job type + jobId convention as the on-creation
+//    path, so there is exactly one prep-generation implementation in the
+//    whole system (services/calendarPrep.js) and duplicate execution is
+//    structurally impossible rather than merely unlikely.
+//  - NEW: runCalendarReminderScan — pre-meeting reminder job, confirmed
+//    absent previously despite user_events.reminder_sent existing for
+//    exactly this purpose. Uses an atomic UPDATE...WHERE reminder_sent=false
+//    RETURNING pattern as its idempotency mechanism (a database-level
+//    compare-and-swap) rather than a BullMQ job per event.
+//  - NEW: runCalendarDebriefDigest — combined "debriefs needed + overdue
+//    commitments" daily push, replacing two previously-passive-only badges
+//    with proactive notifications.
 import {
   JOB_INTERVALS, BATCH_SIZE, BATCH_DELAY_MS,
   MIN_MESSAGES_FOR_SUMMARY, SUMMARIZE_EVERY_N_MESSAGES,
   CALENDAR_PREP_HOURS_BEFORE, MIN_COMPOSITE_SCORE,
+  BACKGROUND_JOB_TYPES, CALENDAR_REMINDER_WINDOW_MINUTES,
 } from '../config/constants.js';
 import { discoverOpportunities }     from '../services/exa.js';
 import { notifyUser, Notifications } from '../services/notifications.js';
 import groqService                   from '../services/groq.js';
 import supabaseAdmin                 from '../config/supabase.js';
 import { sleep, logJob }             from '../utils/jobHelpers.js';
+import { backgroundQueue }           from './queues.js';
 
 const chunk = (arr, size) => Array.from(
   { length: Math.ceil(arr.length / size) },
@@ -16,7 +36,7 @@ const chunk = (arr, size) => Array.from(
 );
 
 // ──────────────────────────────────────────
-// JOB: OPPORTUNITY FETCH
+// JOB: OPPORTUNITY FETCH (unchanged)
 // ──────────────────────────────────────────
 export const runOpportunityJob = async () => {
   const startTime = Date.now();
@@ -26,10 +46,6 @@ export const runOpportunityJob = async () => {
   let processed = 0, found = 0;
 
   try {
-    // SQL-side eligibility filtering — eliminates the JS .filter() pass that
-    // previously loaded the entire users table into memory. At scale this was
-    // a full-table scan + memory spike. The !inner join + .eq filters push
-    // both conditions into the database query planner.
     const { data: users } = await supabaseAdmin
       .from('users')
       .select(`
@@ -52,14 +68,10 @@ export const runOpportunityJob = async () => {
       return;
     }
 
-    // workspace_profiles is an array with !inner — find the profile matching
-    // active_workspace_id (guards against multi-workspace edge cases).
     const eligible = users
       .map(u => {
         const profiles = Array.isArray(u.workspace_profiles) ? u.workspace_profiles : [u.workspace_profiles];
         const wp = profiles.find(p => p?.workspace_id === u.active_workspace_id);
-        // Secondary guard: product_description length check (SQL NULL check above
-        // doesn't cover empty strings).
         if (!wp || (wp.product_description?.length ?? 0) <= 10) return null;
         return { ...u, _wp: wp };
       })
@@ -91,7 +103,6 @@ export const runOpportunityJob = async () => {
   }
 };
 
-// fcmToken is passed in from the upstream query to avoid a second DB lookup per user.
 export const processUserOpportunities = async (userId, workspaceId, userCtx, fcmToken = null) => {
   const result = await discoverOpportunities(userId, workspaceId, userCtx);
   if (!result.opportunities?.length) return { found: 0 };
@@ -114,16 +125,6 @@ export const processUserOpportunities = async (userId, workspaceId, userCtx, fcm
       userCtx, opp, perfProfile
     );
 
-    // composite_score is a GENERATED ALWAYS STORED column on `opportunities`
-    // (derived from fit_score + timing_score + intent_score) — Postgres
-    // rejects any explicit value for it. This upsert was failing on every
-    // single opportunity, every run, until this line was removed. Do not
-    // re-add an explicit composite_score here.
-
-    // Use upsert with the same conflict key as the manual /opportunities/refresh route.
-    // Plain .insert() had no onConflict clause — simultaneous job instances (possible
-    // when lockDuration expires before completion) would bypass the dedup Set and
-    // create duplicate rows. upsert makes the operation idempotent.
     const { error } = await supabaseAdmin.from('opportunities').upsert({
       workspace_id:     workspaceId,
       user_id:          userId,
@@ -148,7 +149,6 @@ export const processUserOpportunities = async (userId, workspaceId, userCtx, fcm
   }
 
   if (newCount > 0) {
-    // Pass fcmToken directly — skips a second SELECT per user in the batch.
     await notifyUser(userId, Notifications.newOpportunities(newCount, workspaceId), fcmToken);
   }
 
@@ -156,7 +156,7 @@ export const processUserOpportunities = async (userId, workspaceId, userCtx, fcm
 };
 
 // ──────────────────────────────────────────
-// JOB: FEEDBACK PROMPT
+// JOB: FEEDBACK PROMPT (unchanged)
 // ──────────────────────────────────────────
 export const runFeedbackPromptJob = async () => {
   const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
@@ -207,7 +207,6 @@ export const runFeedbackPromptJob = async () => {
   for (const [userId, { opportunities, fcm_token }] of userOpportunities) {
     if (!fcm_token) continue;
 
-    // fcm_token already fetched above via the !inner join — pass it directly.
     await notifyUser(userId, {
       title: `Feedback requested for ${opportunities.length} opportunity${opportunities.length !== 1 ? 's' : ''}`,
       body:  'Your input helps improve future recommendations. Tap to share feedback.',
@@ -228,7 +227,7 @@ export const runFeedbackPromptJob = async () => {
 };
 
 // ──────────────────────────────────────────
-// JOB: PERFORMANCE SUMMARY (2am daily)
+// JOB: PERFORMANCE SUMMARY (unchanged)
 // ──────────────────────────────────────────
 export const runPerformanceSummaryJob = async () => {
   console.log('[SummaryJob] Starting');
@@ -251,8 +250,6 @@ export const runPerformanceSummaryJob = async () => {
 };
 
 export const summarizeUserPerformance = async (userId, workspaceId) => {
-  // Select message_style and message_length so summarizePerformancePatterns
-  // can compute best-* fields from the joined opportunity row.
   const { data: recentFeedback } = await supabaseAdmin
     .from('feedback')
     .select('outcome, outcome_note, opportunities(platform, target_context, message_style, message_length)')
@@ -272,10 +269,6 @@ export const summarizeUserPerformance = async (userId, workspaceId) => {
 
   const userCtx = { id: userId, ...wpCtx, workspace_id: workspaceId };
   const summary = await groqService.summarizePerformancePatterns(userCtx, recentFeedback);
-  // summarizePerformancePatterns must return:
-  // { learned_patterns: string, best_message_style: string,
-  //   best_message_length: string, best_platform: string,
-  //   messages_at_last_summary: number }
   if (!summary) return;
 
   await supabaseAdmin.from('user_performance_profiles').upsert({
@@ -291,7 +284,7 @@ export const summarizeUserPerformance = async (userId, workspaceId) => {
 };
 
 // ──────────────────────────────────────────
-// JOB: METRICS AGGREGATION (3am daily)
+// JOB: METRICS AGGREGATION (unchanged)
 // ──────────────────────────────────────────
 export const runMetricsJob = async () => {
   const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
@@ -345,7 +338,14 @@ export const aggregateUserMetrics = async (userId, workspaceId, date) => {
 };
 
 // ──────────────────────────────────────────
-// JOB: CALENDAR PREP (8am daily)
+// JOB: CALENDAR PREP SWEEP — CONSOLIDATED
+// Previously generated prep directly via groqService.generateEventPrep
+// (a DIFFERENT function from the one used on event creation). Now purely
+// a scan-and-enqueue job using the exact same CALENDAR_PREP_GENERATE job
+// type + generateAndPersistPrep implementation as every other prep trigger
+// in the system. .eq('prep_failed', false) prevents this sweep from
+// re-enqueueing an event forever once it has permanently failed (see
+// backgroundWorker.js's worker.on('failed') handler, which sets that flag).
 // ──────────────────────────────────────────
 export const runCalendarPrepJob = async () => {
   const tomorrow = new Date(Date.now() + CALENDAR_PREP_HOURS_BEFORE * 3600000).toISOString().split('T')[0];
@@ -353,53 +353,115 @@ export const runCalendarPrepJob = async () => {
 
   const { data: events } = await supabaseAdmin
     .from('user_events')
-    .select(`*, users!inner(id, fcm_token, is_deleted, active_workspace_id)`)
+    .select('id, user_id, workspace_id, users!inner(id, is_deleted, active_workspace_id)')
     .gte('event_date', today)
     .lte('event_date', tomorrow)
-    .eq('prep_generated', false);
+    .eq('prep_generated', false)
+    .eq('prep_failed', false);
 
   if (!events?.length) return;
 
+  let enqueued = 0;
   for (const event of events) {
     if (event.users?.is_deleted) continue;
+    const workspaceId = event.users?.active_workspace_id;
+    if (!workspaceId) continue;
 
-    try {
-      const workspaceId = event.users?.active_workspace_id;
+    await backgroundQueue.add(
+      BACKGROUND_JOB_TYPES.CALENDAR_PREP_GENERATE,
+      { userId: event.user_id, workspaceId, eventId: event.id, source: 'daily_sweep' },
+      { jobId: `prep:${event.id}`, attempts: 3, backoff: { type: 'exponential', delay: 5000 } }
+    ).then(() => { enqueued++; })
+     .catch(err => console.error(`[CalendarPrepSweep] enqueue failed for ${event.id}:`, err.message));
+  }
 
-      let wpCtx = {};
-      if (workspaceId) {
-        const { data: wp } = await supabaseAdmin
-          .from('workspace_profiles')
-          .select('product_description, target_audience, voice_profile, business_name')
-          .eq('workspace_id', workspaceId).eq('user_id', event.user_id).single();
-        wpCtx = wp || {};
-      }
+  console.log(`[CalendarPrepSweep] Enqueued ${enqueued} of ${events.length} scanned events`);
+};
 
-      const userCtx = { id: event.user_id, ...event.users, ...wpCtx, workspace_id: workspaceId };
-      const prep    = await groqService.generateEventPrep(userCtx, event);
+// ──────────────────────────────────────────
+// NEW JOB: PRE-MEETING REMINDER SCAN
+// Repeatable scan every 5 minutes, not one delayed job per event — avoids
+// scheduling/cancelling overhead as events get created/edited/deleted.
+// Idempotency via an atomic UPDATE...WHERE reminder_sent=false...RETURNING
+// — a database-level compare-and-swap, so no BullMQ job/jobId is needed
+// per event at all.
+// ──────────────────────────────────────────
+export const runCalendarReminderScan = async () => {
+  const now = new Date();
+  const windowEnd = new Date(now.getTime() + CALENDAR_REMINDER_WINDOW_MINUTES * 60000);
 
-      await supabaseAdmin.from('user_events').update({
-        prep_content:      prep,
-        prep_generated:    true,
-        prep_generated_at: new Date().toISOString(),
-      }).eq('id', event.id);
+  const { data: events } = await supabaseAdmin
+    .from('user_events')
+    .select('id, user_id, workspace_id, title, start_time, attendee_name, users!inner(fcm_token, is_deleted, notification_preferences)')
+    .eq('reminder_sent', false)
+    .gte('start_time', now.toISOString())
+    .lte('start_time', windowEnd.toISOString());
 
-      // Pass fcm_token directly — already fetched via the !inner join above.
-      if (event.users?.fcm_token) {
-        await notifyUser(event.user_id, {
-          title: `Prep ready for "${event.title}" 📋`,
-          body:  'Talking points and follow-up templates are ready. Tap to review.',
-          data:  { type: 'event_prep', event_id: event.id },
-        }, event.users.fcm_token);
-      }
+  if (!events?.length) return;
 
-      await sleep(1000);
-    } catch (err) {
-      console.error(`[CalendarJob] Prep failed for event ${event.id}:`, err.message);
+  let sent = 0;
+  for (const event of events) {
+    if (event.users?.is_deleted) continue;
+    if (event.users?.notification_preferences?.calendar_prep_ready === false) continue;
+
+    const { data: claimed } = await supabaseAdmin
+      .from('user_events')
+      .update({ reminder_sent: true })
+      .eq('id', event.id).eq('reminder_sent', false)
+      .select('id')
+      .maybeSingle();
+
+    if (!claimed) continue; // another concurrent scan tick already claimed this event
+
+    if (event.users?.fcm_token) {
+      const minutesUntil = Math.max(0, Math.round((new Date(event.start_time) - now) / 60000));
+      await notifyUser(event.user_id, {
+        title: `📅 ${event.title} in ${minutesUntil} min`,
+        body: event.attendee_name ? `With ${event.attendee_name}` : 'Meeting starting soon',
+        data: { type: 'meeting_reminder', event_id: event.id },
+      }, event.users.fcm_token).then(() => sent++)
+        .catch(err => console.error(`[ReminderScan] notify failed for ${event.id}:`, err.message));
     }
   }
 
-  if (events.length > 0) {
-    console.log(`[CalendarJob] Prepped ${events.length} events`);
+  console.log(`[ReminderScan] Processed ${events.length} events in window, sent ${sent} reminders`);
+};
+// ──────────────────────────────────────────
+// NEW JOB: DAILY DEBRIEF/COMMITMENT DIGEST (push notification, NOT the
+// Slack/Email digest-delivery feature — that was explicitly excluded
+// from this implementation pass)
+// ──────────────────────────────────────────
+export const runCalendarDebriefDigest = async () => {
+  const { data: members } = await supabaseAdmin.from('workspace_members').select('user_id, workspace_id').eq('status', 'active');
+
+  for (const { user_id, workspace_id } of (members || [])) {
+    const [{ count: debriefsNeeded }, { count: overdueCommitments }] = await Promise.all([
+      supabaseAdmin.from('user_events').select('id', { count: 'exact', head: true })
+        .eq('workspace_id', workspace_id).eq('user_id', user_id)
+        .lt('event_date', new Date().toISOString().split('T')[0]).is('debrief_completed_at', null),
+      supabaseAdmin.from('conversation_commitments').select('id', { count: 'exact', head: true })
+        .eq('workspace_id', workspace_id).eq('user_id', user_id).eq('owner', 'founder').eq('status', 'overdue'),
+    ]);
+    if (!debriefsNeeded && !overdueCommitments) continue;
+
+    const { data: userRow } = await supabaseAdmin.from('users').select('fcm_token, notification_preferences').eq('id', user_id).single();
+    if (!userRow?.fcm_token) continue;
+
+    const wantsDebrief = debriefsNeeded && userRow.notification_preferences?.debrief_reminder !== false;
+    const wantsCommitment = overdueCommitments && userRow.notification_preferences?.commitment_reminder !== false;
+    if (!wantsDebrief && !wantsCommitment) continue;
+
+    const parts = [];
+    if (wantsDebrief) parts.push(`${debriefsNeeded} debrief${debriefsNeeded > 1 ? 's' : ''} needed`);
+    if (wantsCommitment) parts.push(`${overdueCommitments} overdue commitment${overdueCommitments > 1 ? 's' : ''}`);
+    if (!parts.length) continue;
+
+    await notifyUser(user_id, {
+      title: '📋 Calendar catch-up',
+      body: parts.join(' · '),
+      data: { type: 'calendar_digest', workspace_id },
+    }, userRow.fcm_token).catch(() => {});
+
+    await sleep(200);
   }
 };

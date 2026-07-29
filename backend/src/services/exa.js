@@ -378,35 +378,7 @@ export const discoverOpportunities = async (userId, workspaceId, user) => {
   }
 };
 
-// ──────────────────────────────────────────────────────────────
-// CHAT SEARCH ROUTER
-// ──────────────────────────────────────────────────────────────
-export const needsChatSearch = async (message, { workspaceId, userId } = {}) => {
-  if (!EXA_AVAILABLE) return { needs_search: false, reason: 'exa_not_configured' };
 
-  const prompt = `You decide if a user's question needs a real-time web search to answer accurately.
-Question: "${message.slice(0, 400)}"
-Answer ONLY with this JSON (no markdown):
-{"needs_search": true, "reason": "one short sentence"}
-OR
-{"needs_search": false, "reason": "one short sentence"}
-Search IS needed for: current news, recent events, today's prices/data, "latest" anything, specific current roles/positions.
-Search is NOT needed for: sales strategy advice, coaching, product feedback, how-to questions, writing help, explaining concepts.`;
-
-  try {
-    const { content } = await callWithFallbackGroq({
-      messages: [{ role: 'user', content: prompt }],
-      temperature: 0.1, maxTokens: 100, tier: 'fast',
-      workspaceId, userId, sourceJob: 'needs_chat_search',
-    });
-    const parsed = JSON.parse(content.replace(/```json|```/g, '').trim());
-    if (typeof parsed.needs_search === 'boolean') return parsed;
-    return { needs_search: false, reason: 'parse_fallback' };
-  } catch (err) {
-    console.warn('[ChatRouter] needsChatSearch failed:', err.message);
-    return { needs_search: false, reason: 'error_fallback' };
-  }
-};
 
 // ──────────────────────────────────────────────────────────────
 // SEARCH FOR CHAT — used by emailDigestJob.js (market intel) and
@@ -437,4 +409,4 @@ export const searchForChat = async (message, systemContext = '', { workspaceId, 
   return { content, citations };
 };
 
-export default { discoverOpportunities, needsRealTimeSearch, needsChatSearch, searchForChat };
+export default { discoverOpportunities, needsRealTimeSearch, searchForChat };

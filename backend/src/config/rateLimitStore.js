@@ -1,7 +1,7 @@
 // src/config/rateLimitStore.js
 // ============================================================
 // SHARED REDIS-BACKED RATE LIMIT STORE — Phase 2 refactor (C2 +
-// horizontal-scaling instruction)
+// horizontal-scaling instruction), PHASE 3 hardening (this revision)
 //
 // Every rate limiter in this codebase previously used
 // express-rate-limit's default in-memory store, meaning each of N
@@ -28,6 +28,30 @@
 // Redis, we just partition the keyspace per limiter on top of it.
 // Stores are constructed lazily and cached per namespace, so calling
 // createRateLimitStore('ai') twice returns the same instance.
+//
+// PHASE 3 (this revision): IMPL-RATELIMIT-02's fix only works if every
+// call site actually supplies a distinct namespace. An audit found SIX
+// call sites (app.js ×4 limiters, auth.js, calendar.js, opportunities.js
+// ×2 limiters, upload.js) calling `createRateLimitStore()` with NO
+// argument at all — which silently fell back to the 'default' namespace
+// below, putting authRateLimiter, aiRateLimiter, pipelineRateLimiter,
+// analyticsRateLimiter, the auth email limiter, the calendar AI limiter,
+// both opportunities limiters, and the upload limiter all in the SAME
+// 'ratelimit:default:' Redis key space — reintroducing the exact
+// collision class this module was built to prevent, just one level up
+// (namespace collision instead of no-namespace-at-all collision).
+//
+// Two changes address this:
+//   1. Every limiter is now defined in config/limiters.js, which forces
+//      an explicit, unique namespace string per limiter via
+//      buildLimiter() — see that file for the full limiter registry.
+//   2. This module now WARNS loudly (not throws — see fail-open
+//      reasoning below) any time the 'default' namespace is actually
+//      requested, since after the config/limiters.js migration nothing
+//      in this codebase should ever hit that path again. A stray future
+//      call site that forgets to pass a namespace will now be visible in
+//      logs immediately instead of silently sharing counters with
+//      whatever else also forgot.
 //
 // CONFIGURABLE BACKEND (per the explicit instruction that this remain
 // swappable with minimal effort): createRateLimitStore() is still the
@@ -85,8 +109,25 @@ const getSharedClient = async () => {
  *
  * Falls back to `undefined` (per-namespace, per-instance in-memory store)
  * if Redis is unreachable — see module header for the fail-open reasoning.
+ *
+ * PHASE 3: `namespace` should always be supplied explicitly by callers —
+ * in practice this means every limiter should be defined in
+ * config/limiters.js via buildLimiter(), which enforces this itself.
+ * The 'default' fallback below still exists (removing the parameter
+ * default would be a breaking API change for this exported function),
+ * but any actual use of it is now logged loudly, since after this
+ * refactor nothing in the codebase is expected to hit it.
  */
 export const createRateLimitStore = async (namespace = 'default') => {
+  if (namespace === 'default') {
+    console.warn(
+      '[RateLimit] createRateLimitStore() called with no namespace — falling back to "default". ' +
+      'This is almost certainly a bug: every limiter should pass a unique namespace ' +
+      '(see config/limiters.js). Multiple limiters sharing "default" will share Redis ' +
+      'counters and silently merge their limits.'
+    );
+  }
+
   if (_stores.has(namespace)) return _stores.get(namespace);
 
   const client = await getSharedClient();

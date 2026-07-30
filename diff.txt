@@ -1,0 +1,345 @@
+diff --git a/backend/package-lock.json b/backend/package-lock.json
+index a91479b..a8bd0f8 100644
+--- a/backend/package-lock.json
++++ b/backend/package-lock.json
+@@ -10,7 +10,7 @@
+       "dependencies": {
+         "@bull-board/api": "^5.10.2",
+         "@bull-board/express": "^5.10.2",
+-        "@sentry/node": "^10.67.0",
++        "@sentry/node": "^10.69.0",
+         "@supabase/supabase-js": "^2.39.0",
+         "axios": "^1.6.5",
+         "bullmq": "^5.1.1",
+@@ -57,9 +57,9 @@
+       }
+     },
+     "node_modules/@apm-js-collab/code-transformer-bundler-plugins": {
+-      "version": "0.7.2",
+-      "resolved": "https://registry.npmjs.org/@apm-js-collab/code-transformer-bundler-plugins/-/code-transformer-bundler-plugins-0.7.2.tgz",
+-      "integrity": "sha512-GvpKWDmzBFzbtVElU+tEDMDYyMY8SnMH4NNwwlUQioNHZvE6sSuHEqNkfU3iYhWL+/XO5Ej+MzhVJoqM10NYCQ==",
++      "version": "0.7.3",
++      "resolved": "https://registry.npmjs.org/@apm-js-collab/code-transformer-bundler-plugins/-/code-transformer-bundler-plugins-0.7.3.tgz",
++      "integrity": "sha512-qNbPwuMZ8f5ZuGj/ttPeB7a6C/S1bB6tNYaEL5vNiRKydSAxa4AU0gxCWgaP4fVju+AuwhcumSFjrEcGF9Dv7Q==",
+       "license": "MIT",
+       "dependencies": {
+         "@apm-js-collab/code-transformer": "^0.18.0",
+@@ -869,9 +869,9 @@
+       }
+     },
+     "node_modules/@sentry/core": {
+-      "version": "10.67.0",
+-      "resolved": "https://registry.npmjs.org/@sentry/core/-/core-10.67.0.tgz",
+-      "integrity": "sha512-b6U3pJ8AUvN9aouq0vl+VZI8KT8RslBsfGMFuNwRr313zOmdmFJBZqTiUw9VGgJ2jGKxLO9alm9rlxBfX4hf+w==",
++      "version": "10.69.0",
++      "resolved": "https://registry.npmjs.org/@sentry/core/-/core-10.69.0.tgz",
++      "integrity": "sha512-+uuqVEeiDzYuAKjZLqsROKXvRTbl/QeH0gfGRtpYib1cud4rAFWRIkFmcR7Jb7JGFYwmReyQotiTj/hcDszTZg==",
+       "license": "MIT",
+       "dependencies": {
+         "@sentry/conventions": "^0.16.0"
+@@ -881,19 +881,19 @@
+       }
+     },
+     "node_modules/@sentry/node": {
+-      "version": "10.67.0",
+-      "resolved": "https://registry.npmjs.org/@sentry/node/-/node-10.67.0.tgz",
+-      "integrity": "sha512-SFKpZGqOCEFSmP93NdDP6ikZp4NS7A/JR8+2ofK3jF6Y9Vyox7pX0pxdOnPLpFcPtMybMahfWqSAWJvsFs4RmA==",
++      "version": "10.69.0",
++      "resolved": "https://registry.npmjs.org/@sentry/node/-/node-10.69.0.tgz",
++      "integrity": "sha512-xEXA1YGIiTZbrW6MWV34uS6JGQuQg2ijTI0zed+FsJb9JZKPYel/GZK8Km26vfTVb+yCXFmWZNBesKegNcVdzg==",
+       "license": "MIT",
+       "dependencies": {
+         "@opentelemetry/api": "^1.9.1",
+         "@opentelemetry/instrumentation": "^0.220.0",
+         "@opentelemetry/sdk-trace-base": "^2.9.0",
+         "@sentry/conventions": "^0.16.0",
+-        "@sentry/core": "10.67.0",
+-        "@sentry/node-core": "10.67.0",
+-        "@sentry/opentelemetry": "10.67.0",
+-        "@sentry/server-utils": "10.67.0",
++        "@sentry/core": "10.69.0",
++        "@sentry/node-core": "10.69.0",
++        "@sentry/opentelemetry": "10.69.0",
++        "@sentry/server-utils": "10.69.0",
+         "import-in-the-middle": "^3.0.0"
+       },
+       "engines": {
+@@ -901,14 +901,14 @@
+       }
+     },
+     "node_modules/@sentry/node-core": {
+-      "version": "10.67.0",
+-      "resolved": "https://registry.npmjs.org/@sentry/node-core/-/node-core-10.67.0.tgz",
+-      "integrity": "sha512-dBHHRwZyan1pOnFJ+sNBvR8TkXbZAfZU/jpxmALS3JZ2/8AGR7cQKL+b7SleKuJ7iUDZyklN3Nqi0i5JkcA+HA==",
++      "version": "10.69.0",
++      "resolved": "https://registry.npmjs.org/@sentry/node-core/-/node-core-10.69.0.tgz",
++      "integrity": "sha512-IgArHczrZJxkgxoffHscj0NxQrG6kCazgmGQnlf3j58J1ec21YaUu8Tu+7G4Lo5tCiW3teQnwlKW1ttMXSqWRw==",
+       "license": "MIT",
+       "dependencies": {
+         "@sentry/conventions": "^0.16.0",
+-        "@sentry/core": "10.67.0",
+-        "@sentry/opentelemetry": "10.67.0",
++        "@sentry/core": "10.69.0",
++        "@sentry/opentelemetry": "10.69.0",
+         "import-in-the-middle": "^3.0.0"
+       },
+       "engines": {
+@@ -940,13 +940,13 @@
+       }
+     },
+     "node_modules/@sentry/opentelemetry": {
+-      "version": "10.67.0",
+-      "resolved": "https://registry.npmjs.org/@sentry/opentelemetry/-/opentelemetry-10.67.0.tgz",
+-      "integrity": "sha512-oLTOrAK1rOqmYRktOJZwz37B1seXPx1W2FTMVtzTVNjMFA/LZwGzePeZzhUOgzZgfLHixMd/ceWtGqoxAndcjQ==",
++      "version": "10.69.0",
++      "resolved": "https://registry.npmjs.org/@sentry/opentelemetry/-/opentelemetry-10.69.0.tgz",
++      "integrity": "sha512-3FyWV6YcEJuvLrlaKGE1dHXCI+1YO0a62w7PkwlRg8yp6K6YXkmdwu9GjqaYD+Ju4tm7uC7mHIsGFQMm0M7pqQ==",
+       "license": "MIT",
+       "dependencies": {
+         "@sentry/conventions": "^0.16.0",
+-        "@sentry/core": "10.67.0"
++        "@sentry/core": "10.69.0"
+       },
+       "engines": {
+         "node": ">=18"
+@@ -958,15 +958,16 @@
+       }
+     },
+     "node_modules/@sentry/server-utils": {
+-      "version": "10.67.0",
+-      "resolved": "https://registry.npmjs.org/@sentry/server-utils/-/server-utils-10.67.0.tgz",
+-      "integrity": "sha512-GQ9t+RSTx5s3b/aZrLFuL4nrwPLMah5NiZk5cjxJmgmOSgm3nMdO8gdqCedDch5B13F3YsxtaQYjSJnzLz8M5A==",
++      "version": "10.69.0",
++      "resolved": "https://registry.npmjs.org/@sentry/server-utils/-/server-utils-10.69.0.tgz",
++      "integrity": "sha512-0MwHrA8+nNvMIsqf8m3cXwCBlUjr6AS7N6CZvHJtY1DkqEvQqEbD5VIrhzEyHN/KMZIgQ8XeDCQRhjnXFQGRhg==",
+       "license": "MIT",
+       "dependencies": {
+-        "@apm-js-collab/code-transformer-bundler-plugins": "^0.7.1",
++        "@apm-js-collab/code-transformer-bundler-plugins": "^0.7.3",
+         "@apm-js-collab/tracing-hooks": "^0.13.0",
+         "@sentry/conventions": "^0.16.0",
+-        "@sentry/core": "10.67.0"
++        "@sentry/core": "10.69.0",
++        "meriyah": "^6.1.4"
+       },
+       "engines": {
+         "node": ">=18"
+diff --git a/backend/package.json b/backend/package.json
+index e45ad9a..c63ae03 100644
+--- a/backend/package.json
++++ b/backend/package.json
+@@ -13,7 +13,7 @@
+   "dependencies": {
+     "@bull-board/api": "^5.10.2",
+     "@bull-board/express": "^5.10.2",
+-    "@sentry/node": "^10.67.0",
++    "@sentry/node": "^10.69.0",
+     "@supabase/supabase-js": "^2.39.0",
+     "axios": "^1.6.5",
+     "bullmq": "^5.1.1",
+diff --git a/backend/src/routes/followup-6.js b/backend/src/routes/followup-6.js
+deleted file mode 100644
+index 0aaaab6..0000000
+--- a/backend/src/routes/followup-6.js
++++ /dev/null
+@@ -1,200 +0,0 @@
+-// src/routes/followup.js — Gap 5 (requirePermission member+), CRIT-03 (shared logger)
+-import { Router }            from 'express';
+-import { asyncHandler }      from '../middleware/errorHandler.js';
+-import { requirePermission } from '../middleware/workspace.js';
+-import { createLogger }      from '../utils/logger.js';
+-import supabaseAdmin         from '../config/supabase.js';
+-import { PIPELINE_STAGES }   from '../config/constants.js';
+-
+-export const followupRouter = Router();
+-const { log, logError, logDB } = createLogger('Followup');
+-
+-// Safely serialize a Supabase error into a readable string for logError,
+-// since logError string-coerces its second arg and Supabase errors are objects.
+-function fmtErr(e) {
+-  if (!e) return 'null';
+-  return JSON.stringify({
+-    message: e.message,
+-    code:    e.code,
+-    details: e.details,
+-    hint:    e.hint,
+-  });
+-}
+-
+-// GET /api/followup/unviewed-count
+-followupRouter.get('/unviewed-count', requirePermission('member'), asyncHandler(async (req, res) => {
+-  const userId      = req.user.id;
+-  const workspaceId = req.workspace.id;
+-  log(`unviewed-count → userId=${userId} workspaceId=${workspaceId}`);
+-
+-  const { error, count } = await supabaseAdmin
+-    .from('opportunities')
+-    .select('id', { count: 'exact', head: true })
+-    .eq('workspace_id', workspaceId)
+-    .or(`user_id.eq.${userId},assigned_to.eq.${userId}`)
+-    .not('follow_up_message', 'is', null)
+-    .is('follow_up_viewed_at', null)
+-    .in('stage', [PIPELINE_STAGES.CONTACTED, PIPELINE_STAGES.REPLIED, PIPELINE_STAGES.CALL_DEMO]);
+-
+-  if (error) {
+-    logError(`unviewed-count → DB error ${fmtErr(error)}`);
+-    throw error;
+-  }
+-
+-  log(`unviewed-count → result count=${count ?? 0}`);
+-  res.json({
+-    unviewed_count: count ?? 0,
+-    has_unviewed:   (count ?? 0) > 0,
+-  });
+-}));
+-
+-// GET /api/followup — list pending follow-ups
+-followupRouter.get('/', requirePermission('member'), asyncHandler(async (req, res) => {
+-  const userId      = req.user.id;
+-  const workspaceId = req.workspace.id;
+-  log(`list → userId=${userId} workspaceId=${workspaceId}`);
+-
+-  const { data: opps, error } = await supabaseAdmin
+-    .from('opportunities')
+-    .select(`
+-      id, platform, target_name, target_context, stage,
+-      follow_up_message, follow_up_count, follow_up_sent_at,
+-      marked_sent_at, last_stage_changed_at, composite_score
+-    `)
+-    .eq('workspace_id', workspaceId)
+-    .or(`user_id.eq.${userId},assigned_to.eq.${userId}`)
+-    .not('follow_up_message', 'is', null)
+-    .in('stage', [PIPELINE_STAGES.CONTACTED, PIPELINE_STAGES.REPLIED, PIPELINE_STAGES.CALL_DEMO])
+-    .order('follow_up_sent_at', { ascending: false })
+-    .limit(20);
+-
+-  if (error) {
+-    logError(`list → DB error ${fmtErr(error)}`);
+-    throw error;
+-  }
+-
+-  log(`list → returned ${opps?.length ?? 0} opportunities`);
+-
+-  if (opps?.length) {
+-    const ids = opps.map(o => o.id);
+-    log(`list → marking ${ids.length} opportunities as viewed`);
+-    const { error: viewError } = await supabaseAdmin
+-      .from('opportunities')
+-      .update({ follow_up_viewed_at: new Date().toISOString() })
+-      .in('id', ids);
+-    if (viewError) logError(`list → mark-viewed error ${fmtErr(viewError)}`);
+-  }
+-
+-  res.json({ opportunities: opps || [] });
+-}));
+-
+-// POST /api/followup/:id/sent  (Gap 5: member+)
+-followupRouter.post('/:id/sent', requirePermission('member'), asyncHandler(async (req, res) => {
+-  const userId      = req.user.id;
+-  const workspaceId = req.workspace.id;
+-  const { id }      = req.params;
+-  log(`sent → START id=${id} userId=${userId} workspaceId=${workspaceId}`);
+-
+-  // FETCH — read current row to get follow_up_count for manual increment
+-  const { data: current, error: fetchError } = await supabaseAdmin
+-    .from('opportunities')
+-    .select('id, follow_up_count, user_id, assigned_to, workspace_id')
+-    .eq('id', id)
+-    .eq('workspace_id', workspaceId)
+-    .or(`user_id.eq.${userId},assigned_to.eq.${userId}`)
+-    .single();
+-
+-  if (fetchError) {
+-    logError(`sent → FETCH DB error id=${id} ${fmtErr(fetchError)}`);
+-    return res.status(404).json({ error: 'NOT_FOUND', stage: 'fetch', reason: fetchError.message });
+-  }
+-  if (!current) {
+-    logError(`sent → FETCH no row (ownership/workspace mismatch?) id=${id} userId=${userId} workspaceId=${workspaceId}`);
+-    return res.status(404).json({ error: 'NOT_FOUND', stage: 'fetch', reason: 'no_row' });
+-  }
+-  log(`sent → FETCH ok follow_up_count=${current.follow_up_count} owner=${current.user_id} assigned=${current.assigned_to}`);
+-
+-  // UPDATE
+-  logDB('UPDATE', 'opportunities', { id, userId, workspaceId, fields: 'follow_up_sent_at,follow_up_count' });
+-  // Ownership already verified in FETCH above — .or() on UPDATE causes
+-  // PostgREST to generate invalid SQL ("column does not exist"), so omit it.
+-  const { data, error: updateError } = await supabaseAdmin
+-    .from('opportunities')
+-    .update({
+-      follow_up_sent_at: new Date().toISOString(),
+-      follow_up_count:   (current.follow_up_count || 0) + 1,
+-    })
+-    .eq('id', id)
+-    .eq('workspace_id', workspaceId)
+-    .select('id, follow_up_count')
+-    .single();
+-
+-  if (updateError) {
+-    logError(`sent → UPDATE DB error id=${id} ${fmtErr(updateError)}`);
+-    return res.status(404).json({ error: 'NOT_FOUND', stage: 'update', reason: updateError.message });
+-  }
+-  if (!data) {
+-    logError(`sent → UPDATE no row (race condition / RLS?) id=${id} userId=${userId}`);
+-    return res.status(404).json({ error: 'NOT_FOUND', stage: 'update', reason: 'no_row' });
+-  }
+-
+-  log(`sent → UPDATE ok follow_up_count=${data.follow_up_count}`);
+-  res.json({ success: true, follow_up_count: data.follow_up_count });
+-}));
+-
+-// POST /api/followup/:id/dismiss  (Gap 5: member+)
+-followupRouter.post('/:id/dismiss', requirePermission('member'), asyncHandler(async (req, res) => {
+-  const userId      = req.user.id;
+-  const workspaceId = req.workspace.id;
+-  const { id }      = req.params;
+-  log(`dismiss → START id=${id} userId=${userId} workspaceId=${workspaceId}`);
+-
+-  // FETCH — read current row to get follow_up_count for manual increment
+-  const { data: current, error: fetchError } = await supabaseAdmin
+-    .from('opportunities')
+-    .select('id, follow_up_count, user_id, assigned_to, workspace_id')
+-    .eq('id', id)
+-    .eq('workspace_id', workspaceId)
+-    .or(`user_id.eq.${userId},assigned_to.eq.${userId}`)
+-    .single();
+-
+-  if (fetchError) {
+-    logError(`dismiss → FETCH DB error id=${id} ${fmtErr(fetchError)}`);
+-    return res.status(404).json({ error: 'NOT_FOUND', stage: 'fetch', reason: fetchError.message });
+-  }
+-  if (!current) {
+-    logError(`dismiss → FETCH no row (ownership/workspace mismatch?) id=${id} userId=${userId} workspaceId=${workspaceId}`);
+-    return res.status(404).json({ error: 'NOT_FOUND', stage: 'fetch', reason: 'no_row' });
+-  }
+-  log(`dismiss → FETCH ok follow_up_count=${current.follow_up_count} owner=${current.user_id} assigned=${current.assigned_to}`);
+-
+-  // UPDATE
+-  logDB('UPDATE', 'opportunities', { id, userId, workspaceId, fields: 'follow_up_message,follow_up_dismissed_at,follow_up_count' });
+-  // Ownership already verified in FETCH above — .or() on UPDATE causes
+-  // PostgREST to generate invalid SQL ("column does not exist"), so omit it.
+-  const { data, error: updateError } = await supabaseAdmin
+-    .from('opportunities')
+-    .update({
+-      follow_up_message:      null,
+-      follow_up_dismissed_at: new Date().toISOString(),
+-      follow_up_count:        (current.follow_up_count || 0) + 1,
+-    })
+-    .eq('id', id)
+-    .eq('workspace_id', workspaceId)
+-    .select('id')
+-    .single();
+-
+-  if (updateError) {
+-    logError(`dismiss → UPDATE DB error id=${id} ${fmtErr(updateError)}`);
+-    return res.status(404).json({ error: 'NOT_FOUND', stage: 'update', reason: updateError.message });
+-  }
+-  if (!data) {
+-    logError(`dismiss → UPDATE no row (race condition / RLS?) id=${id} userId=${userId}`);
+-    return res.status(404).json({ error: 'NOT_FOUND', stage: 'update', reason: 'no_row' });
+-  }
+-
+-  log(`dismiss → UPDATE ok id=${data.id}`);
+-  res.json({ success: true });
+-}));
+-
+-export default followupRouter;

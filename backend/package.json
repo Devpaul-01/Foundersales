@@ -13,7 +13,7 @@
   "dependencies": {
     "@bull-board/api": "^5.10.2",
     "@bull-board/express": "^5.10.2",
-    "@sentry/node": "^10.67.0",
+    "@sentry/node": "^10.69.0",
     "@supabase/supabase-js": "^2.39.0",
     "axios": "^1.6.5",
     "bullmq": "^5.1.1",

@@ -6,34 +6,29 @@
 
 import { Router } from 'express';
 import multer from 'multer';
-import rateLimit from 'express-rate-limit';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { uploadFile, deleteFile } from '../services/storage.js';
 import { UPLOAD_LIMITS } from '../config/constants.js';
 import supabaseAdmin from '../config/supabase.js';
-import { createRateLimitStore } from '../config/rateLimitStore.js';
+import { LIMITERS } from '../config/limiters.js';
 
 const router = Router();
 
-// IMPL-RATELIMIT-01 (Phase 2 refactor): file uploads previously had ZERO
-// rate limiting of any kind — discovered during this refactor's
-// endpoint-by-endpoint rate-limit review. Upload has real resource cost
-// (multipart parsing, Supabase Storage write, bandwidth) independent of
-// AI cost, and is a classic under-protected surface. Applied to POST /
-// ONLY (see below) — GET / (list files) and DELETE /:id are cheap
-// DB-only operations that shouldn't share this budget; a user paging
-// through a file picker shouldn't be throttled by the same limit that
-// bounds actual upload volume. Redis-backed (config/rateLimitStore.js)
-// so this is enforced correctly across every instance in a
-// horizontally-scaled deployment. 20 uploads / 15 min / user is
-// deliberately generous for legitimate use (attaching a few files to a
-// conversation) while still bounding scripted abuse.
-const uploadPostRateLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false,
-  keyGenerator: (req) => req.user?.id || req.ip,
-  message: { error: 'RATE_LIMIT_EXCEEDED', message: 'Too many uploads. Please wait a few minutes.' },
-  store: await createRateLimitStore(),
-});
+// PHASE 3 (Redis Store & Rate Limiting Consistency refactor): this
+// previously called `createRateLimitStore()` with no namespace, silently
+// sharing the 'default' Redis key space with several other unrelated
+// limiters. It's now LIMITERS.uploadLimiter, defined once in
+// config/limiters.js with its own 'upload' namespace. Behavior (20
+// uploads / 15 min / user, applied to POST / only — see reasoning below)
+// is unchanged.
+//
+// File uploads have real resource cost (multipart parsing, Supabase
+// Storage write, bandwidth) independent of AI cost, and are a classic
+// under-protected surface. Applied to POST / ONLY — GET / (list files)
+// and DELETE /:id are cheap DB-only operations that shouldn't share this
+// budget; a user paging through a file picker shouldn't be throttled by
+// the same limit that bounds actual upload volume.
+const uploadPostRateLimiter = LIMITERS.uploadLimiter;
 
 // Use memory storage - we stream to Supabase Storage directly
 const upload = multer({

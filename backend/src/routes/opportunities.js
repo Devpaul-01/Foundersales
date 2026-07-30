@@ -14,7 +14,6 @@
 //            params are cast to numbers before reaching .range(). If the schema
 //            uses z.number(), string inputs will fail validation before this handler.
 import { Router }          from 'express';
-import rateLimit           from 'express-rate-limit';
 import { asyncHandler }    from '../middleware/errorHandler.js';
 import { requirePermission, buildUserContext } from '../middleware/workspace.js';
 import { validate }        from '../middleware/validate.js';
@@ -25,7 +24,7 @@ import {
   assignOpportunitySchema,
 } from '../validators/opportunities.js';
 import { sendDealAssignedEmail } from '../services/email.js';
-import { createRateLimitStore } from '../config/rateLimitStore.js';
+import { LIMITERS } from '../config/limiters.js';
 import {
   PIPELINE_STAGES,
   OPPORTUNITY_STATUS,
@@ -51,37 +50,21 @@ import supabaseAdmin        from '../config/supabase.js';
 const router = Router();
 const { log, logError, logDB, logAI } = createLogger('Opportunities');
 
-// IMPL-RATELIMIT-01 (Phase 2 refactor): now backed by the shared Redis
-// store instead of express-rate-limit's default in-memory store, so
-// this limit is enforced correctly across every instance in a
-// horizontally-scaled deployment.
-const sharedRateLimitStore = await createRateLimitStore();
-
-const refreshRateLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, max: 5, standardHeaders: true, legacyHeaders: false,
-  keyGenerator: (req) => req.user?.id || req.ip,
-  message: { error: 'RATE_LIMIT_EXCEEDED', message: 'You can refresh up to 5 times per hour.' },
-  store: sharedRateLimitStore,
-});
-
-// IMPL-RATELIMIT-01 (new — C2): GET /:id/intel triggers THREE external
-// paid calls per request (one Exa/web search, two parallel Groq calls),
-// and was previously covered only by the blanket router-level
-// aiRateLimiter (30 req/min/user, applied at the app.js mount point) —
-// sized for this router's TYPICAL request cost, not for this specific
-// endpoint's much higher per-request cost. A user hitting many different
-// opportunity IDs (freely creatable) could still generate significant
-// real-dollar spend within that general limit. Sized similarly to
-// refreshRateLimiter above (a comparably expensive multi-call
-// operation), slightly more generous since /intel is triggered more
-// incidentally (viewing a detail page) than /refresh (a deliberate,
-// occasional action).
-const intelRateLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false,
-  keyGenerator: (req) => req.user?.id || req.ip,
-  message: { error: 'RATE_LIMIT_EXCEEDED', message: 'Too many prospect-intel requests. Please wait a bit before trying again.' },
-  store: sharedRateLimitStore,
-});
+// PHASE 3 (Redis Store & Rate Limiting Consistency refactor): these two
+// limiters previously shared ONE module-level `sharedRateLimitStore`
+// variable, itself built from `createRateLimitStore()` with no namespace
+// argument (defaulting to 'default' — the same collision-prone namespace
+// several OTHER unrelated limiters across the app also fell back to).
+// That meant refreshRateLimiter and intelRateLimiter — two genuinely
+// different actions with different costs — were incrementing the SAME
+// Redis counter for any user, since both key on `req.user?.id || req.ip`.
+// They're now LIMITERS.opportunitiesRefreshLimiter and
+// LIMITERS.opportunitiesIntelLimiter, each with its own namespace
+// ('opportunities_refresh' / 'opportunities_intel') defined once in
+// config/limiters.js. Behavior for each (5/hour and 10/hour respectively)
+// is unchanged — only the isolation is fixed.
+const refreshRateLimiter = LIMITERS.opportunitiesRefreshLimiter;
+const intelRateLimiter = LIMITERS.opportunitiesIntelLimiter;
 
 
 const computeIntelNeeded = (targetContext = '', targetName = '') => {

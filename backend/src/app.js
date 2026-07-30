@@ -1,4 +1,4 @@
-// src/app.js — v4.2
+// src/app.js — v4.3
 // Issue 16: aiRateLimiter added to /api/practice
 // Bug G:    coachRoutes was imported but never mounted — now at /api/coach
 // Issue 8:  clearProfileCache is async; call sites use fire-and-forget .catch(()=>{})
@@ -9,12 +9,31 @@
 // before errorHandler.js's own error handling — see config/sentry.js for
 // the full reasoning and for why this is fully optional at runtime
 // (no-ops entirely if SENTRY_DSN is unset).
+//
+// PHASE 3 (Redis Store & Rate Limiting Consistency refactor, this
+// revision): every rate limiter previously defined inline in this file
+// (authRateLimiter, aiRateLimiter, pipelineRateLimiter,
+// analyticsRateLimiter) is now defined once in config/limiters.js and
+// imported here as LIMITERS.*. Two real bugs this fixes:
+//   1. All four limiters below called `createRateLimitStore()` with NO
+//      namespace argument, which silently defaulted to the 'default'
+//      namespace — meaning all four shared one Redis key prefix AND (for
+//      the three keyed on `req.user?.id || req.ip`) could merge counters
+//      across logically-unrelated routers. See config/rateLimitStore.js
+//      and config/limiters.js header comments for the full explanation.
+//   2. A single aiRateLimiter (30/min/user) was applied uniformly across
+//      seven routers (onboarding, opportunities, goals, growth, calendar,
+//      chat, practice) with wildly different per-request cost profiles.
+//      Each AI-calling router now gets its own right-sized limiter — see
+//      config/limiters.js for the reasoning behind each one's specific
+//      numbers. sharedStore (the old single Redis-backed store variable)
+//      is gone; each limiter now owns its own namespaced store internally.
 import 'dotenv/config';
 import { validateEnv }                from './config/validateEnv.js';
 validateEnv();
 import { initSentry, setupSentryErrorHandler } from './config/sentry.js';
 initSentry();
-import { createRateLimitStore } from './config/rateLimitStore.js';
+import { LIMITERS } from './config/limiters.js';
 import cookieParser from 'cookie-parser';
 
 // Add this before your routes
@@ -23,7 +42,6 @@ import express       from 'express';
 import cors          from 'cors';
 import helmet        from 'helmet';
 import morgan        from 'morgan';
-import rateLimit     from 'express-rate-limit';
 import { initFirebase }            from './config/firebase.js';
 import authenticate, { clearProfileCache } from './middleware/auth.js';
 import { resolveWorkspace }        from './middleware/workspace.js';
@@ -55,67 +73,6 @@ import supabaseAdmin from './config/supabase.js';
 const app  = express();
 const PORT = 3001;
 
-// IMPL-RATELIMIT-01 (Phase 2 refactor / C2 + horizontal-scaling
-// instruction): every limiter below now uses the shared Redis-backed
-// store (config/rateLimitStore.js) instead of express-rate-limit's
-// default in-memory store, so limits are enforced correctly across every
-// instance in a horizontally-scaled deployment rather than each instance
-// independently allowing up to `max` requests (meaning the effective
-// limit a user experienced was previously closer to
-// (configured limit) × (instance count), not the configured limit
-// itself). sharedStore is `undefined` if Redis was unreachable at
-// startup — express-rate-limit falls back to its own in-memory store in
-// that case, degraded but functional (see rateLimitStore.js for the
-// fail-open reasoning).
-const sharedStore = await createRateLimitStore();
-
-// IMPL-RATELIMIT-01: this limiter was already defined here previously,
-// but was NEVER ACTUALLY MOUNTED on the /api/auth router — discovered
-// during this refactor's endpoint-by-endpoint rate-limit review. Every
-// auth route (login, register, password reset, email verification) was
-// running with ZERO rate limiting despite this configuration existing in
-// the file. Now correctly applied — see the app.use('/api/auth', ...)
-// line below.
-const authRateLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false,
-  keyGenerator: (req) => req.ip,
-  message: { error: 'RATE_LIMIT_EXCEEDED', message: 'Too many attempts. Try again in 15 minutes.' },
-  skip: (req) => req.path === '/refresh',
-  store: sharedStore,
-});
-
-const aiRateLimiter = rateLimit({
-  windowMs: 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false,
-  keyGenerator: (req) => req.user?.id || req.ip,
-  message: { error: 'RATE_LIMIT_EXCEEDED', message: 'Too many AI requests. Please slow down.' },
-  store: sharedStore,
-});
-
-const pipelineRateLimiter = rateLimit({
-  windowMs: 60 * 1000, max: 120, standardHeaders: true, legacyHeaders: false,
-  keyGenerator: (req) => req.user?.id || req.ip,
-  message: { error: 'RATE_LIMIT_EXCEEDED', message: 'Too many pipeline requests.' },
-  store: sharedStore,
-});
-
-// IMPL-RATELIMIT-01 (new): metrics.js has no AI calls (DB-load-driven,
-// not AI-cost-driven), so it doesn't belong under aiRateLimiter — but it
-// was entirely unprotected despite containing several heavy manager+/
-// owner+ workspace-wide multi-query aggregation endpoints (leaderboard,
-// team-overview, workspace/dashboard). 60/min/user is deliberately more
-// generous than aiRateLimiter's 30/min (these calls are cheaper
-// individually than an LLM call) but still a real bound — sized between
-// aiRateLimiter and pipelineRateLimiter's 120/min, reflecting that this
-// router mixes cheap single-table queries with genuinely heavy
-// aggregations.
-const analyticsRateLimiter = rateLimit({
-  windowMs: 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false,
-  keyGenerator: (req) => req.user?.id || req.ip,
-  message: { error: 'RATE_LIMIT_EXCEEDED', message: 'Too many analytics requests. Please slow down.' },
-  store: sharedStore,
-});
-
-
 app.use(cookieParser());
 app.use(helmet({ crossOriginEmbedderPolicy: false }));
 app.use(cors({
@@ -146,8 +103,13 @@ app.use(express.json({ limit: '2mb' }));
 app.set('trust proxy', 1);
 app.use(traceId);
 
-// Bull Board — protected by ADMIN_SECRET header
+// Bull Board — protected by ADMIN_SECRET header (authentication gate).
+// PHASE 3: adminLimiter added as defense-in-depth against
+// secret-guessing/replay traffic against an admin-only surface — this is
+// on top of, not instead of, the ADMIN_SECRET check, which remains the
+// real access control here.
 app.use('/admin/jobs',
+  LIMITERS.adminLimiter,
   (req, res, next) => {
     if (req.headers['x-admin-secret'] !== process.env.ADMIN_SECRET) {
       return res.status(401).json({ error: 'UNAUTHORIZED' });
@@ -159,14 +121,13 @@ app.use('/admin/jobs',
 
 app.get('/health', (req, res) => res.json({
   status:    'ok',
-  version:   '4.2.0',
+  version:   '4.3.0',
   timestamp: new Date().toISOString(),
 }));
 
-// IMPL-RATELIMIT-01: authRateLimiter is now actually applied here — see
-// its definition above for why this was previously a no-op despite being
-// configured.
-app.use('/api/auth', authRateLimiter, authRoutes);
+// PHASE 3: LIMITERS.authLimiter (was authRateLimiter, defined inline here
+// with a namespace-less, and therefore 'default'-namespaced, store).
+app.use('/api/auth', LIMITERS.authLimiter, authRoutes);
 
 // Issue 8: clearProfileCache is now async — fire-and-forget from the synchronous
 // 'finish' event callback so we don't need to await in an event handler.
@@ -186,56 +147,46 @@ app.use('/api/workspaces', authenticate, resolveWorkspace, workspaceRoutes);
 
 const ws = [authenticate, resolveWorkspace];
 
-// IMPL-RATELIMIT-01: aiRateLimiter added — discovered during the
-// endpoint-by-endpoint rate-limit review that /api/onboarding's routes
-// (GET /questions, POST /answers' final-burst voice-profile generation,
-// POST /sample-message, POST /rebuild-voice-profile) call Groq directly,
-// same as every other AI-calling router, but this one was the sole
-// AI-calling router mounted with NO aiRateLimiter at all — every other
-// AI router (opportunities, goals, growth, calendar, chat, practice)
-// already had it.
-app.use('/api/onboarding',  ...ws, aiRateLimiter, onboardingRoutes);
-app.use('/api/suggestions', ...ws, suggestionsRoutes);
+// PHASE 3: each AI-calling router now gets its own right-sized limiter
+// instead of one shared aiRateLimiter — see config/limiters.js for the
+// per-router cost reasoning behind each specific number.
+app.use('/api/onboarding',  ...ws, LIMITERS.onboardingLimiter, onboardingRoutes);
+app.use('/api/suggestions', ...ws, LIMITERS.suggestionsLimiter, suggestionsRoutes);
 app.use('/api/feedback',    ...ws, feedbackRoutes);
-// IMPL-RATELIMIT-01: upload's rate limiter is applied INSIDE upload.js,
-// scoped to POST / only (the actual expensive operation) rather than
-// here at the router-mount level — GET / (list files) and DELETE /:id
-// are cheap DB-only operations that shouldn't share a budget with file
-// uploads. See upload.js for the limiter definition, following the same
-// file-local convention already used by calendar.js/opportunities.js/
-// auth.js's own dedicated limiters.
+// Upload's rate limiter is applied INSIDE upload.js, scoped to POST /
+// only (the actual expensive operation) rather than here at the
+// router-mount level — GET / (list files) and DELETE /:id are cheap
+// DB-only operations that shouldn't share a budget with file uploads.
+// See upload.js for the limiter usage, following the same file-local
+// convention already used by calendar.js/opportunities.js/auth.js's own
+// dedicated limiters.
 app.use('/api/upload',      ...ws, uploadRoutes);
 
-// IMP-03: aiRateLimiter on all AI-calling routes
-app.use('/api/opportunities', ...ws, aiRateLimiter, opportunitiesRoutes);
-app.use('/api/goals',         ...ws, aiRateLimiter, goalsRoutes);
-app.use('/api/growth',        ...ws, aiRateLimiter, growthRoutes);
-app.use('/api/calendar',      ...ws, aiRateLimiter, calendarRoutes);
-app.use('/api/chat',          ...ws, aiRateLimiter, chatRoutes);
+app.use('/api/opportunities', ...ws, opportunitiesRoutes);
+app.use('/api/goals',         ...ws, LIMITERS.goalsLimiter, goalsRoutes);
+app.use('/api/growth',        ...ws, LIMITERS.growthLimiter, growthRoutes);
+app.use('/api/calendar',      ...ws, LIMITERS.calendarLimiter, calendarRoutes);
+app.use('/api/chat',          ...ws, LIMITERS.chatLimiter, chatRoutes);
 
-// Issue 16: aiRateLimiter added — POST /:sessionId/message calls Groq PRO_MODEL
-// synchronously on every request; without throttling a single user can saturate quota.
-app.use('/api/practice',    ...ws, aiRateLimiter, practiceRoutes);
+// Issue 16: POST /:sessionId/message calls Groq PRO_MODEL synchronously
+// on every request; practiceLimiter throttles this specifically.
+app.use('/api/practice',    ...ws, LIMITERS.practiceLimiter, practiceRoutes);
 
-app.use('/api/pipeline',    ...ws, pipelineRateLimiter, pipelineRoutes);
+app.use('/api/pipeline',    ...ws, LIMITERS.pipelineLimiter, pipelineRoutes);
 app.use('/api/followup',    ...ws, followupRoutes);
 app.use('/api/prospects',   ...ws, prospectsRoutes);
-app.use('/api/commitments', ...ws, commitmentsRoutes);
-// IMPL-RATELIMIT-01 (Phase 2 refactor): aiRateLimiter added — discovered
-// during this refactor's endpoint-by-endpoint rate-limit review that
-// insights.js has SIX distinct callWithFallbackGroq call sites
-// (/why-losing, /workspace/why-losing, /practice/coaching-report,
-// /intelligence, /win-story, /workspace/executive-report) and was, until
-// now, the only AI-calling router in the entire codebase mounted with
-// literally zero rate limiting of any kind.
-app.use('/api/insights',    ...ws, aiRateLimiter, insightsRoutes);
-// IMPL-RATELIMIT-01 (new): metrics.js is not AI-cost-driven (no LLM
-// calls anywhere in the file) but has 20+ endpoints including several
-// heavy manager+/owner+ workspace-wide multi-query aggregations
-// (leaderboard, team-overview, workspace/dashboard) — exactly the
-// "expensive analytics" category called out explicitly for this review.
-// See analyticsRateLimiter's definition above.
-app.use('/api/metrics',     ...ws, analyticsRateLimiter, metricsRoutes);
+app.use('/api/commitments', ...ws, LIMITERS.commitmentsLimiter, commitmentsRoutes);
+// insights.js has six distinct callWithFallbackGroq call sites but nearly
+// all are cache-shielded (4h-24h TTLs) — insightsLimiter is sized for
+// that cache-hit-majority profile. See config/limiters.js.
+app.use('/api/insights',    ...ws, LIMITERS.insightsLimiter, insightsRoutes);
+// metrics.js is not AI-cost-driven (no LLM calls anywhere in the file)
+// but has 20+ endpoints including several heavy manager+/owner+
+// workspace-wide multi-query aggregations (leaderboard, team-overview,
+// workspace/dashboard) — exactly the "expensive analytics" category this
+// limiter exists for. See analyticsLimiter's definition in
+// config/limiters.js.
+app.use('/api/metrics',     ...ws, LIMITERS.analyticsLimiter, metricsRoutes);
 
 // Bug G: coachRoutes was imported but never registered — mount point was missing entirely.
 
@@ -277,7 +228,7 @@ const startServer = async () => {
   // Start listening FIRST so a Redis/BullMQ outage never takes down the
   // whole API — only background jobs are affected, not incoming requests.
   app.listen(PORT, () => {
-    console.log('\n🚀 Clutch AI Backend v4.2');
+    console.log('\n🚀 Clutch AI Backend v4.3');
     console.log(`   Port: ${PORT} | Mode: ${process.env.NODE_ENV}`);
     console.log('   Bull Board: GET /admin/jobs (x-admin-secret required)\n');
   });

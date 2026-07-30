@@ -111,6 +111,17 @@ const MAX_HISTORY_ATTACHMENT_CONTEXT_CHARS = 2000;
 import { generateMeetingNotesResponse } from '../services/groqCalendarIntelligence.js';
 import supabaseAdmin from '../config/supabase.js';
 import { z } from 'zod';
+// PHASE 3 (Redis Store & Rate Limiting Consistency refactor): GET
+// /:chatId/export was previously entirely unprotected — no rate limiter
+// of any kind. It's a read-only DB query + string-building operation (no
+// AI, no external call), so the per-request cost is low, but a full
+// conversation history export is meaningfully heavier than an ordinary
+// message-list fetch and has a shape (rare, at-most-once-per-conversation
+// under normal use) that's easy to hit in a scripted loop. Given its own
+// light limiter (LIMITERS.exportLimiter) rather than folded into
+// chatLimiter, since export traffic doesn't resemble live chat-message
+// traffic at all. See config/limiters.js.
+import { LIMITERS } from '../config/limiters.js';
 
 // Supabase's query builder is only "thenable", not a real Promise — see
 // prior audit note. Promise.resolve() guarantees .catch() is safe to call.
@@ -950,7 +961,7 @@ function buildChatExportMarkdown(chat, messages) {
   return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim() + '\n';
 }
 
-router.get('/:chatId/export', asyncHandler(async (req, res) => {
+router.get('/:chatId/export', LIMITERS.exportLimiter, asyncHandler(async (req, res) => {
   const { chatId }  = req.params;
   const { format = 'markdown' } = req.query;
   const userId      = req.user.id;

@@ -24,10 +24,17 @@
 // Scope note: calendar sync, booking pages, and every other Integrations
 // item are intentionally NOT part of this pass — no sync/booking imports,
 // no meeting_url/external_provider/sync_status fields.
+//
+// PHASE 3 (Redis Store & Rate Limiting Consistency refactor): the
+// calendarAiRateLimiter previously defined inline in this file called
+// `createRateLimitStore()` with no namespace, silently sharing the
+// 'default' Redis key space with several other unrelated limiters. It's
+// now LIMITERS.calendarAiLimiter, defined once in config/limiters.js with
+// its own 'calendar_ai' namespace. Behavior (10 req / 5 min / user) is
+// unchanged.
 // ============================================================
 
 import { Router }    from 'express';
-import rateLimit     from 'express-rate-limit';
 import multer        from 'multer';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { buildUserContext, toAiJobContext, requirePermission } from '../middleware/workspace.js';
@@ -46,7 +53,7 @@ import { backgroundQueue }            from '../jobs/queues.js';
 import { BACKGROUND_JOB_TYPES, VOICE_MEMO_LIMITS } from '../config/constants.js';
 import supabaseAdmin from '../config/supabase.js';
 import { createLogger } from '../utils/logger.js';
-import { createRateLimitStore } from '../config/rateLimitStore.js';
+import { LIMITERS } from '../config/limiters.js';
 
 const router = Router();
 const { log, logError, logDB } = createLogger('Calendar');
@@ -59,17 +66,10 @@ const voiceMemoUpload = multer({
   limits: { fileSize: VOICE_MEMO_LIMITS.MAX_SIZE_BYTES },
 });
 
-// IMPL-RATELIMIT-01 (Phase 2 refactor): backed by the shared Redis store
-// (config/rateLimitStore.js) instead of express-rate-limit's default
-// in-memory store, so this limit is enforced correctly across every
-// instance in a horizontally-scaled deployment rather than each instance
-// independently allowing up to 10 requests per 5 minutes.
-const calendarAiRateLimiter = rateLimit({
-  windowMs: 5 * 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false,
-  keyGenerator: (req) => req.user.id,
-  message: { error: 'RATE_LIMIT_EXCEEDED', message: 'Too many AI requests. Please wait a few minutes.' },
-  store: await createRateLimitStore(),
-});
+// PHASE 3: LIMITERS.calendarAiLimiter (was calendarAiRateLimiter, defined
+// inline here with a namespace-less, and therefore 'default'-namespaced,
+// store). See config/limiters.js for the full registry.
+const calendarAiRateLimiter = LIMITERS.calendarAiLimiter;
 
 const isValidIsoDatetime = (v) => v == null || !Number.isNaN(Date.parse(v));
 

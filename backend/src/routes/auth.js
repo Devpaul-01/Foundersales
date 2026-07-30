@@ -2,42 +2,26 @@
 // ============================================================
 // AUTH ROUTES — HTTP-ONLY COOKIE REFRESH TOKEN
 // ============================================================
+//
+// PHASE 3 (Redis Store & Rate Limiting Consistency refactor): the
+// emailSendingRateLimiter previously defined inline in this file called
+// `createRateLimitStore()` with no namespace, silently defaulting to the
+// 'default' Redis key space shared by several other unrelated limiters
+// (see config/rateLimitStore.js header comment). It's now
+// LIMITERS.authEmailLimiter, defined once in config/limiters.js with its
+// own 'auth_email' namespace. Behavior (5/hour/IP) is unchanged.
 
 import { Router } from 'express';
 import { z } from 'zod';
-import rateLimit from 'express-rate-limit';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { validate } from '../middleware/validate.js';
 import supabaseAdmin from '../config/supabase.js';
 import authenticate from '../middleware/auth.js';
 import { createLogger } from '../utils/logger.js';
-import { createRateLimitStore } from '../config/rateLimitStore.js';
+import { LIMITERS } from '../config/limiters.js';
 
 const router = Router();
 const { log, logError, logDB, logJob } = createLogger('Auth');
-
-// IMPL-RATELIMIT-01 (Phase 2 refactor): the router-level authRateLimiter
-// (app.js, 10 req / 15 min / IP) covers general auth abuse (login,
-// register brute-forcing) but was the ONLY protection on this whole
-// router, and — per this refactor's endpoint-by-endpoint rate-limit
-// review — was until now not even actually being applied (see app.js's
-// IMPL-RATELIMIT-01 comment). Two specific endpoints here warrant an
-// ADDITIONAL, tighter, purpose-specific limit beyond the general one:
-// /forgot-password and /resend-verification both send an email to a
-// caller-supplied address on every request. Without a tighter bound,
-// the general 10/15min-per-IP limit would still allow someone to
-// email-bomb up to 10 different addresses per IP per 15 minutes — a
-// real abuse vector distinct from login brute-forcing, and one where
-// the cost lands on a third party (the recipient's inbox / your email
-// provider's reputation), not just on this API. 5/hour/IP is
-// deliberately tighter than the general auth limiter and keyed the same
-// way (by IP, since these endpoints are unauthenticated by definition).
-const emailSendingRateLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, max: 5, standardHeaders: true, legacyHeaders: false,
-  keyGenerator: (req) => req.ip,
-  message: { error: 'RATE_LIMIT_EXCEEDED', message: 'Too many requests. Please wait before trying again.' },
-  store: await createRateLimitStore(),
-});
 
 const elapsedMs = (startMs) => `${Date.now() - startMs}ms`;
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -273,7 +257,6 @@ router.post('/login', validate(loginSchema), asyncHandler(async (req, res) => {
 
   // Set refresh_token as HTTP-only cookie
   res.cookie('refresh_token', data.session.refresh_token, cookieConfig);
-  console.log(data.session.refresh_token);
 
   const userId = data.user?.id;
   
@@ -355,9 +338,7 @@ router.post('/refresh', asyncHandler(async (req, res) => {
       error: 'REFRESH_FAILED', 
       message: 'No refresh token found' 
     });
-    console.log("rwfredh token not found");
   }
-
 
   const { data, error } = await supabaseAdmin.auth.refreshSession({ refresh_token });
   
@@ -368,8 +349,6 @@ router.post('/refresh', asyncHandler(async (req, res) => {
       error: 'REFRESH_FAILED', 
       message: error.message 
     });
-    console.log("erroe refreshing token");
-
   }
 
 
@@ -429,7 +408,6 @@ router.post('/logout', asyncHandler(async (req, res) => {
 
 
 router.get('/me', authenticate, asyncHandler(async (req, res) => {
-  console.log("auth me called");
   const startTime = Date.now();
   const userId = req.user.id;
   const workspaceId = req.user.active_workspace_id;
@@ -636,38 +614,15 @@ router.post('/google/callback', asyncHandler(async (req, res) => {
   const { access_token, refresh_token, expires_in } = req.body;
   const clientIp = req.ip || req.headers['x-forwarded-for'] || 'unknown';
 
-  console.log('\n╔══════════════════════════════════════════════════════╗');
-  console.log('║           GOOGLE CALLBACK — START                   ║');
-  console.log('╚══════════════════════════════════════════════════════╝');
-  console.log('[GCB-1] Incoming body:', JSON.stringify({
-    has_access_token: !!access_token,
-    has_refresh_token: !!refresh_token,
-    expires_in,
-    ip: clientIp,
-  }, null, 2));
-
   if (!access_token) {
-    console.log('[GCB-ERR] No access_token in body — aborting');
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Access token required' });
   }
 
   try {
     // ── Step 1: Verify token with Supabase ─────────────────────
-    console.log('[GCB-2] Calling supabaseAdmin.auth.getUser(access_token)...');
     const { data: { user }, error } = await supabaseAdmin.auth.getUser(access_token);
 
-    console.log('[GCB-2] getUser result:', JSON.stringify({
-      userId: user?.id ?? null,
-      email: user?.email ?? null,
-      created_at: user?.created_at ?? null,
-      identities: user?.identities?.map(i => ({ provider: i.provider, id: i.id })) ?? [],
-      user_metadata_keys: user?.user_metadata ? Object.keys(user.user_metadata) : [],
-      has_password_meta: user?.user_metadata?.has_password ?? 'NOT SET',
-      error: error?.message ?? null,
-    }, null, 2));
-
     if (error || !user) {
-      console.log('[GCB-ERR] getUser failed — aborting');
       logError('POST /google/callback → getUser', error, { ip: clientIp });
       return res.status(401).json({
         error: 'GOOGLE_AUTH_FAILED',
@@ -676,10 +631,7 @@ router.post('/google/callback', asyncHandler(async (req, res) => {
     }
 
     if (refresh_token) {
-      console.log('[GCB-3] Setting refresh_token cookie');
       res.cookie('refresh_token', refresh_token, cookieConfig);
-    } else {
-      console.log('[GCB-3] No refresh_token provided — skipping cookie');
     }
 
     const userId    = user.id;
@@ -689,31 +641,15 @@ router.post('/google/callback', asyncHandler(async (req, res) => {
     // identity for every Google OAuth user, so identity presence ≠ password set.
     const hasPassword = user?.user_metadata?.has_password === true;
 
-    console.log('[GCB-4] Derived user fields:', JSON.stringify({
-      userId,
-      userEmail,
-      userName,
-      hasPassword,
-      hasPassword_from_metadata: user?.user_metadata?.has_password,
-    }, null, 2));
-
     let onboardingStatus = { step: 0, completed: false };
     let isNewUser = false;
 
     // ── Step 2: Check users table ──────────────────────────────
-    console.log('[GCB-5] Querying users table for userId:', userId);
     const { data: existingProfile, error: profileError } = await supabaseAdmin
       .from('users')
       .select('id, onboarding_completed, onboarding_step, active_workspace_id')
       .eq('id', userId)
       .single();
-
-    console.log('[GCB-5] users table result:', JSON.stringify({
-      found: !!existingProfile,
-      existingProfile,
-      error: profileError?.message ?? null,
-      error_code: profileError?.code ?? null,
-    }, null, 2));
 
     if (existingProfile) {
       // ── Step 3: Onboarding lookup via active_workspace_id ─────
@@ -722,8 +658,6 @@ router.post('/google/callback', asyncHandler(async (req, res) => {
       // canonical source of truth.
       try {
         if (existingProfile.active_workspace_id) {
-          console.log('[GCB-6] Looking up workspace_profiles via active_workspace_id:', existingProfile.active_workspace_id);
-
           const { data: wsProfile, error: wsError } = await supabaseAdmin
             .from('workspace_profiles')
             .select('onboarding_step, onboarding_completed')
@@ -731,25 +665,17 @@ router.post('/google/callback', asyncHandler(async (req, res) => {
             .eq('user_id', userId)
             .maybeSingle();
 
-          console.log('[GCB-6] workspace_profiles result:', JSON.stringify({
-            found: !!wsProfile,
-            wsProfile,
-            error: wsError?.message ?? null,
-          }, null, 2));
-
           if (wsProfile) {
             onboardingStatus = {
               step: wsProfile.onboarding_step || 0,
               completed: wsProfile.onboarding_completed || false,
             };
-            console.log('[GCB-6] onboardingStatus set from wsProfile:', onboardingStatus);
           } else {
             // Workspace profile not populated yet — fall back to users table
             onboardingStatus = {
               step: existingProfile.onboarding_step || 0,
               completed: existingProfile.onboarding_completed || false,
             };
-            console.log('[GCB-6] wsProfile not found — falling back to users table:', onboardingStatus);
           }
         } else {
           // No active workspace yet — use users table directly
@@ -757,10 +683,8 @@ router.post('/google/callback', asyncHandler(async (req, res) => {
             step: existingProfile.onboarding_step || 0,
             completed: existingProfile.onboarding_completed || false,
           };
-          console.log('[GCB-6] No active_workspace_id — using users table:', onboardingStatus);
         }
       } catch (err) {
-        console.log('[GCB-ERR] Workspace lookup threw an exception:', err.message, err.stack);
         log('GOOGLE CALLBACK onboarding fetch warning', { error: err.message });
         // Safe fallback
         onboardingStatus = {
@@ -770,30 +694,16 @@ router.post('/google/callback', asyncHandler(async (req, res) => {
       }
 
       // ── Step 5: isNewUser determination ───────────────────────
-      const accountAgeMs = Date.now() - new Date(user.created_at).getTime();
-      const wasIsNewUser = isNewUser;
       isNewUser = !onboardingStatus.completed && onboardingStatus.step === 0;
-
-      console.log('[GCB-8] isNewUser calculation:', JSON.stringify({
-        accountAgeMs,
-        accountAgeSeconds: Math.floor(accountAgeMs / 1000),
-        under30s: accountAgeMs < 30000,
-        onboarding_completed: onboardingStatus.completed,
-        onboarding_step: onboardingStatus.step,
-        isNewUser,
-        NOTE: 'isNewUser=true only if account < 30s AND step=0 AND not completed',
-      }, null, 2));
 
     } else {
       // ── No profile — brand new user ───────────────────────────
-      console.log('[GCB-5] No existing profile — treating as brand new user');
       isNewUser = true;
       const profileCreated = await createUserWithWorkspaceRetry(userId, {
         name: userName || null,
         email: userEmail,
         tier: 'free',
       });
-      console.log('[GCB-5] createUserWithWorkspaceRetry result:', { profileCreated });
 
       if (!profileCreated) {
         logError('POST /google/callback → createUserWithWorkspaceRetry', new Error('Profile creation failed'), { userId });
@@ -815,33 +725,10 @@ router.post('/google/callback', asyncHandler(async (req, res) => {
       onboarding: onboardingStatus,
     };
 
-    console.log('[GCB-9] ══ FINAL RESPONSE PAYLOAD ══', JSON.stringify({
-      userId,
-      isNewUser,
-      has_password: hasPassword,
-      onboarding: onboardingStatus,
-      EXPECTED_FRONTEND_ROUTE: isNewUser
-        ? 'ONBOARDING_BASIC (new user)'
-        : onboardingStatus.completed
-          ? 'HOME (completed)'
-          : onboardingStatus.step === 0
-            ? 'ONBOARDING_BASIC (step 0)'
-            : onboardingStatus.step === 1
-              ? '/onboarding/q/2'
-              : onboardingStatus.step === 2
-                ? '/onboarding/q/3'
-                : 'HOME (fallback)',
-    }, null, 2));
-
-    console.log('╔══════════════════════════════════════════════════════╗');
-    console.log('║           GOOGLE CALLBACK — END                     ║');
-    console.log('╚══════════════════════════════════════════════════════╝\n');
-
     log('GOOGLE CALLBACK Success', { userId, isNewUser, onboarding: onboardingStatus });
     res.json(responsePayload);
 
   } catch (err) {
-    console.log('[GCB-ERR] Unhandled exception in google/callback:', err.message, err.stack);
     logError('POST /google/callback', err, { ip: clientIp });
     res.status(500).json({
       error: 'GOOGLE_AUTH_FAILED',
@@ -852,10 +739,10 @@ router.post('/google/callback', asyncHandler(async (req, res) => {
 // ──────────────────────────────────────────
 // POST /api/auth/resend-verification
 // ──────────────────────────────────────────
-// IMPL-RATELIMIT-01: emailSendingRateLimiter added — see its definition
-// at the top of this file for why this endpoint specifically needs a
-// tighter, purpose-specific limit beyond the general router-level one.
-router.post('/resend-verification', emailSendingRateLimiter, asyncHandler(async (req, res) => {
+// PHASE 3: LIMITERS.authEmailLimiter — see file header for why this
+// endpoint specifically needs a tighter, purpose-specific limit beyond
+// the general router-level authLimiter.
+router.post('/resend-verification', LIMITERS.authEmailLimiter, asyncHandler(async (req, res) => {
   const { email } = req.body;
   if (!email?.trim()) {
     return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Email is required' });
@@ -913,9 +800,8 @@ router.post('/verify-email', asyncHandler(async (req, res) => {
 // ──────────────────────────────────────────
 // POST /api/auth/forgot-password
 // ──────────────────────────────────────────
-// IMPL-RATELIMIT-01: emailSendingRateLimiter added — see its definition
-// at the top of this file.
-router.post('/forgot-password', emailSendingRateLimiter, asyncHandler(async (req, res) => {
+// PHASE 3: LIMITERS.authEmailLimiter — see file header.
+router.post('/forgot-password', LIMITERS.authEmailLimiter, asyncHandler(async (req, res) => {
   const { email } = req.body;
 
   if (!email?.trim()) {

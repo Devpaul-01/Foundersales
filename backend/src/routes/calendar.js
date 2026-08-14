@@ -252,6 +252,10 @@ router.post('/', asyncHandler(async (req, res) => {
       message: 'start_time and end_time must be full ISO 8601 datetimes, not bare time strings.',
     });
   }
+  const extractEmail = (context) => {
+  const match = context?.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+  return match ? match[0] : null;
+};
 
   const workspaceProfile = req.workspaceProfile;
   const effectiveTimezone = event_timezone || workspaceProfile?.default_timezone || 'UTC';
@@ -261,8 +265,9 @@ router.post('/', asyncHandler(async (req, res) => {
   let resolvedProspectId = prospect_id || null;
   let prospectAutoCreated = false;
   if (shouldCreateProspect && !resolvedProspectId && attendee_name?.trim()) {
+    const email = extractEmail(attendee_context);
     resolvedProspectId = await resolveOrCreateProspect(userId, workspaceId, {
-      name: attendee_name, context: attendee_context,
+      name: attendee_name,email: email,   context: attendee_context,
     });
     prospectAutoCreated = !!resolvedProspectId;
   }

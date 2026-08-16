@@ -1,4 +1,37 @@
--- Public schema only (extracted from full Supabase dump)
+--
+-- PostgreSQL database dump
+--
+
+\restrict JAYd5WShn4Frbnh8BydktaFSp420oOBgifoW2FwVN7X2bD1zN8E2CW8g4yOq2WH
+
+-- Dumped from database version 17.6
+-- Dumped by pg_dump version 18.2
+
+SET statement_timeout = 0;
+SET lock_timeout = 0;
+SET idle_in_transaction_session_timeout = 0;
+SET transaction_timeout = 0;
+SET client_encoding = 'UTF8';
+SET standard_conforming_strings = on;
+SELECT pg_catalog.set_config('search_path', '', false);
+SET check_function_bodies = false;
+SET xmloption = content;
+SET client_min_messages = warning;
+SET row_security = off;
+
+--
+-- Name: public; Type: SCHEMA; Schema: -; Owner: -
+--
+
+CREATE SCHEMA public;
+
+
+--
+-- Name: SCHEMA public; Type: COMMENT; Schema: -; Owner: -
+--
+
+COMMENT ON SCHEMA public IS 'standard public schema';
+
 
 --
 -- Name: accept_workspace_invite(uuid, text); Type: FUNCTION; Schema: public; Owner: -
@@ -9,63 +42,117 @@ CREATE FUNCTION public.accept_workspace_invite(p_user_id uuid, p_token_hash text
     AS $$
 DECLARE
   v_member       workspace_members%ROWTYPE;
-  v_workspace_id UUID;
-  v_role         TEXT;
-BEGIN
-  -- Look up the pending invite
-  SELECT * INTO v_member
-  FROM   workspace_members
-  WHERE  invite_token  = p_token_hash
-    AND  status        = 'pending_invite'
-    AND  (invite_expires_at IS NULL OR invite_expires_at > NOW())
-  LIMIT 1
-  FOR UPDATE;
+    v_workspace_id UUID;
+      v_role         TEXT;
+        v_owner_id     UUID;
+          v_owner_profile workspace_profiles%ROWTYPE;
+          BEGIN
+            -- Get the pending invite
+              SELECT * INTO v_member
+                FROM   workspace_members
+                  WHERE  invite_token  = p_token_hash
+                      AND  status        = 'pending_invite'
+                          AND  (invite_expires_at IS NULL OR invite_expires_at > NOW())
+                            LIMIT 1
+                              FOR UPDATE;
 
-  IF NOT FOUND THEN
-    RETURN json_build_object('error', 'INVALID_OR_EXPIRED_TOKEN');
-  END IF;
+                                IF NOT FOUND THEN
+                                    RETURN json_build_object('error', 'INVALID_OR_EXPIRED_TOKEN');
+                                      END IF;
 
-  -- Check if user is already an active member
-  IF EXISTS (
-    SELECT 1 FROM workspace_members
-    WHERE workspace_id = v_member.workspace_id
-      AND user_id      = p_user_id
-      AND status       = 'active'
-  ) THEN
-    RETURN json_build_object('error', 'ALREADY_A_MEMBER');
-  END IF;
+                                        -- Check if already a member
+                                          IF EXISTS (
+                                              SELECT 1 FROM workspace_members
+                                                  WHERE workspace_id = v_member.workspace_id
+                                                        AND user_id      = p_user_id
+                                                              AND status       = 'active'
+                                                                ) THEN
+                                                                    RETURN json_build_object('error', 'ALREADY_A_MEMBER');
+                                                                      END IF;
 
-  v_workspace_id := v_member.workspace_id;
-  v_role         := v_member.role;
+                                                                        v_workspace_id := v_member.workspace_id;
+                                                                          v_role         := v_member.role;
 
-  -- Activate the membership
-  UPDATE workspace_members
-  SET    user_id      = p_user_id,
-         status       = 'active',
-         joined_at    = NOW(),
-         invite_token = NULL
-  WHERE  id = v_member.id;
+                                                                            -- Get workspace owner
+                                                                              SELECT owner_user_id INTO v_owner_id
+                                                                                FROM workspaces
+                                                                                  WHERE id = v_workspace_id;
 
-  -- Ensure a workspace_profile row exists for the new member
-  INSERT INTO workspace_profiles (workspace_id, user_id, onboarding_completed, onboarding_step)
-  VALUES (v_workspace_id, p_user_id, false, 0)
-  ON CONFLICT (workspace_id, user_id) DO NOTHING;
+                                                                                    -- Get owner's profile
+                                                                                      SELECT * INTO v_owner_profile
+                                                                                        FROM workspace_profiles
+                                                                                          WHERE workspace_id = v_workspace_id
+                                                                                              AND user_id = v_owner_id
+                                                                                                LIMIT 1;
 
-  -- Set active_workspace_id so the user can immediately use the workspace
-  UPDATE users
-  SET active_workspace_id = v_workspace_id
-  WHERE id = p_user_id;
+                                                                                                  -- Update invite to active membership
+                                                                                                    UPDATE workspace_members
+                                                                                                      SET    user_id      = p_user_id,
+                                                                                                               status       = 'active',
+                                                                                                                        joined_at    = NOW(),
+                                                                                                                                 invite_token = NULL
+                                                                                                                                   WHERE  id = v_member.id;
 
-  RETURN json_build_object(
-    'workspace_id', v_workspace_id,
-    'role',         v_role
-  );
+                                                                                                                                     -- Insert profile with defaults from owner (NO DUPLICATES)
+                                                                                                                                       INSERT INTO workspace_profiles (
+                                                                                                                                           workspace_id,
+                                                                                                                                               user_id,
+                                                                                                                                                   onboarding_completed,
+                                                                                                                                                       onboarding_step,
+                                                                                                                                                           onboarding_questions,
+                                                                                                                                                               preferred_platforms,
+                                                                                                                                                                   product_description,
+                                                                                                                                                                       target_audience,
+                                                                                                                                                                           voice_profile,
+                                                                                                                                                                               onboarding_answers,
+                                                                                                                                                                                   primary_goal,
+                                                                                                                                                                                       archetype,
+                                                                                                                                                                                           industry,
+                                                                                                                                                                                               business_stage
+                                                                                                                                                                                                 )
+                                                                                                                                                                                                   VALUES (
+                                                                                                                                                                                                       v_workspace_id,
+                                                                                                                                                                                                           p_user_id,
+                                                                                                                                                                                                               false,
+                                                                                                                                                                                                                   1,
+                                                                                                                                                                                                                       COALESCE(v_owner_profile.onboarding_questions, '{}'::jsonb),
+                                                                                                                                                                                                                           COALESCE(v_owner_profile.preferred_platforms, '{}'::text[]),
+                                                                                                                                                                                                                               v_owner_profile.product_description,
+                                                                                                                                                                                                                                   v_owner_profile.target_audience,
+                                                                                                                                                                                                                                       COALESCE(v_owner_profile.voice_profile, '{}'::jsonb),
+                                                                                                                                                                                                                                           COALESCE(v_owner_profile.onboarding_answers, '{}'::jsonb),
+                                                                                                                                                                                                                                               v_owner_profile.primary_goal,
+                                                                                                                                                                                                                                                   v_owner_profile.archetype,
+                                                                                                                                                                                                                                                       v_owner_profile.industry,
+                                                                                                                                                                                                                                                           v_owner_profile.business_stage
+                                                                                                                                                                                                                                                             )
+                                                                                                                                                                                                                                                               ON CONFLICT (workspace_id, user_id) DO UPDATE SET
+                                                                                                                                                                                                                                                                   onboarding_questions = EXCLUDED.onboarding_questions,
+                                                                                                                                                                                                                                                                       preferred_platforms = EXCLUDED.preferred_platforms,
+                                                                                                                                                                                                                                                                           product_description = EXCLUDED.product_description,
+                                                                                                                                                                                                                                                                               target_audience = EXCLUDED.target_audience,
+                                                                                                                                                                                                                                                                                   voice_profile = EXCLUDED.voice_profile,
+                                                                                                                                                                                                                                                                                       onboarding_answers = EXCLUDED.onboarding_answers,
+                                                                                                                                                                                                                                                                                           primary_goal = EXCLUDED.primary_goal,
+                                                                                                                                                                                                                                                                                               archetype = EXCLUDED.archetype,
+                                                                                                                                                                                                                                                                                                   industry = EXCLUDED.industry,
+                                                                                                                                                                                                                                                                                                       business_stage = EXCLUDED.business_stage;
 
-EXCEPTION
-  WHEN OTHERS THEN
-    RAISE;
-END;
-$$;
+                                                                                                                                                                                                                                                                                                         -- Update user's active workspace
+                                                                                                                                                                                                                                                                                                           UPDATE users
+                                                                                                                                                                                                                                                                                                             SET active_workspace_id = v_workspace_id
+                                                                                                                                                                                                                                                                                                               WHERE id = p_user_id;
+
+                                                                                                                                                                                                                                                                                                                 RETURN json_build_object(
+                                                                                                                                                                                                                                                                                                                     'workspace_id', v_workspace_id,
+                                                                                                                                                                                                                                                                                                                         'role',         v_role
+                                                                                                                                                                                                                                                                                                                           );
+
+                                                                                                                                                                                                                                                                                                                           EXCEPTION
+                                                                                                                                                                                                                                                                                                                             WHEN OTHERS THEN
+                                                                                                                                                                                                                                                                                                                                 RAISE;
+                                                                                                                                                                                                                                                                                                                                 END;
+                                                                                                                                                                                                                                                                                                                                 $$;
 
 
 --
@@ -191,6 +278,23 @@ $$;
 
 
 --
+-- Name: find_similar_prospects(uuid, uuid, text, numeric); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.find_similar_prospects(p_workspace_id uuid, p_prospect_id uuid, p_name text, p_threshold numeric) RETURNS TABLE(id uuid, similarity numeric)
+    LANGUAGE sql STABLE
+    AS $$
+  SELECT p.id, similarity(p.name, p_name) AS similarity
+  FROM prospects p
+  WHERE p.workspace_id = p_workspace_id
+    AND p.id != p_prospect_id
+    AND similarity(p.name, p_name) >= p_threshold
+  ORDER BY similarity DESC
+  LIMIT 5;
+$$;
+
+
+--
 -- Name: increment_chat_stats(uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -198,8 +302,8 @@ CREATE FUNCTION public.increment_chat_stats(p_chat_id uuid) RETURNS void
     LANGUAGE sql
     AS $$
   UPDATE chats
-  SET message_count   = COALESCE(message_count, 0) + 1,
-      last_message_at = NOW()
+  SET message_count    = COALESCE(message_count, 0) + 1,
+      last_message_at  = NOW()
   WHERE id = p_chat_id;
 $$;
 
@@ -219,65 +323,42 @@ $$;
 
 
 --
--- Name: increment_monthly_token_usage(uuid, date, bigint, bigint, integer); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.increment_monthly_token_usage(p_user_id uuid, p_month date, p_grok_tokens bigint DEFAULT 0, p_perplexity_tokens bigint DEFAULT 0, p_cost_cents integer DEFAULT 0) RETURNS void
-    LANGUAGE plpgsql SECURITY DEFINER
-    AS $$
-            BEGIN
-              INSERT INTO monthly_token_usage (
-                  user_id,
-                      month,
-                          grok_tokens_total,
-                              perplexity_tokens_total,
-                                  total_cost_cents,
-                                      allowance_used_pct,
-                                          created_at,
-                                              updated_at
-                                                )
-                                                  VALUES (
-                                                      p_user_id,
-                                                          p_month,
-                                                              p_grok_tokens,
-                                                                  p_perplexity_tokens,
-                                                                      p_cost_cents,
-                                                                          0,
-                                                                              NOW(),
-                                                                                  NOW()
-                                                                                    )
-                                                                                      ON CONFLICT (user_id, month)
-                                                                                        DO UPDATE SET
-                                                                                            grok_tokens_total       = monthly_token_usage.grok_tokens_total       + EXCLUDED.grok_tokens_total,
-                                                                                                perplexity_tokens_total = monthly_token_usage.perplexity_tokens_total + EXCLUDED.perplexity_tokens_total,
-                                                                                                    total_cost_cents        = monthly_token_usage.total_cost_cents        + EXCLUDED.total_cost_cents,
-                                                                                                        allowance_used_pct      = LEAST(100, ROUND(
-                                                                                                              (monthly_token_usage.perplexity_tokens_total + EXCLUDED.perplexity_tokens_total)::NUMERIC
-                                                                                                                    / NULLIF(COALESCE(monthly_token_usage.token_allowance, 50000), 0)
-                                                                                                                          * 100
-                                                                                                                              )),
-                                                                                                                                  updated_at              = NOW();
-                                                                                                                                  END;
-                                                                                                                                  $$;
-
-
---
 -- Name: increment_performance_stats(uuid, boolean); Type: FUNCTION; Schema: public; Owner: -
 --
 
 CREATE FUNCTION public.increment_performance_stats(p_user_id uuid, p_is_positive boolean) RETURNS void
     LANGUAGE plpgsql
     AS $$
+DECLARE
+  v_workspace_id uuid;
+BEGIN
+  SELECT active_workspace_id INTO v_workspace_id FROM users WHERE id = p_user_id;
+  IF v_workspace_id IS NULL THEN
+    RAISE WARNING 'increment_performance_stats(2-arg): user % has no active_workspace_id, skipping', p_user_id;
+    RETURN;
+  END IF;
+  PERFORM public.increment_performance_stats(p_user_id, p_is_positive, v_workspace_id);
+END;
+$$;
+
+
+--
+-- Name: increment_performance_stats(uuid, boolean, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.increment_performance_stats(p_user_id uuid, p_is_positive boolean, p_workspace_id uuid) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
 BEGIN
   INSERT INTO user_performance_profiles
-    (user_id, total_sent, total_positive, total_negative, positive_rate)
+    (user_id, workspace_id, total_sent, total_positive, total_negative, positive_rate)
   VALUES (
-    p_user_id, 1,
+    p_user_id, p_workspace_id, 1,
     CASE WHEN p_is_positive THEN 1 ELSE 0 END,
     CASE WHEN p_is_positive THEN 0 ELSE 1 END,
     CASE WHEN p_is_positive THEN 1.0 ELSE 0.0 END
   )
-  ON CONFLICT (user_id) DO UPDATE SET
+  ON CONFLICT (user_id, workspace_id) DO UPDATE SET
     total_sent     = user_performance_profiles.total_sent + 1,
     total_positive = user_performance_profiles.total_positive
                      + (CASE WHEN p_is_positive THEN 1 ELSE 0 END),
@@ -287,155 +368,43 @@ BEGIN
       (user_performance_profiles.total_positive
        + (CASE WHEN p_is_positive THEN 1 ELSE 0 END))::NUMERIC
       / (user_performance_profiles.total_sent + 1), 4
-    );
+    ),
+    updated_at = now();
 END;
 $$;
 
 
 --
--- Name: increment_perplexity_global_usage(text); Type: FUNCTION; Schema: public; Owner: -
+-- Name: increment_performance_stats(uuid, uuid, boolean); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.increment_perplexity_global_usage(p_date text) RETURNS void
-    LANGUAGE sql
+CREATE FUNCTION public.increment_performance_stats(p_workspace_id uuid, p_user_id uuid, p_is_positive boolean) RETURNS void
+    LANGUAGE plpgsql
     AS $$
-  INSERT INTO global_usage (date, perplexity_calls)
-  VALUES (p_date::DATE, 1)
-  ON CONFLICT (date)
-  DO UPDATE SET perplexity_calls = global_usage.perplexity_calls + 1;
-$$;
-
-
---
--- Name: increment_perplexity_usage(uuid, date, integer); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.increment_perplexity_usage(p_user_id uuid, p_date date, p_cost_cents integer DEFAULT 5) RETURNS void
-    LANGUAGE plpgsql SECURITY DEFINER
-    AS $$
-        BEGIN
-          -- Per-user usage
-            INSERT INTO perplexity_usage (user_id, date, call_count)
-              VALUES (p_user_id, p_date, 1)
-                ON CONFLICT (user_id, date)
-                  DO UPDATE SET call_count = perplexity_usage.call_count + 1;
-
-                    -- Global usage
-                      INSERT INTO global_usage (date, perplexity_calls)
-                        VALUES (p_date, 1)
-                          ON CONFLICT (date)
-                            DO UPDATE SET
-                                perplexity_calls = global_usage.perplexity_calls + 1,
-                                    updated_at       = NOW();
-                                    END;
-                                    $$;
-
-
---
--- Name: increment_perplexity_user_usage(uuid, text); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.increment_perplexity_user_usage(p_user_id uuid, p_date text) RETURNS void
-    LANGUAGE sql
-    AS $$
-  INSERT INTO perplexity_usage (user_id, date, call_count)
-  VALUES (p_user_id, p_date::DATE, 1)
-  ON CONFLICT (user_id, date)
-  DO UPDATE SET call_count = perplexity_usage.call_count + 1;
-$$;
-
-
---
--- Name: increment_token_usage(uuid, date, text, integer, integer, integer); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.increment_token_usage(p_user_id uuid, p_date date, p_model text, p_tokens_in integer DEFAULT 0, p_tokens_out integer DEFAULT 0, p_cost_cents integer DEFAULT 0) RETURNS void
-    LANGUAGE plpgsql SECURITY DEFINER
-    AS $$
-              BEGIN
-                INSERT INTO usage_tracking (
-                    user_id, date,
-                        grok_calls, grok_tokens, grok_tokens_in, grok_tokens_out,
-                            perplexity_calls, perplexity_tokens, perplexity_tokens_in, perplexity_tokens_out,
-                                estimated_cost_cents
-                                  )
-                                    VALUES (
-                                        p_user_id, p_date,
-
-                                            CASE WHEN p_model = 'grok' THEN 1 ELSE 0 END,
-                                                CASE WHEN p_model = 'grok' THEN p_tokens_in + p_tokens_out ELSE 0 END,
-                                                    CASE WHEN p_model = 'grok' THEN p_tokens_in ELSE 0 END,
-                                                        CASE WHEN p_model = 'grok' THEN p_tokens_out ELSE 0 END,
-
-                                                            CASE WHEN p_model = 'perplexity' THEN 1 ELSE 0 END,
-                                                                CASE WHEN p_model = 'perplexity' THEN p_tokens_in + p_tokens_out ELSE 0 END,
-                                                                    CASE WHEN p_model = 'perplexity' THEN p_tokens_in ELSE 0 END,
-                                                                        CASE WHEN p_model = 'perplexity' THEN p_tokens_out ELSE 0 END,
-
-                                                                            p_cost_cents
-                                                                              )
-                                                                                ON CONFLICT (user_id, date)
-                                                                                  DO UPDATE SET
-
-                                                                                      grok_calls =
-                                                                                            usage_tracking.grok_calls +
-                                                                                                  CASE WHEN p_model = 'grok' THEN 1 ELSE 0 END,
-
-                                                                                                      grok_tokens =
-                                                                                                            usage_tracking.grok_tokens +
-                                                                                                                  CASE WHEN p_model = 'grok'
-                                                                                                                        THEN p_tokens_in + p_tokens_out ELSE 0 END,
-
-                                                                                                                            grok_tokens_in =
-                                                                                                                                  usage_tracking.grok_tokens_in +
-                                                                                                                                        CASE WHEN p_model = 'grok'
-                                                                                                                                              THEN p_tokens_in ELSE 0 END,
-
-                                                                                                                                                  grok_tokens_out =
-                                                                                                                                                        usage_tracking.grok_tokens_out +
-                                                                                                                                                              CASE WHEN p_model = 'grok'
-                                                                                                                                                                    THEN p_tokens_out ELSE 0 END,
-
-                                                                                                                                                                        perplexity_calls =
-                                                                                                                                                                              usage_tracking.perplexity_calls +
-                                                                                                                                                                                    CASE WHEN p_model = 'perplexity'
-                                                                                                                                                                                          THEN 1 ELSE 0 END,
-
-                                                                                                                                                                                              perplexity_tokens =
-                                                                                                                                                                                                    usage_tracking.perplexity_tokens +
-                                                                                                                                                                                                          CASE WHEN p_model = 'perplexity'
-                                                                                                                                                                                                                THEN p_tokens_in + p_tokens_out ELSE 0 END,
-
-                                                                                                                                                                                                                    perplexity_tokens_in =
-                                                                                                                                                                                                                          usage_tracking.perplexity_tokens_in +
-                                                                                                                                                                                                                                CASE WHEN p_model = 'perplexity'
-                                                                                                                                                                                                                                      THEN p_tokens_in ELSE 0 END,
-
-                                                                                                                                                                                                                                          perplexity_tokens_out =
-                                                                                                                                                                                                                                                usage_tracking.perplexity_tokens_out +
-                                                                                                                                                                                                                                                      CASE WHEN p_model = 'perplexity'
-                                                                                                                                                                                                                                                            THEN p_tokens_out ELSE 0 END,
-
-                                                                                                                                                                                                                                                                estimated_cost_cents =
-                                                                                                                                                                                                                                                                      usage_tracking.estimated_cost_cents +
-                                                                                                                                                                                                                                                                            p_cost_cents;
-
-                                                                                                                                                                                                                                                                            END;
-                                                                                                                                                                                                                                                                            $$;
-
-
---
--- Name: increment_workspace_perplexity_usage(uuid, text); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.increment_workspace_perplexity_usage(p_workspace_id uuid, p_date text) RETURNS void
-    LANGUAGE sql
-    AS $$
-  INSERT INTO workspace_perplexity_usage (workspace_id, date, call_count)
-  VALUES (p_workspace_id, p_date::DATE, 1)
-  ON CONFLICT (workspace_id, date)
-  DO UPDATE SET call_count = workspace_perplexity_usage.call_count + 1;
-$$;
+                    BEGIN
+                      INSERT INTO user_performance_profiles
+                          (workspace_id, user_id, total_sent, total_positive, total_negative, positive_rate)
+                            VALUES (
+                                p_workspace_id,
+                                    p_user_id,
+                                        1,
+                                            CASE WHEN p_is_positive THEN 1 ELSE 0 END,
+                                                CASE WHEN p_is_positive THEN 0 ELSE 1 END,
+                                                    CASE WHEN p_is_positive THEN 1.0 ELSE 0.0 END
+                                                      )
+                                                        ON CONFLICT (workspace_id, user_id) DO UPDATE SET
+                                                            total_sent     = user_performance_profiles.total_sent + 1,
+                                                                total_positive = user_performance_profiles.total_positive
+                                                                                     + (CASE WHEN p_is_positive THEN 1 ELSE 0 END),
+                                                                                         total_negative = user_performance_profiles.total_negative
+                                                                                                              + (CASE WHEN p_is_positive THEN 0 ELSE 1 END),
+                                                                                                                  positive_rate  = ROUND(
+                                                                                                                        (user_performance_profiles.total_positive
+                                                                                                                               + (CASE WHEN p_is_positive THEN 1 ELSE 0 END))::NUMERIC
+                                                                                                                                     / (user_performance_profiles.total_sent + 1), 4
+                                                                                                                                         );
+                                                                                                                                         END;
+                                                                                                                                         $$;
 
 
 --
@@ -451,6 +420,47 @@ CREATE FUNCTION public.is_workspace_member(ws_id uuid) RETURNS boolean
       AND user_id      = auth.uid()
       AND status       = 'active'
   );
+$$;
+
+
+--
+-- Name: record_ai_usage(uuid, uuid, text, text, text, text, integer, integer, numeric, integer, text, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.record_ai_usage(p_workspace_id uuid, p_user_id uuid, p_provider text, p_event_type text, p_model text, p_tier text, p_tokens_in integer, p_tokens_out integer, p_credits_used numeric, p_cost_cents integer, p_source_job text, p_metadata jsonb) RETURNS uuid
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  v_event_id     uuid;
+  v_total_tokens integer := COALESCE(p_tokens_in, 0) + COALESCE(p_tokens_out, 0);
+  v_today        date := CURRENT_DATE;
+BEGIN
+  INSERT INTO ai_usage_events (
+    workspace_id, user_id, provider, event_type, model, tier,
+    tokens_in, tokens_out, total_tokens, credits_used,
+    estimated_cost_cents, source_job, metadata
+  ) VALUES (
+    p_workspace_id, p_user_id, p_provider, p_event_type, p_model, p_tier,
+    COALESCE(p_tokens_in, 0), COALESCE(p_tokens_out, 0), v_total_tokens,
+    COALESCE(p_credits_used, 0), COALESCE(p_cost_cents, 0), p_source_job,
+    COALESCE(p_metadata, '{}'::jsonb)
+  )
+  RETURNING id INTO v_event_id;
+
+  INSERT INTO workspace_ai_usage_daily (
+    workspace_id, date, provider, call_count, total_tokens, total_credits, estimated_cost_cents
+  ) VALUES (
+    p_workspace_id, v_today, p_provider, 1, v_total_tokens, COALESCE(p_credits_used, 0), COALESCE(p_cost_cents, 0)
+  )
+  ON CONFLICT (workspace_id, date, provider) DO UPDATE SET
+    call_count            = workspace_ai_usage_daily.call_count + 1,
+    total_tokens          = workspace_ai_usage_daily.total_tokens + v_total_tokens,
+    total_credits         = workspace_ai_usage_daily.total_credits + COALESCE(p_credits_used, 0),
+    estimated_cost_cents  = workspace_ai_usage_daily.estimated_cost_cents + COALESCE(p_cost_cents, 0),
+    updated_at            = now();
+
+  RETURN v_event_id;
+END;
 $$;
 
 
@@ -550,22 +560,37 @@ BEGIN
 
 
 --
+-- Name: update_updated_at_column(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.update_updated_at_column() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    NEW.updated_at = NOW();
+        RETURN NEW;
+        END;
+        $$;
+
+
+--
 -- Name: upsert_objection_count(uuid, text, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
 CREATE FUNCTION public.upsert_objection_count(p_user_id uuid, p_objection_type text, p_phrase text) RETURNS void
     LANGUAGE plpgsql
     AS $$
-    BEGIN
-      INSERT INTO objection_tracker
-          (user_id, objection_type, objection_phrase, occurrence_count, last_seen_at)
-            VALUES (p_user_id, p_objection_type, p_phrase, 1, NOW())
-              ON CONFLICT (user_id, objection_type)
-                DO UPDATE SET
-                    occurrence_count = objection_tracker.occurrence_count + 1,
-                        last_seen_at = NOW();
-                        END;
-                        $$;
+DECLARE
+  v_workspace_id uuid;
+BEGIN
+  SELECT active_workspace_id INTO v_workspace_id FROM users WHERE id = p_user_id;
+  IF v_workspace_id IS NULL THEN
+    RAISE WARNING 'upsert_objection_count(3-arg): user % has no active_workspace_id, skipping', p_user_id;
+    RETURN;
+  END IF;
+  PERFORM public.upsert_objection_count(v_workspace_id, p_user_id, p_objection_type, p_phrase);
+END;
+$$;
 
 
 --
@@ -575,14 +600,14 @@ CREATE FUNCTION public.upsert_objection_count(p_user_id uuid, p_objection_type t
 CREATE FUNCTION public.upsert_objection_count(p_workspace_id uuid, p_user_id uuid, p_objection_type text, p_phrase text) RETURNS void
     LANGUAGE sql
     AS $$
-  INSERT INTO objection_tracker
-    (workspace_id, user_id, objection_type, objection_phrase, occurrence_count, last_seen_at)
-  VALUES (p_workspace_id, p_user_id, p_objection_type, p_phrase, 1, now())
-  ON CONFLICT (workspace_id, user_id, objection_type)
-  DO UPDATE SET
-    occurrence_count = objection_tracker.occurrence_count + 1,
-    last_seen_at     = now();
-$$;
+                  INSERT INTO objection_tracker
+                      (workspace_id, user_id, objection_type, objection_phrase, occurrence_count, last_seen_at)
+                        VALUES (p_workspace_id, p_user_id, p_objection_type, p_phrase, 1, now())
+                          ON CONFLICT (workspace_id, user_id, objection_type)
+                            DO UPDATE SET
+                                occurrence_count = objection_tracker.occurrence_count + 1,
+                                    last_seen_at     = now();
+                                    $$;
 
 
 --
@@ -592,17 +617,31 @@ $$;
 CREATE FUNCTION public.upsert_objection_tracker(p_user_id uuid, p_objection_type text, p_objection_phrase text) RETURNS void
     LANGUAGE plpgsql
     AS $$
-        BEGIN
-          INSERT INTO objection_tracker
-              (user_id, objection_type, objection_phrase, occurrence_count, last_seen_at)
-                VALUES
-                    (p_user_id, p_objection_type, p_objection_phrase, 1, NOW())
-                      ON CONFLICT (user_id, objection_type) DO UPDATE SET
-                          occurrence_count = objection_tracker.occurrence_count + 1,
-                              last_seen_at     = NOW(),
-                                  objection_phrase = EXCLUDED.objection_phrase;
-                                  END;
-                                  $$;
+DECLARE
+  v_workspace_id uuid;
+BEGIN
+  SELECT active_workspace_id INTO v_workspace_id FROM users WHERE id = p_user_id;
+  IF v_workspace_id IS NULL THEN
+    RAISE WARNING 'upsert_objection_tracker: user % has no active_workspace_id, skipping', p_user_id;
+    RETURN;
+  END IF;
+  PERFORM public.upsert_objection_count(v_workspace_id, p_user_id, p_objection_type, p_objection_phrase);
+END;
+$$;
+
+
+--
+-- Name: voice_memos_tsv_trigger(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.voice_memos_tsv_trigger() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  NEW.transcript_tsv := to_tsvector('english', COALESCE(NEW.transcript_text, ''));
+  RETURN NEW;
+END;
+$$;
 
 
 --
@@ -618,6 +657,103 @@ CREATE FUNCTION public.workspace_role(ws_id uuid) RETURNS text
     AND status       = 'active'
   LIMIT 1;
 $$;
+
+
+SET default_tablespace = '';
+
+SET default_table_access_method = heap;
+
+--
+-- Name: ai_usage_events; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ai_usage_events (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    workspace_id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    provider text NOT NULL,
+    event_type text NOT NULL,
+    model text,
+    tier text,
+    tokens_in integer DEFAULT 0 NOT NULL,
+    tokens_out integer DEFAULT 0 NOT NULL,
+    total_tokens integer DEFAULT 0 NOT NULL,
+    credits_used numeric(10,4) DEFAULT 0 NOT NULL,
+    estimated_cost_cents integer DEFAULT 0 NOT NULL,
+    source_job text,
+    metadata jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: availability_windows; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.availability_windows (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    workspace_id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    day_of_week integer NOT NULL,
+    start_time time without time zone NOT NULL,
+    end_time time without time zone NOT NULL,
+    timezone text NOT NULL,
+    is_active boolean DEFAULT true,
+    CONSTRAINT availability_windows_day_of_week_check CHECK (((day_of_week >= 0) AND (day_of_week <= 6))),
+    CONSTRAINT chk_window_order CHECK ((start_time < end_time))
+);
+
+
+--
+-- Name: booking_pages; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.booking_pages (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    workspace_id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    slug text NOT NULL,
+    title text DEFAULT 'Book a meeting'::text,
+    duration_minutes integer DEFAULT 30,
+    buffer_minutes integer DEFAULT 10,
+    max_days_ahead integer DEFAULT 30,
+    is_active boolean DEFAULT true,
+    created_at timestamp with time zone DEFAULT now(),
+    updated_at timestamp with time zone DEFAULT now()
+);
+
+
+--
+-- Name: cached_suggestions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cached_suggestions (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    workspace_id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    suggestions jsonb NOT NULL,
+    profile_hash text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    updated_at timestamp with time zone DEFAULT now()
+);
+
+
+--
+-- Name: calendar_ai_events; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.calendar_ai_events (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    workspace_id uuid NOT NULL,
+    user_id uuid,
+    event_id uuid,
+    ai_function text NOT NULL,
+    gate_decision text NOT NULL,
+    gate_reason text,
+    model_tier text,
+    created_at timestamp with time zone DEFAULT now()
+);
 
 
 --
@@ -649,6 +785,8 @@ CREATE TABLE public.chat_messages (
     chunk_index integer DEFAULT 0,
     parent_message_id uuid,
     workspace_id uuid NOT NULL,
+    attachment_context jsonb,
+    seq bigint NOT NULL,
     CONSTRAINT chat_messages_delivery_status_check CHECK ((delivery_status = ANY (ARRAY['sent'::text, 'delivered'::text, 'seen'::text, 'replied'::text, 'ghosted'::text]))),
     CONSTRAINT chat_messages_role_check CHECK ((role = ANY (ARRAY['user'::text, 'assistant'::text, 'system'::text])))
 );
@@ -690,6 +828,25 @@ COMMENT ON COLUMN public.chat_messages.parent_message_id IS 'Links chunk message
 
 
 --
+-- Name: chat_messages_seq_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.chat_messages_seq_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: chat_messages_seq_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.chat_messages_seq_seq OWNED BY public.chat_messages.seq;
+
+
+--
 -- Name: chat_topic_tags; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -727,8 +884,32 @@ CREATE TABLE public.chats (
     signals_extracted boolean DEFAULT false,
     debrief_generated boolean DEFAULT false,
     workspace_id uuid NOT NULL,
+    growth_card_id uuid,
+    seq bigint NOT NULL,
+    summary text,
+    last_summarized_message_count integer DEFAULT 0,
+    summary_updated_at timestamp with time zone,
     CONSTRAINT chats_chat_type_check CHECK ((chat_type = ANY (ARRAY['general'::text, 'opportunity'::text, 'practice'::text])))
 );
+
+
+--
+-- Name: chats_seq_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.chats_seq_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: chats_seq_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.chats_seq_seq OWNED BY public.chats.seq;
 
 
 --
@@ -872,6 +1053,23 @@ CREATE TABLE public.daily_metrics (
 
 
 --
+-- Name: event_attendees; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.event_attendees (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    event_id uuid NOT NULL,
+    workspace_id uuid NOT NULL,
+    prospect_id uuid,
+    name text NOT NULL,
+    email text,
+    role text DEFAULT 'attendee'::text,
+    is_primary boolean DEFAULT false,
+    created_at timestamp with time zone DEFAULT now()
+);
+
+
+--
 -- Name: feature_usage_events; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -905,7 +1103,8 @@ CREATE TABLE public.feedback (
     scheduled_call_date timestamp with time zone,
     scheduled_call_notes text,
     workspace_id uuid NOT NULL,
-    CONSTRAINT feedback_outcome_check CHECK ((outcome = ANY (ARRAY['positive'::text, 'negative'::text])))
+    updated_at timestamp with time zone DEFAULT now(),
+    CONSTRAINT feedback_outcome_check CHECK ((outcome = ANY (ARRAY['positive'::text, 'negative'::text, 'pending'::text])))
 );
 
 
@@ -926,19 +1125,8 @@ CREATE TABLE public.file_uploads (
     file_type text,
     chat_id uuid,
     message_id uuid,
+    resource_type text,
     CONSTRAINT file_uploads_file_type_check CHECK ((file_type = ANY (ARRAY['image'::text, 'pdf'::text, 'document'::text, 'other'::text])))
-);
-
-
---
--- Name: global_usage; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.global_usage (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    date date DEFAULT CURRENT_DATE,
-    perplexity_calls integer DEFAULT 0,
-    total_estimated_cost_cents integer DEFAULT 0
 );
 
 
@@ -1000,7 +1188,8 @@ CREATE TABLE public.job_logs (
     users_processed integer DEFAULT 0,
     opportunities_found integer DEFAULT 0,
     error_message text,
-    duration_ms integer
+    duration_ms integer,
+    metadata jsonb DEFAULT '{}'::jsonb
 );
 
 
@@ -1020,24 +1209,6 @@ CREATE TABLE public.message_queue (
     max_attempts integer DEFAULT 3,
     last_error text,
     CONSTRAINT message_queue_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'executing'::text, 'done'::text, 'failed'::text, 'cancelled'::text])))
-);
-
-
---
--- Name: monthly_token_usage; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.monthly_token_usage (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    user_id uuid NOT NULL,
-    month date NOT NULL,
-    grok_tokens_total integer DEFAULT 0,
-    perplexity_tokens_total integer DEFAULT 0,
-    total_cost_cents integer DEFAULT 0,
-    token_allowance integer DEFAULT 100000,
-    allowance_used_pct numeric DEFAULT 0,
-    created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now()
 );
 
 
@@ -1105,20 +1276,10 @@ CREATE TABLE public.opportunities (
     intel_needed boolean DEFAULT false,
     workspace_id uuid NOT NULL,
     assigned_to uuid,
+    updated_at timestamp with time zone DEFAULT now(),
+    follow_up_dismissed_at timestamp with time zone,
+    follow_up_viewed_at timestamp with time zone,
     CONSTRAINT opportunities_stage_check CHECK ((stage = ANY (ARRAY['new'::text, 'contacted'::text, 'replied'::text, 'call_demo'::text, 'closed_won'::text, 'closed_lost'::text])))
-);
-
-
---
--- Name: perplexity_usage; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.perplexity_usage (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    user_id uuid NOT NULL,
-    date date NOT NULL,
-    call_count integer DEFAULT 0 NOT NULL,
-    created_at timestamp with time zone DEFAULT now()
 );
 
 
@@ -1156,7 +1317,8 @@ CREATE TABLE public.practice_badges (
     earned_at timestamp with time zone DEFAULT now(),
     badge_type text NOT NULL,
     badge_label text,
-    badge_description text
+    badge_description text,
+    workspace_id uuid NOT NULL
 );
 
 
@@ -1187,7 +1349,8 @@ CREATE TABLE public.practice_drills (
     score_before numeric(5,2),
     score_after numeric(5,2),
     completed_at timestamp with time zone,
-    created_at timestamp with time zone DEFAULT now()
+    created_at timestamp with time zone DEFAULT now(),
+    workspace_id uuid NOT NULL
 );
 
 
@@ -1267,6 +1430,7 @@ CREATE TABLE public.practice_sessions (
     outcome_determined_at timestamp with time zone,
     ai_ended_session boolean DEFAULT false,
     interruption_count integer DEFAULT 0,
+    workspace_id uuid NOT NULL,
     CONSTRAINT practice_sessions_rating_check CHECK (((rating >= 1) AND (rating <= 5)))
 );
 
@@ -1312,6 +1476,25 @@ CREATE TABLE public.prospect_insights (
 
 
 --
+-- Name: prospect_merge_candidates; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.prospect_merge_candidates (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    workspace_id uuid NOT NULL,
+    prospect_id_a uuid NOT NULL,
+    prospect_id_b uuid NOT NULL,
+    similarity_score numeric(4,3),
+    match_reason text NOT NULL,
+    status text DEFAULT 'pending'::text,
+    created_at timestamp with time zone DEFAULT now(),
+    resolved_at timestamp with time zone,
+    resolved_by uuid,
+    CONSTRAINT chk_distinct_prospects CHECK ((prospect_id_a <> prospect_id_b))
+);
+
+
+--
 -- Name: prospects; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1335,7 +1518,8 @@ CREATE TABLE public.prospects (
     notes text,
     created_at timestamp with time zone DEFAULT now(),
     updated_at timestamp with time zone DEFAULT now(),
-    workspace_id uuid NOT NULL
+    workspace_id uuid NOT NULL,
+    name_normalized text GENERATED ALWAYS AS (lower(regexp_replace(TRIM(BOTH FROM name), '\s+'::text, ' '::text, 'g'::text))) STORED
 );
 
 
@@ -1374,27 +1558,10 @@ CREATE TABLE public.skill_progression (
     top_weakness text,
     top_strength text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    workspace_id uuid NOT NULL
-);
-
-
---
--- Name: usage_tracking; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.usage_tracking (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    user_id uuid NOT NULL,
-    date date DEFAULT CURRENT_DATE,
-    perplexity_calls integer DEFAULT 0,
-    grok_calls integer DEFAULT 0,
-    perplexity_tokens integer DEFAULT 0,
-    grok_tokens integer DEFAULT 0,
-    grok_tokens_in integer DEFAULT 0,
-    grok_tokens_out integer DEFAULT 0,
-    perplexity_tokens_in integer DEFAULT 0,
-    perplexity_tokens_out integer DEFAULT 0,
-    estimated_cost_cents integer DEFAULT 0
+    workspace_id uuid NOT NULL,
+    discovery_score_avg numeric(4,2),
+    objection_score_avg numeric(4,2),
+    brevity_score_avg numeric(4,2)
 );
 
 
@@ -1430,8 +1597,48 @@ CREATE TABLE public.user_events (
     research_generated_at timestamp with time zone,
     follow_up_options jsonb,
     follow_up_generated_at timestamp with time zone,
-    workspace_id uuid NOT NULL
+    workspace_id uuid NOT NULL,
+    timezone text,
+    recurrence_rule text,
+    recurrence_parent_id uuid,
+    recurrence_exception_dates date[] DEFAULT '{}'::date[],
+    prep_failed boolean DEFAULT false,
+    prep_failed_at timestamp with time zone,
+    prep_failure_reason text,
+    reschedule_count integer DEFAULT 0,
+    original_event_date date,
+    original_start_time timestamp with time zone,
+    follow_up_variant_sent text,
+    follow_up_sent_at timestamp with time zone,
+    prospect_auto_created boolean DEFAULT false,
+    seq bigint NOT NULL
 );
+
+
+--
+-- Name: COLUMN user_events.timezone; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.user_events.timezone IS 'Per-event timezone override. NULL means the event inherits workspace_profiles.default_timezone at read time.';
+
+
+--
+-- Name: user_events_seq_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.user_events_seq_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: user_events_seq_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.user_events_seq_seq OWNED BY public.user_events.seq;
 
 
 --
@@ -1596,6 +1803,33 @@ CREATE TABLE public.users (
 
 
 --
+-- Name: voice_memos; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.voice_memos (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    workspace_id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    event_id uuid,
+    source text DEFAULT 'recorded'::text NOT NULL,
+    original_filename text,
+    storage_path text NOT NULL,
+    mime_type text NOT NULL,
+    duration_seconds integer,
+    file_size_bytes integer,
+    transcription_status text DEFAULT 'pending'::text,
+    transcription_error text,
+    transcript_text text,
+    transcript_tsv tsvector,
+    ai_summary jsonb,
+    debrief_generated boolean DEFAULT false,
+    created_at timestamp with time zone DEFAULT now(),
+    transcribed_at timestamp with time zone,
+    summarized_at timestamp with time zone
+);
+
+
+--
 -- Name: waitlist; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1625,6 +1859,23 @@ CREATE TABLE public.workspace_activity (
 
 
 --
+-- Name: workspace_ai_usage_daily; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.workspace_ai_usage_daily (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    workspace_id uuid NOT NULL,
+    date date NOT NULL,
+    provider text NOT NULL,
+    call_count integer DEFAULT 0 NOT NULL,
+    total_tokens integer DEFAULT 0 NOT NULL,
+    total_credits numeric(10,4) DEFAULT 0 NOT NULL,
+    estimated_cost_cents integer DEFAULT 0 NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
 -- Name: workspace_members; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1643,18 +1894,6 @@ CREATE TABLE public.workspace_members (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT workspace_members_role_check CHECK ((role = ANY (ARRAY['owner'::text, 'admin'::text, 'manager'::text, 'member'::text, 'viewer'::text]))),
     CONSTRAINT workspace_members_status_check CHECK ((status = ANY (ARRAY['active'::text, 'suspended'::text, 'pending_invite'::text, 'removed'::text])))
-);
-
-
---
--- Name: workspace_perplexity_usage; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.workspace_perplexity_usage (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    workspace_id uuid NOT NULL,
-    date text NOT NULL,
-    call_count integer DEFAULT 0 NOT NULL
 );
 
 
@@ -1688,7 +1927,8 @@ CREATE TABLE public.workspace_profiles (
     websites text[] DEFAULT '{}'::text[] NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    onboarding_questions jsonb DEFAULT '{}'::jsonb
+    onboarding_questions jsonb DEFAULT '{}'::jsonb,
+    default_timezone text DEFAULT 'UTC'::text NOT NULL
 );
 
 
@@ -1709,6 +1949,83 @@ CREATE TABLE public.workspaces (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT workspaces_plan_check CHECK ((plan = ANY (ARRAY['free'::text, 'pro'::text, 'enterprise'::text])))
 );
+
+
+--
+-- Name: chat_messages seq; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chat_messages ALTER COLUMN seq SET DEFAULT nextval('public.chat_messages_seq_seq'::regclass);
+
+
+--
+-- Name: chats seq; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chats ALTER COLUMN seq SET DEFAULT nextval('public.chats_seq_seq'::regclass);
+
+
+--
+-- Name: user_events seq; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_events ALTER COLUMN seq SET DEFAULT nextval('public.user_events_seq_seq'::regclass);
+
+
+--
+-- Name: ai_usage_events ai_usage_events_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ai_usage_events
+    ADD CONSTRAINT ai_usage_events_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: availability_windows availability_windows_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.availability_windows
+    ADD CONSTRAINT availability_windows_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: booking_pages booking_pages_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.booking_pages
+    ADD CONSTRAINT booking_pages_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: booking_pages booking_pages_slug_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.booking_pages
+    ADD CONSTRAINT booking_pages_slug_key UNIQUE (slug);
+
+
+--
+-- Name: cached_suggestions cached_suggestions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cached_suggestions
+    ADD CONSTRAINT cached_suggestions_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: cached_suggestions cached_suggestions_workspace_id_user_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cached_suggestions
+    ADD CONSTRAINT cached_suggestions_workspace_id_user_id_key UNIQUE (workspace_id, user_id);
+
+
+--
+-- Name: calendar_ai_events calendar_ai_events_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.calendar_ai_events
+    ADD CONSTRAINT calendar_ai_events_pkey PRIMARY KEY (id);
 
 
 --
@@ -1749,6 +2066,14 @@ ALTER TABLE ONLY public.communication_patterns
 
 ALTER TABLE ONLY public.communication_patterns
     ADD CONSTRAINT communication_patterns_workspace_id_user_id_pattern_label_key UNIQUE (workspace_id, user_id, pattern_label);
+
+
+--
+-- Name: communication_patterns communication_patterns_ws_user_label_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.communication_patterns
+    ADD CONSTRAINT communication_patterns_ws_user_label_key UNIQUE (workspace_id, user_id, pattern_label);
 
 
 --
@@ -1800,6 +2125,14 @@ ALTER TABLE ONLY public.daily_metrics
 
 
 --
+-- Name: daily_metrics daily_metrics_user_workspace_date_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.daily_metrics
+    ADD CONSTRAINT daily_metrics_user_workspace_date_key UNIQUE (user_id, workspace_id, date);
+
+
+--
 -- Name: daily_metrics daily_metrics_user_workspace_date_unique; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1808,11 +2141,27 @@ ALTER TABLE ONLY public.daily_metrics
 
 
 --
+-- Name: event_attendees event_attendees_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.event_attendees
+    ADD CONSTRAINT event_attendees_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: feature_usage_events feature_usage_events_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.feature_usage_events
     ADD CONSTRAINT feature_usage_events_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: feedback feedback_opportunity_id_unique; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.feedback
+    ADD CONSTRAINT feedback_opportunity_id_unique UNIQUE (opportunity_id);
 
 
 --
@@ -1829,22 +2178,6 @@ ALTER TABLE ONLY public.feedback
 
 ALTER TABLE ONLY public.file_uploads
     ADD CONSTRAINT file_uploads_pkey PRIMARY KEY (id);
-
-
---
--- Name: global_usage global_usage_date_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.global_usage
-    ADD CONSTRAINT global_usage_date_key UNIQUE (date);
-
-
---
--- Name: global_usage global_usage_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.global_usage
-    ADD CONSTRAINT global_usage_pkey PRIMARY KEY (id);
 
 
 --
@@ -1880,22 +2213,6 @@ ALTER TABLE ONLY public.message_queue
 
 
 --
--- Name: monthly_token_usage monthly_token_usage_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.monthly_token_usage
-    ADD CONSTRAINT monthly_token_usage_pkey PRIMARY KEY (id);
-
-
---
--- Name: monthly_token_usage monthly_token_usage_user_id_month_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.monthly_token_usage
-    ADD CONSTRAINT monthly_token_usage_user_id_month_key UNIQUE (user_id, month);
-
-
---
 -- Name: objection_tracker objection_tracker_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1912,6 +2229,14 @@ ALTER TABLE ONLY public.objection_tracker
 
 
 --
+-- Name: objection_tracker objection_tracker_ws_user_type_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.objection_tracker
+    ADD CONSTRAINT objection_tracker_ws_user_type_key UNIQUE (workspace_id, user_id, objection_type);
+
+
+--
 -- Name: opportunities opportunities_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1920,19 +2245,11 @@ ALTER TABLE ONLY public.opportunities
 
 
 --
--- Name: perplexity_usage perplexity_usage_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: opportunities opportunities_workspace_user_url_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.perplexity_usage
-    ADD CONSTRAINT perplexity_usage_pkey PRIMARY KEY (id);
-
-
---
--- Name: perplexity_usage perplexity_usage_user_id_date_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.perplexity_usage
-    ADD CONSTRAINT perplexity_usage_user_id_date_key UNIQUE (user_id, date);
+ALTER TABLE ONLY public.opportunities
+    ADD CONSTRAINT opportunities_workspace_user_url_key UNIQUE (workspace_id, user_id, source_url);
 
 
 --
@@ -1949,6 +2266,14 @@ ALTER TABLE ONLY public.practice_badges
 
 ALTER TABLE ONLY public.practice_curriculum
     ADD CONSTRAINT practice_curriculum_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: practice_curriculum practice_curriculum_user_workspace_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.practice_curriculum
+    ADD CONSTRAINT practice_curriculum_user_workspace_key UNIQUE (user_id, workspace_id);
 
 
 --
@@ -1992,6 +2317,14 @@ ALTER TABLE ONLY public.prospect_insights
 
 
 --
+-- Name: prospect_merge_candidates prospect_merge_candidates_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.prospect_merge_candidates
+    ADD CONSTRAINT prospect_merge_candidates_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: prospects prospects_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2024,19 +2357,27 @@ ALTER TABLE ONLY public.skill_progression
 
 
 --
--- Name: usage_tracking usage_tracking_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: skill_progression skill_progression_ws_user_week_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.usage_tracking
-    ADD CONSTRAINT usage_tracking_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.skill_progression
+    ADD CONSTRAINT skill_progression_ws_user_week_key UNIQUE (workspace_id, user_id, week_start);
 
 
 --
--- Name: usage_tracking usage_tracking_user_id_date_key; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: user_performance_profiles uq_perf_profile_workspace_user; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.usage_tracking
-    ADD CONSTRAINT usage_tracking_user_id_date_key UNIQUE (user_id, date);
+ALTER TABLE ONLY public.user_performance_profiles
+    ADD CONSTRAINT uq_perf_profile_workspace_user UNIQUE (workspace_id, user_id);
+
+
+--
+-- Name: user_performance_profiles uq_user_performance_profiles_user_workspace; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_performance_profiles
+    ADD CONSTRAINT uq_user_performance_profiles_user_workspace UNIQUE (user_id, workspace_id);
 
 
 --
@@ -2080,6 +2421,14 @@ ALTER TABLE ONLY public.user_performance_profiles
 
 
 --
+-- Name: user_performance_profiles user_performance_profiles_user_workspace_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_performance_profiles
+    ADD CONSTRAINT user_performance_profiles_user_workspace_key UNIQUE (user_id, workspace_id);
+
+
+--
 -- Name: user_performance_profiles user_performance_profiles_user_workspace_unique; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2112,6 +2461,14 @@ ALTER TABLE ONLY public.users
 
 
 --
+-- Name: voice_memos voice_memos_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.voice_memos
+    ADD CONSTRAINT voice_memos_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: waitlist waitlist_email_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2136,6 +2493,22 @@ ALTER TABLE ONLY public.workspace_activity
 
 
 --
+-- Name: workspace_ai_usage_daily workspace_ai_usage_daily_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.workspace_ai_usage_daily
+    ADD CONSTRAINT workspace_ai_usage_daily_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: workspace_ai_usage_daily workspace_ai_usage_daily_workspace_id_date_provider_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.workspace_ai_usage_daily
+    ADD CONSTRAINT workspace_ai_usage_daily_workspace_id_date_provider_key UNIQUE (workspace_id, date, provider);
+
+
+--
 -- Name: workspace_members workspace_members_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2149,22 +2522,6 @@ ALTER TABLE ONLY public.workspace_members
 
 ALTER TABLE ONLY public.workspace_members
     ADD CONSTRAINT workspace_members_workspace_id_user_id_key UNIQUE (workspace_id, user_id);
-
-
---
--- Name: workspace_perplexity_usage workspace_perplexity_usage_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.workspace_perplexity_usage
-    ADD CONSTRAINT workspace_perplexity_usage_pkey PRIMARY KEY (id);
-
-
---
--- Name: workspace_perplexity_usage workspace_perplexity_usage_workspace_id_date_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.workspace_perplexity_usage
-    ADD CONSTRAINT workspace_perplexity_usage_workspace_id_date_key UNIQUE (workspace_id, date);
 
 
 --
@@ -2214,6 +2571,41 @@ CREATE INDEX daily_metrics_workspace_date_idx ON public.daily_metrics USING btre
 
 
 --
+-- Name: idx_ai_usage_events_provider_date; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_ai_usage_events_provider_date ON public.ai_usage_events USING btree (provider, created_at);
+
+
+--
+-- Name: idx_ai_usage_events_user_date; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_ai_usage_events_user_date ON public.ai_usage_events USING btree (user_id, created_at);
+
+
+--
+-- Name: idx_ai_usage_events_workspace_date; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_ai_usage_events_workspace_date ON public.ai_usage_events USING btree (workspace_id, created_at);
+
+
+--
+-- Name: idx_availability_windows_user; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_availability_windows_user ON public.availability_windows USING btree (workspace_id, user_id) WHERE (is_active = true);
+
+
+--
+-- Name: idx_booking_pages_user; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_booking_pages_user ON public.booking_pages USING btree (workspace_id, user_id);
+
+
+--
 -- Name: idx_ca_created; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -2242,6 +2634,41 @@ CREATE INDEX idx_ca_ws_user ON public.conversation_analyses USING btree (workspa
 
 
 --
+-- Name: idx_cached_suggestions_lookup; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cached_suggestions_lookup ON public.cached_suggestions USING btree (workspace_id, user_id, expires_at);
+
+
+--
+-- Name: idx_calendar_ai_events_function; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_calendar_ai_events_function ON public.calendar_ai_events USING btree (ai_function, gate_decision);
+
+
+--
+-- Name: idx_calendar_ai_events_workspace_date; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_calendar_ai_events_workspace_date ON public.calendar_ai_events USING btree (workspace_id, created_at DESC);
+
+
+--
+-- Name: idx_chat_messages_chat_role_seq; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_chat_messages_chat_role_seq ON public.chat_messages USING btree (chat_id, role, seq);
+
+
+--
+-- Name: idx_chat_messages_chat_seq; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_chat_messages_chat_seq ON public.chat_messages USING btree (chat_id, seq DESC);
+
+
+--
 -- Name: idx_chat_messages_chunks; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -2253,6 +2680,13 @@ CREATE INDEX idx_chat_messages_chunks ON public.chat_messages USING btree (paren
 --
 
 CREATE INDEX idx_chat_messages_monologue ON public.chat_messages USING btree (chat_id, role) WHERE (internal_monologue IS NOT NULL);
+
+
+--
+-- Name: idx_chat_messages_seq; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_chat_messages_seq ON public.chat_messages USING btree (seq);
 
 
 --
@@ -2298,10 +2732,24 @@ CREATE INDEX idx_chats_opportunity ON public.chats USING btree (opportunity_id);
 
 
 --
+-- Name: idx_chats_title_search; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_chats_title_search ON public.chats USING gin (title public.gin_trgm_ops);
+
+
+--
 -- Name: idx_chats_workspace; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX idx_chats_workspace ON public.chats USING btree (workspace_id);
+
+
+--
+-- Name: idx_chats_workspace_user_recency; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_chats_workspace_user_recency ON public.chats USING btree (workspace_id, user_id, is_archived, last_message_at DESC, seq DESC);
 
 
 --
@@ -2337,6 +2785,13 @@ CREATE INDEX idx_commitments_prospect ON public.conversation_commitments USING b
 --
 
 CREATE INDEX idx_commitments_user ON public.conversation_commitments USING btree (user_id, status);
+
+
+--
+-- Name: idx_commitments_workspace_user_owner_status; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_commitments_workspace_user_owner_status ON public.conversation_commitments USING btree (workspace_id, user_id, owner, status);
 
 
 --
@@ -2428,6 +2883,27 @@ CREATE INDEX idx_daily_check_ins_user_id ON public.daily_check_ins USING btree (
 --
 
 CREATE INDEX idx_daily_check_ins_workspace_user_date ON public.daily_check_ins USING btree (workspace_id, user_id, date);
+
+
+--
+-- Name: idx_event_attendees_event; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_event_attendees_event ON public.event_attendees USING btree (event_id);
+
+
+--
+-- Name: idx_event_attendees_prospect; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_event_attendees_prospect ON public.event_attendees USING btree (prospect_id) WHERE (prospect_id IS NOT NULL);
+
+
+--
+-- Name: idx_event_attendees_workspace; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_event_attendees_workspace ON public.event_attendees USING btree (workspace_id);
 
 
 --
@@ -2606,6 +3082,20 @@ CREATE INDEX idx_insights_user ON public.prospect_insights USING btree (user_id,
 
 
 --
+-- Name: idx_merge_candidates_pair; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_merge_candidates_pair ON public.prospect_merge_candidates USING btree (LEAST(prospect_id_a, prospect_id_b), GREATEST(prospect_id_a, prospect_id_b));
+
+
+--
+-- Name: idx_merge_candidates_workspace_pending; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_merge_candidates_workspace_pending ON public.prospect_merge_candidates USING btree (workspace_id, status) WHERE (status = 'pending'::text);
+
+
+--
 -- Name: idx_message_queue_pending; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -2631,13 +3121,6 @@ CREATE INDEX idx_messages_delivery ON public.chat_messages USING btree (delivery
 --
 
 CREATE INDEX idx_metrics_user_date ON public.daily_metrics USING btree (user_id, date DESC);
-
-
---
--- Name: idx_monthly_usage; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_monthly_usage ON public.monthly_token_usage USING btree (user_id, month DESC);
 
 
 --
@@ -2701,13 +3184,6 @@ CREATE INDEX idx_opps_workspace ON public.opportunities USING btree (workspace_i
 --
 
 CREATE INDEX idx_opps_ws_score ON public.opportunities USING btree (workspace_id, composite_score DESC);
-
-
---
--- Name: idx_opps_ws_source_url; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX idx_opps_ws_source_url ON public.opportunities USING btree (workspace_id, user_id, source_url) WHERE (source_url IS NOT NULL);
 
 
 --
@@ -2816,6 +3292,13 @@ CREATE INDEX idx_practice_sessions_user_date ON public.practice_sessions USING b
 
 
 --
+-- Name: idx_practice_sessions_workspace_user; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_practice_sessions_workspace_user ON public.practice_sessions USING btree (workspace_id, user_id);
+
+
+--
 -- Name: idx_practice_user; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -2827,6 +3310,20 @@ CREATE INDEX idx_practice_user ON public.practice_sessions USING btree (user_id,
 --
 
 CREATE INDEX idx_prospects_health ON public.prospects USING btree (user_id, relationship_health_score);
+
+
+--
+-- Name: idx_prospects_name_normalized; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_prospects_name_normalized ON public.prospects USING btree (workspace_id, user_id, name_normalized);
+
+
+--
+-- Name: idx_prospects_name_trgm; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_prospects_name_trgm ON public.prospects USING gin (name public.gin_trgm_ops);
 
 
 --
@@ -2862,6 +3359,13 @@ CREATE INDEX idx_push_log_user_sent ON public.push_notification_log USING btree 
 --
 
 CREATE INDEX idx_signals_prospect ON public.conversation_signals USING btree (prospect_id, is_active);
+
+
+--
+-- Name: idx_signals_prospect_workspace_user_active; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_signals_prospect_workspace_user_active ON public.conversation_signals USING btree (prospect_id, workspace_id, user_id, is_active);
 
 
 --
@@ -2914,10 +3418,45 @@ CREATE INDEX idx_uploads_user ON public.file_uploads USING btree (user_id);
 
 
 --
--- Name: idx_usage_user_date; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_user_events_cursor; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_usage_user_date ON public.usage_tracking USING btree (user_id, date);
+CREATE INDEX idx_user_events_cursor ON public.user_events USING btree (workspace_id, user_id, event_date DESC, seq DESC);
+
+
+--
+-- Name: idx_user_events_prep_pending; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_user_events_prep_pending ON public.user_events USING btree (event_date) WHERE ((prep_generated = false) AND (prep_failed = false));
+
+
+--
+-- Name: idx_user_events_recurrence_parent; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_user_events_recurrence_parent ON public.user_events USING btree (recurrence_parent_id) WHERE (recurrence_parent_id IS NOT NULL);
+
+
+--
+-- Name: idx_user_events_reminder_scan; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_user_events_reminder_scan ON public.user_events USING btree (event_date, start_time) WHERE (reminder_sent = false);
+
+
+--
+-- Name: idx_user_events_seq; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_user_events_seq ON public.user_events USING btree (seq);
+
+
+--
+-- Name: idx_user_events_workspace_user_date; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_user_events_workspace_user_date ON public.user_events USING btree (workspace_id, user_id, event_date);
 
 
 --
@@ -3012,6 +3551,34 @@ CREATE INDEX idx_users_not_deleted ON public.users USING btree (id) WHERE (is_de
 
 
 --
+-- Name: idx_voice_memos_event; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_voice_memos_event ON public.voice_memos USING btree (event_id);
+
+
+--
+-- Name: idx_voice_memos_pending; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_voice_memos_pending ON public.voice_memos USING btree (transcription_status) WHERE (transcription_status = ANY (ARRAY['pending'::text, 'processing'::text]));
+
+
+--
+-- Name: idx_voice_memos_transcript_search; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_voice_memos_transcript_search ON public.voice_memos USING gin (transcript_tsv);
+
+
+--
+-- Name: idx_voice_memos_workspace_user; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_voice_memos_workspace_user ON public.voice_memos USING btree (workspace_id, user_id);
+
+
+--
 -- Name: idx_waitlist_created_at; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3075,6 +3642,13 @@ CREATE INDEX idx_workspace_activity_workspace_created ON public.workspace_activi
 
 
 --
+-- Name: idx_workspace_ai_usage_daily_date; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_workspace_ai_usage_daily_date ON public.workspace_ai_usage_daily USING btree (date);
+
+
+--
 -- Name: idx_workspace_members_ws_user_status; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3124,24 +3698,10 @@ CREATE INDEX idx_wp_ws_user ON public.workspace_profiles USING btree (workspace_
 
 
 --
--- Name: idx_wpu_workspace; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_wpu_workspace ON public.workspace_perplexity_usage USING btree (workspace_id, date);
-
-
---
 -- Name: objection_tracker_user_type_idx; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE UNIQUE INDEX objection_tracker_user_type_idx ON public.objection_tracker USING btree (user_id, objection_type);
-
-
---
--- Name: perplexity_usage_user_date_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX perplexity_usage_user_date_idx ON public.perplexity_usage USING btree (user_id, date);
 
 
 --
@@ -3170,6 +3730,13 @@ CREATE INDEX user_skill_profile_user_workspace_period_idx ON public.user_skill_p
 --
 
 CREATE TRIGGER chats_updated_at BEFORE UPDATE ON public.chats FOR EACH ROW EXECUTE FUNCTION public.update_updated_at();
+
+
+--
+-- Name: cached_suggestions trg_cached_suggestions_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_cached_suggestions_updated_at BEFORE UPDATE ON public.cached_suggestions FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
 
 --
@@ -3236,6 +3803,13 @@ CREATE TRIGGER trg_users_updated_at BEFORE UPDATE ON public.users FOR EACH ROW E
 
 
 --
+-- Name: voice_memos trg_voice_memos_tsv; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_voice_memos_tsv BEFORE INSERT OR UPDATE OF transcript_text ON public.voice_memos FOR EACH ROW EXECUTE FUNCTION public.voice_memos_tsv_trigger();
+
+
+--
 -- Name: workspace_members trg_workspace_members_updated_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -3257,10 +3831,40 @@ CREATE TRIGGER trg_workspaces_updated_at BEFORE UPDATE ON public.workspaces FOR 
 
 
 --
+-- Name: cached_suggestions update_cached_suggestions_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER update_cached_suggestions_updated_at BEFORE UPDATE ON public.cached_suggestions FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+
+
+--
+-- Name: feedback update_feedback_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER update_feedback_updated_at BEFORE UPDATE ON public.feedback FOR EACH ROW EXECUTE FUNCTION public.update_updated_at();
+
+
+--
 -- Name: users users_updated_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
 CREATE TRIGGER users_updated_at BEFORE UPDATE ON public.users FOR EACH ROW EXECUTE FUNCTION public.update_updated_at();
+
+
+--
+-- Name: cached_suggestions cached_suggestions_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cached_suggestions
+    ADD CONSTRAINT cached_suggestions_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: cached_suggestions cached_suggestions_workspace_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cached_suggestions
+    ADD CONSTRAINT cached_suggestions_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE CASCADE;
 
 
 --
@@ -3317,6 +3921,14 @@ ALTER TABLE ONLY public.chat_topic_tags
 
 ALTER TABLE ONLY public.chats
     ADD CONSTRAINT chats_event_id_fkey FOREIGN KEY (event_id) REFERENCES public.user_events(id) ON DELETE SET NULL;
+
+
+--
+-- Name: chats chats_growth_card_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.chats
+    ADD CONSTRAINT chats_growth_card_id_fkey FOREIGN KEY (growth_card_id) REFERENCES public.growth_cards(id);
 
 
 --
@@ -3488,6 +4100,22 @@ ALTER TABLE ONLY public.daily_metrics
 
 
 --
+-- Name: event_attendees event_attendees_event_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.event_attendees
+    ADD CONSTRAINT event_attendees_event_id_fkey FOREIGN KEY (event_id) REFERENCES public.user_events(id) ON DELETE CASCADE;
+
+
+--
+-- Name: event_attendees event_attendees_prospect_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.event_attendees
+    ADD CONSTRAINT event_attendees_prospect_id_fkey FOREIGN KEY (prospect_id) REFERENCES public.prospects(id) ON DELETE SET NULL;
+
+
+--
 -- Name: feature_usage_events feature_usage_events_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -3584,14 +4212,6 @@ ALTER TABLE ONLY public.growth_cards
 
 
 --
--- Name: monthly_token_usage monthly_token_usage_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.monthly_token_usage
-    ADD CONSTRAINT monthly_token_usage_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
-
-
---
 -- Name: objection_tracker objection_tracker_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -3632,19 +4252,19 @@ ALTER TABLE ONLY public.opportunities
 
 
 --
--- Name: perplexity_usage perplexity_usage_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.perplexity_usage
-    ADD CONSTRAINT perplexity_usage_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
-
-
---
 -- Name: practice_badges practice_badges_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.practice_badges
     ADD CONSTRAINT practice_badges_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: practice_badges practice_badges_workspace_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.practice_badges
+    ADD CONSTRAINT practice_badges_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id);
 
 
 --
@@ -3677,6 +4297,14 @@ ALTER TABLE ONLY public.practice_drills
 
 ALTER TABLE ONLY public.practice_drills
     ADD CONSTRAINT practice_drills_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: practice_drills practice_drills_workspace_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.practice_drills
+    ADD CONSTRAINT practice_drills_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id);
 
 
 --
@@ -3752,6 +4380,22 @@ ALTER TABLE ONLY public.prospect_insights
 
 
 --
+-- Name: prospect_merge_candidates prospect_merge_candidates_prospect_id_a_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.prospect_merge_candidates
+    ADD CONSTRAINT prospect_merge_candidates_prospect_id_a_fkey FOREIGN KEY (prospect_id_a) REFERENCES public.prospects(id) ON DELETE CASCADE;
+
+
+--
+-- Name: prospect_merge_candidates prospect_merge_candidates_prospect_id_b_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.prospect_merge_candidates
+    ADD CONSTRAINT prospect_merge_candidates_prospect_id_b_fkey FOREIGN KEY (prospect_id_b) REFERENCES public.prospects(id) ON DELETE CASCADE;
+
+
+--
 -- Name: prospects prospects_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -3792,14 +4436,6 @@ ALTER TABLE ONLY public.skill_progression
 
 
 --
--- Name: usage_tracking usage_tracking_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.usage_tracking
-    ADD CONSTRAINT usage_tracking_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
-
-
---
 -- Name: user_events user_events_opportunity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -3813,6 +4449,14 @@ ALTER TABLE ONLY public.user_events
 
 ALTER TABLE ONLY public.user_events
     ADD CONSTRAINT user_events_prospect_id_fkey FOREIGN KEY (prospect_id) REFERENCES public.prospects(id) ON DELETE SET NULL;
+
+
+--
+-- Name: user_events user_events_recurrence_parent_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_events
+    ADD CONSTRAINT user_events_recurrence_parent_id_fkey FOREIGN KEY (recurrence_parent_id) REFERENCES public.user_events(id) ON DELETE SET NULL;
 
 
 --
@@ -3920,6 +4564,14 @@ ALTER TABLE ONLY public.users
 
 
 --
+-- Name: voice_memos voice_memos_event_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.voice_memos
+    ADD CONSTRAINT voice_memos_event_id_fkey FOREIGN KEY (event_id) REFERENCES public.user_events(id) ON DELETE CASCADE;
+
+
+--
 -- Name: workspace_activity workspace_activity_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -3960,14 +4612,6 @@ ALTER TABLE ONLY public.workspace_members
 
 
 --
--- Name: workspace_perplexity_usage workspace_perplexity_usage_workspace_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.workspace_perplexity_usage
-    ADD CONSTRAINT workspace_perplexity_usage_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE CASCADE;
-
-
---
 -- Name: workspace_profiles workspace_profiles_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -3992,619 +4636,8 @@ ALTER TABLE ONLY public.workspaces
 
 
 --
--- Name: push_notification_log Service role manages push log; Type: POLICY; Schema: public; Owner: -
+-- PostgreSQL database dump complete
 --
 
-CREATE POLICY "Service role manages push log" ON public.push_notification_log USING ((auth.role() = 'service_role'::text));
-
-
---
--- Name: practice_curriculum Users can read own curriculum; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY "Users can read own curriculum" ON public.practice_curriculum FOR SELECT USING ((auth.uid() = user_id));
-
-
---
--- Name: practice_drills Users can read own drills; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY "Users can read own drills" ON public.practice_drills FOR SELECT USING ((auth.uid() = user_id));
-
-
---
--- Name: user_skill_profile Users can read own skill profile; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY "Users can read own skill profile" ON public.user_skill_profile FOR SELECT USING ((auth.uid() = user_id));
-
-
---
--- Name: feature_usage_events Users see own feature events; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY "Users see own feature events" ON public.feature_usage_events FOR SELECT USING ((auth.uid() = user_id));
-
-
---
--- Name: chat_topic_tags Users see own topic tags; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY "Users see own topic tags" ON public.chat_topic_tags FOR SELECT USING ((auth.uid() = user_id));
-
-
---
--- Name: practice_badges badges_own_data; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY badges_own_data ON public.practice_badges USING ((auth.uid() = user_id));
-
-
---
--- Name: chat_messages; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.chat_messages ENABLE ROW LEVEL SECURITY;
-
---
--- Name: chat_messages chat_messages_select; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY chat_messages_select ON public.chat_messages FOR SELECT USING (public.is_workspace_member(workspace_id));
-
-
---
--- Name: chat_messages chat_messages_write_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY chat_messages_write_own ON public.chat_messages USING ((user_id = auth.uid()));
-
-
---
--- Name: chat_topic_tags; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.chat_topic_tags ENABLE ROW LEVEL SECURITY;
-
---
--- Name: chats; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.chats ENABLE ROW LEVEL SECURITY;
-
---
--- Name: chats chats_select; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY chats_select ON public.chats FOR SELECT USING (public.is_workspace_member(workspace_id));
-
-
---
--- Name: chats chats_write_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY chats_write_own ON public.chats USING ((user_id = auth.uid()));
-
-
---
--- Name: communication_patterns; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.communication_patterns ENABLE ROW LEVEL SECURITY;
-
---
--- Name: communication_patterns communication_patterns_select; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY communication_patterns_select ON public.communication_patterns FOR SELECT USING (public.is_workspace_member(workspace_id));
-
-
---
--- Name: communication_patterns communication_patterns_write_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY communication_patterns_write_own ON public.communication_patterns USING ((user_id = auth.uid()));
-
-
---
--- Name: conversation_analyses; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.conversation_analyses ENABLE ROW LEVEL SECURITY;
-
---
--- Name: conversation_analyses conversation_analyses_select; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY conversation_analyses_select ON public.conversation_analyses FOR SELECT USING (public.is_workspace_member(workspace_id));
-
-
---
--- Name: conversation_analyses conversation_analyses_write_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY conversation_analyses_write_own ON public.conversation_analyses USING ((user_id = auth.uid()));
-
-
---
--- Name: conversation_commitments; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.conversation_commitments ENABLE ROW LEVEL SECURITY;
-
---
--- Name: conversation_commitments conversation_commitments_select; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY conversation_commitments_select ON public.conversation_commitments FOR SELECT USING (public.is_workspace_member(workspace_id));
-
-
---
--- Name: conversation_commitments conversation_commitments_write_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY conversation_commitments_write_own ON public.conversation_commitments USING ((user_id = auth.uid()));
-
-
---
--- Name: conversation_signals; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.conversation_signals ENABLE ROW LEVEL SECURITY;
-
---
--- Name: conversation_signals conversation_signals_select; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY conversation_signals_select ON public.conversation_signals FOR SELECT USING (public.is_workspace_member(workspace_id));
-
-
---
--- Name: conversation_signals conversation_signals_write_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY conversation_signals_write_own ON public.conversation_signals USING ((user_id = auth.uid()));
-
-
---
--- Name: daily_metrics; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.daily_metrics ENABLE ROW LEVEL SECURITY;
-
---
--- Name: feature_usage_events; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.feature_usage_events ENABLE ROW LEVEL SECURITY;
-
---
--- Name: feedback; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.feedback ENABLE ROW LEVEL SECURITY;
-
---
--- Name: feedback feedback_select; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY feedback_select ON public.feedback FOR SELECT USING (public.is_workspace_member(workspace_id));
-
-
---
--- Name: feedback feedback_write_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY feedback_write_own ON public.feedback USING ((user_id = auth.uid()));
-
-
---
--- Name: file_uploads; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.file_uploads ENABLE ROW LEVEL SECURITY;
-
---
--- Name: growth_cards; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.growth_cards ENABLE ROW LEVEL SECURITY;
-
---
--- Name: growth_cards growth_cards_select; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY growth_cards_select ON public.growth_cards FOR SELECT USING (public.is_workspace_member(workspace_id));
-
-
---
--- Name: growth_cards growth_cards_write_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY growth_cards_write_own ON public.growth_cards USING ((user_id = auth.uid()));
-
-
---
--- Name: message_queue; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.message_queue ENABLE ROW LEVEL SECURITY;
-
---
--- Name: daily_metrics metrics_own_data; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY metrics_own_data ON public.daily_metrics USING ((auth.uid() = user_id));
-
-
---
--- Name: monthly_token_usage; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.monthly_token_usage ENABLE ROW LEVEL SECURITY;
-
---
--- Name: monthly_token_usage monthly_usage_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY monthly_usage_own ON public.monthly_token_usage USING ((auth.uid() = user_id));
-
-
---
--- Name: objection_tracker; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.objection_tracker ENABLE ROW LEVEL SECURITY;
-
---
--- Name: objection_tracker objection_tracker_select; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY objection_tracker_select ON public.objection_tracker FOR SELECT USING (public.is_workspace_member(workspace_id));
-
-
---
--- Name: objection_tracker objection_tracker_write_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY objection_tracker_write_own ON public.objection_tracker USING ((user_id = auth.uid()));
-
-
---
--- Name: opportunities; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.opportunities ENABLE ROW LEVEL SECURITY;
-
---
--- Name: opportunities opportunities_select; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY opportunities_select ON public.opportunities FOR SELECT USING (public.is_workspace_member(workspace_id));
-
-
---
--- Name: opportunities opportunities_write_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY opportunities_write_own ON public.opportunities USING ((user_id = auth.uid()));
-
-
---
--- Name: user_performance_profiles performance_own_data; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY performance_own_data ON public.user_performance_profiles USING ((auth.uid() = user_id));
-
-
---
--- Name: practice_badges; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.practice_badges ENABLE ROW LEVEL SECURITY;
-
---
--- Name: practice_curriculum; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.practice_curriculum ENABLE ROW LEVEL SECURITY;
-
---
--- Name: practice_drills; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.practice_drills ENABLE ROW LEVEL SECURITY;
-
---
--- Name: practice_sessions practice_own_data; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY practice_own_data ON public.practice_sessions USING ((auth.uid() = user_id));
-
-
---
--- Name: practice_sessions; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.practice_sessions ENABLE ROW LEVEL SECURITY;
-
---
--- Name: prospect_insights; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.prospect_insights ENABLE ROW LEVEL SECURITY;
-
---
--- Name: prospect_insights prospect_insights_select; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY prospect_insights_select ON public.prospect_insights FOR SELECT USING (public.is_workspace_member(workspace_id));
-
-
---
--- Name: prospect_insights prospect_insights_write_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY prospect_insights_write_own ON public.prospect_insights USING ((user_id = auth.uid()));
-
-
---
--- Name: prospects; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.prospects ENABLE ROW LEVEL SECURITY;
-
---
--- Name: prospects prospects_select; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY prospects_select ON public.prospects FOR SELECT USING (public.is_workspace_member(workspace_id));
-
-
---
--- Name: prospects prospects_write_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY prospects_write_own ON public.prospects USING ((user_id = auth.uid()));
-
-
---
--- Name: push_notification_log; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.push_notification_log ENABLE ROW LEVEL SECURITY;
-
---
--- Name: skill_progression; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.skill_progression ENABLE ROW LEVEL SECURITY;
-
---
--- Name: skill_progression skill_progression_select; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY skill_progression_select ON public.skill_progression FOR SELECT USING (public.is_workspace_member(workspace_id));
-
-
---
--- Name: skill_progression skill_progression_write_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY skill_progression_write_own ON public.skill_progression USING ((user_id = auth.uid()));
-
-
---
--- Name: file_uploads uploads_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY uploads_own ON public.file_uploads USING ((auth.uid() = user_id));
-
-
---
--- Name: usage_tracking usage_own_data; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY usage_own_data ON public.usage_tracking USING ((auth.uid() = user_id));
-
-
---
--- Name: usage_tracking; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.usage_tracking ENABLE ROW LEVEL SECURITY;
-
---
--- Name: user_events; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.user_events ENABLE ROW LEVEL SECURITY;
-
---
--- Name: user_events user_events_select; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY user_events_select ON public.user_events FOR SELECT USING (public.is_workspace_member(workspace_id));
-
-
---
--- Name: user_events user_events_write_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY user_events_write_own ON public.user_events USING ((user_id = auth.uid()));
-
-
---
--- Name: user_goals; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.user_goals ENABLE ROW LEVEL SECURITY;
-
---
--- Name: user_goals user_goals_select; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY user_goals_select ON public.user_goals FOR SELECT USING (public.is_workspace_member(workspace_id));
-
-
---
--- Name: user_goals user_goals_write_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY user_goals_write_own ON public.user_goals USING ((user_id = auth.uid()));
-
-
---
--- Name: user_performance_profiles; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.user_performance_profiles ENABLE ROW LEVEL SECURITY;
-
---
--- Name: user_skill_profile; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.user_skill_profile ENABLE ROW LEVEL SECURITY;
-
---
--- Name: users; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
-
---
--- Name: users users_delete; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY users_delete ON public.users FOR DELETE USING ((auth.uid() = id));
-
-
---
--- Name: users users_insert; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY users_insert ON public.users FOR INSERT WITH CHECK ((auth.uid() = id));
-
-
---
--- Name: users users_select; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY users_select ON public.users FOR SELECT USING ((auth.uid() = id));
-
-
---
--- Name: users users_update; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY users_update ON public.users FOR UPDATE USING ((auth.uid() = id));
-
-
---
--- Name: workspace_members wm_select; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY wm_select ON public.workspace_members FOR SELECT USING (public.is_workspace_member(workspace_id));
-
-
---
--- Name: workspace_activity; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.workspace_activity ENABLE ROW LEVEL SECURITY;
-
---
--- Name: workspace_activity workspace_activity_insert_service; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY workspace_activity_insert_service ON public.workspace_activity TO service_role USING (true) WITH CHECK (true);
-
-
---
--- Name: workspace_activity workspace_activity_select; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY workspace_activity_select ON public.workspace_activity FOR SELECT USING ((EXISTS ( SELECT 1
-   FROM public.workspace_members wm
-  WHERE ((wm.workspace_id = workspace_activity.workspace_id) AND (wm.user_id = auth.uid()) AND (wm.status = 'active'::text)))));
-
-
---
--- Name: workspace_members; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.workspace_members ENABLE ROW LEVEL SECURITY;
-
---
--- Name: workspace_perplexity_usage; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.workspace_perplexity_usage ENABLE ROW LEVEL SECURITY;
-
---
--- Name: workspace_profiles; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.workspace_profiles ENABLE ROW LEVEL SECURITY;
-
---
--- Name: workspaces; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.workspaces ENABLE ROW LEVEL SECURITY;
-
---
--- Name: workspace_profiles wp_select; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY wp_select ON public.workspace_profiles FOR SELECT USING (public.is_workspace_member(workspace_id));
-
-
---
--- Name: workspace_profiles wp_write_own; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY wp_write_own ON public.workspace_profiles USING ((user_id = auth.uid()));
-
-
---
--- Name: workspace_perplexity_usage wpu_service_only; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY wpu_service_only ON public.workspace_perplexity_usage USING (false);
-
-
---
--- Name: workspaces ws_select; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY ws_select ON public.workspaces FOR SELECT USING (public.is_workspace_member(id));
-
-
---
--- Name: workspaces ws_update_owner; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY ws_update_owner ON public.workspaces FOR UPDATE USING ((owner_user_id = auth.uid()));
-
-
---
--- Name: supabase_realtime chat_messages; Type: PUBLICATION TABLE; Schema: public; Owner: -
---
-
-ALTER PUBLICATION supabase_realtime ADD TABLE ONLY public.chat_messages;
-
-
---
--- Name: supabase_realtime message_queue; Type: PUBLICATION TABLE; Schema: public; Owner: -
---
-
-ALTER PUBLICATION supabase_realtime ADD TABLE ONLY public.message_queue;
-
-
---
--- Name: supabase_realtime opportunities; Type: PUBLICATION TABLE; Schema: public; Owner: -
---
-
-ALTER PUBLICATION supabase_realtime ADD TABLE ONLY public.opportunities;
+\unrestrict JAYd5WShn4Frbnh8BydktaFSp420oOBgifoW2FwVN7X2bD1zN8E2CW8g4yOq2WH
 

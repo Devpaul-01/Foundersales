@@ -234,8 +234,7 @@ router.get('/team/:userId', requirePermission('manager'), asyncHandler(async (re
 router.post('/', asyncHandler(async (req, res) => {
   const {
     title, event_date, start_time, end_time, event_type = 'meeting', event_timezone,
-    notes, attendee_name, attendee_context, opportunity_id, prospect_id, create_prospect,
-    recurrence_rule,
+    notes, attendee_name, attendee_context, opportunity_id, prospect_id, create_prospect
   } = req.body;
   const userId = req.user.id;
   const workspaceId = req.workspace.id;
@@ -288,8 +287,8 @@ router.post('/', asyncHandler(async (req, res) => {
       attendee_context: attendee_context?.trim() || null,
       opportunity_id:   opportunity_id           || null,
       prospect_id:      resolvedProspectId,
-      prospect_auto_created: prospectAutoCreated,
-      recurrence_rule:  recurrence_rule || null,
+      prospect_auto_created: prospectAutoCreated
+      
     })
     .select()
     .single();

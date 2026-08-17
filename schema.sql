@@ -1599,7 +1599,6 @@ CREATE TABLE public.user_events (
     follow_up_generated_at timestamp with time zone,
     workspace_id uuid NOT NULL,
     timezone text,
-    recurrence_rule text,
     recurrence_parent_id uuid,
     recurrence_exception_dates date[] DEFAULT '{}'::date[],
     prep_failed boolean DEFAULT false,

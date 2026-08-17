@@ -491,6 +491,8 @@ async function updateProspectHealth(userId, workspaceId, prospectId) {
   }).eq('id', prospectId).eq('workspace_id', workspaceId);
 }
 
+
+
 export const startBackgroundWorker = () => {
   const worker = new Worker('background', async (job) => {
     const handler = handlers[job.name];
@@ -500,8 +502,8 @@ export const startBackgroundWorker = () => {
 
   worker.on('failed', async (job, err) => {
     logError(`job[${job?.name}]`, err, { jobId: job?.id });
-    // IMPL-SENTRY-01: external visibility for job failures, see
-    // scheduledWorker.js's file header for the full reasoning.
+
+    // IMPL-SENTRY-01: external visibility for job failures
     try {
       Sentry.captureException(err, { tags: { source: 'backgroundWorker', jobName: job?.name, jobId: job?.id } });
     } catch { /* Sentry itself must never be able to break a job */ }
@@ -512,20 +514,21 @@ export const startBackgroundWorker = () => {
     // (see coreJobs.js's runCalendarPrepJob — it filters on prep_failed = false).
     if (job?.name === BACKGROUND_JOB_TYPES.CALENDAR_PREP_GENERATE && job.attemptsMade >= (job.opts?.attempts || 1)) {
       const { eventId, workspaceId } = job.data;
-    try {
-  await supabaseAdmin
-    .from('user_events')
-    .update({
-      prep_failed: true,
-      prep_failed_at: new Date().toISOString(),
-      prep_failure_reason: err.message?.slice(0, 500),
-    })
-    .eq('id', eventId)
-    .eq('workspace_id', workspaceId);
-} catch (error) {
-  console.error('Failed to update prep_failed status:', error);
-}
-  
+      try {
+        await supabaseAdmin
+          .from('user_events')
+          .update({
+            prep_failed: true,
+            prep_failed_at: new Date().toISOString(),
+            prep_failure_reason: err.message?.slice(0, 500),
+          })
+          .eq('id', eventId)
+          .eq('workspace_id', workspaceId);
+      } catch (updateError) {
+        console.error('Failed to update prep_failed status:', updateError);
+      }
+    }
+  });
 
   log('Background worker started', { concurrency: 5 });
   return worker;

@@ -512,13 +512,20 @@ export const startBackgroundWorker = () => {
     // (see coreJobs.js's runCalendarPrepJob — it filters on prep_failed = false).
     if (job?.name === BACKGROUND_JOB_TYPES.CALENDAR_PREP_GENERATE && job.attemptsMade >= (job.opts?.attempts || 1)) {
       const { eventId, workspaceId } = job.data;
-      await supabaseAdmin.from('user_events').update({
-        prep_failed: true,
-        prep_failed_at: new Date().toISOString(),
-        prep_failure_reason: err.message?.slice(0, 500),
-      }).eq('id', eventId).eq('workspace_id', workspaceId).catch(() => {});
-    }
-  });
+    try {
+  await supabaseAdmin
+    .from('user_events')
+    .update({
+      prep_failed: true,
+      prep_failed_at: new Date().toISOString(),
+      prep_failure_reason: err.message?.slice(0, 500),
+    })
+    .eq('id', eventId)
+    .eq('workspace_id', workspaceId);
+} catch (error) {
+  console.error('Failed to update prep_failed status:', error);
+}
+  
 
   log('Background worker started', { concurrency: 5 });
   return worker;

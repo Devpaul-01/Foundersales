@@ -302,14 +302,14 @@ router.post('/', asyncHandler(async (req, res) => {
     await backgroundQueue.add(
       BACKGROUND_JOB_TYPES.CALENDAR_RESEARCH_PROSPECT,
       { userId, workspaceId, eventId: event.id, userCtx },
-      { jobId: `research:${event.id}`, attempts: 3, backoff: { type: 'exponential', delay: 5000 } }
+      { jobId: `research_${event.id}`, attempts: 3, backoff: { type: 'exponential', delay: 5000 } }
     ).catch(err => logError('backgroundQueue calendar_research_prospect', err, { eventId: event.id }));
   }
 
   await backgroundQueue.add(
     BACKGROUND_JOB_TYPES.CALENDAR_PREP_GENERATE,
     { userId, workspaceId, eventId: event.id, source: 'create' },
-    { jobId: `prep:${event.id}`, attempts: 3, backoff: { type: 'exponential', delay: 5000 } }
+    { jobId: `prep_${event.id}`, attempts: 3, backoff: { type: 'exponential', delay: 5000 } }
   ).catch(err => logError('backgroundQueue calendar_prep_generate', err, { eventId: event.id }));
 
   res.status(201).json({ event });
@@ -456,7 +456,7 @@ router.post('/:id/reschedule', asyncHandler(async (req, res) => {
   if (updates.prep_generated === false) {
     await backgroundQueue.add(BACKGROUND_JOB_TYPES.CALENDAR_PREP_GENERATE,
       { userId, workspaceId, eventId: existing.id, source: 'reschedule' },
-      { jobId: `prep:${existing.id}:reschedule:${Date.now()}`, attempts: 3, backoff: { type: 'exponential', delay: 5000 } }
+      { jobId: `prep_${existing.id}:reschedule:${Date.now()}`, attempts: 3, backoff: { type: 'exponential', delay: 5000 } }
     ).catch(err => logError('backgroundQueue reschedule prep', err, { eventId: existing.id }));
   }
 
@@ -521,7 +521,7 @@ router.post('/:id/debrief', calendarAiRateLimiter, asyncHandler(async (req, res)
     await backgroundQueue.add(
       BACKGROUND_JOB_TYPES.CALENDAR_EXTRACT_COMMITMENTS_SIGNALS,
       { userId, workspaceId, eventId: event.id, rawNotes: raw_notes },
-      { jobId: `extract:${event.id}`, attempts: 3, backoff: { type: 'exponential', delay: 5000 } }
+      { jobId: `extract_${event.id}`, attempts: 3, backoff: { type: 'exponential', delay: 5000 } }
     ).catch(err => logError('enqueue extract_commitments_signals', err, { eventId: event.id }));
   }
 
@@ -529,7 +529,7 @@ router.post('/:id/debrief', calendarAiRateLimiter, asyncHandler(async (req, res)
     await backgroundQueue.add(
       BACKGROUND_JOB_TYPES.CALENDAR_UPDATE_PROSPECT_HEALTH,
       { userId, workspaceId, prospectId: event.prospect_id },
-      { jobId: `health:${event.prospect_id}:${event.id}`, attempts: 3, backoff: { type: 'exponential', delay: 3000 } }
+      { jobId: `health_${event.prospect_id}:${event.id}`, attempts: 3, backoff: { type: 'exponential', delay: 3000 } }
     ).catch(err => logError('enqueue update_prospect_health', err, { eventId: event.id }));
   }
 
@@ -537,7 +537,7 @@ router.post('/:id/debrief', calendarAiRateLimiter, asyncHandler(async (req, res)
   await backgroundQueue.add(
     BACKGROUND_JOB_TYPES.CALENDAR_GENERATE_FOLLOWUP,
     { userId, workspaceId, eventId: event.id },
-    { jobId: `followup:${event.id}`, attempts: 3, backoff: { type: 'exponential', delay: 5000 } }
+    { jobId: `followup_${event.id}`, attempts: 3, backoff: { type: 'exponential', delay: 5000 } }
   ).catch(err => logError('enqueue generate_followup', err, { eventId: event.id }));
 
   res.json({ success: true, debrief: persistedDebrief });
@@ -588,7 +588,7 @@ router.post('/:id/research', calendarAiRateLimiter, asyncHandler(async (req, res
   await backgroundQueue.add(
     BACKGROUND_JOB_TYPES.CALENDAR_RESEARCH_PROSPECT,
     { userId, workspaceId, eventId: event.id, userCtx },
-    { jobId: `research:${event.id}:manual:${Date.now()}`, attempts: 3, backoff: { type: 'exponential', delay: 5000 } }
+    { jobId: `research_${event.id}:manual:${Date.now()}`, attempts: 3, backoff: { type: 'exponential', delay: 5000 } }
   );
 
   res.json({ success: true, message: 'Research started in the background. Check back in a moment.' });

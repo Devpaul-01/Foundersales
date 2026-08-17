@@ -263,7 +263,7 @@ async function maybeEnqueueSummarization(chatId, workspaceId, userId) {
     }
 
     // ── Step 4: Enqueue background job ──────────────────────────────────
-    const jobId = `chat_summarize:${chatId}:${nonSystemCount}`;
+    const jobId = `chat_summarize_${chatId}_${nonSystemCount}`;
     const payload = { chatId, workspaceId, userId };
 
     log('CHAT_SUMMARIZE_ENQUEUE_ATTEMPT', {

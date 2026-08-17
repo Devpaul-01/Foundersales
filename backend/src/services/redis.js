@@ -64,10 +64,23 @@ const getClient = async () => {
     return null;
   }
 
-  const client = createClient({ url: REDIS_URL });
+  // ── Parse the URL to extract hostname for SNI ──
+  const url = new URL(REDIS_URL);
+  const hostname = url.hostname;
+
+  const client = createClient({
+    url: REDIS_URL,
+    socket: {
+      tls: true,
+      servername: hostname,  // ← Fix: Add SNI support
+    },
+  });
+
   client.on('error', (err) =>
     console.error('[Redis] Client error (non-fatal):', err.message)
   );
+
+  // ── Connect and store client
 
   try {
     await client.connect();

@@ -24,14 +24,25 @@ if (!REDIS_URL) {
 // (e.g. an admin/health endpoint) without importing ioredis internals.
 export const bullmqConnectionState = { status: 'connecting', lastError: null };
 
+// ── Parse URL to extract hostname for SNI ──
+const url = new URL(REDIS_URL);
+const hostname = url.hostname;
+const isTLS = REDIS_URL.startsWith('rediss://');
+
+// ── Build TLS options ──
+const tlsOptions = isTLS
+  ? {
+      servername: hostname, // ← Fix: Add SNI support
+      rejectUnauthorized: false, // required for Upstash TLS
+    }
+  : undefined;
+
 // BullMQ requires maxRetriesPerRequest: null — without this the worker will
 // throw on startup.
 export const bullmqConnection = new IORedis(REDIS_URL, {
   maxRetriesPerRequest: null,
-  enableReadyCheck:     false,
-  tls: REDIS_URL.startsWith('rediss://')
-    ? { rejectUnauthorized: false }  // required for Upstash TLS
-    : undefined,
+  enableReadyCheck: false,
+  tls: tlsOptions,
 
   // Fix: previously there was no retryStrategy, so ioredis used its default
   // of retrying FOREVER (every ~2s max) on any connection error — including

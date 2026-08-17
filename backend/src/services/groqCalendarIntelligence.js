@@ -600,7 +600,7 @@ Return ONLY this JSON:
     const { content } = await callWithFallbackGroq({
       messages:    [{ role: 'user', content: prompt }],
       temperature: 0.3,
-      maxTokens:   350,
+      maxTokens:   800,
       tier:        'fast',
       workspaceId: user.workspace_id, userId: user.id, sourceJob: 'enrich_prep_with_research',
     });

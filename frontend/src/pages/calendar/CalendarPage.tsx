@@ -324,7 +324,6 @@ export default function CalendarPage() {
           <p className="text-sm text-amber-700 flex-1">
             {debriefCount} meeting{debriefCount > 1 ? 's' : ''} need{debriefCount === 1 ? 's' : ''} a debrief.
           </p>
-          <Button variant="outline" size="xs" onClick={() => navigate('/commitments')}>Review</Button>
         </div>
       )}
       {overdueCount > 0 && (

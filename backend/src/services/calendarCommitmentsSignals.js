@@ -78,7 +78,7 @@ Only include clear, actionable NEW commitments and genuinely meaningful signals.
     const { content } = await callWithFallbackGroq({
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.15,
-      maxTokens: 500,
+      maxTokens: 1000,
       tier: 'fast',
       workspaceId, userId,
       sourceJob: 'extract_commitments_and_signals',

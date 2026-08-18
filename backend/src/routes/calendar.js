@@ -528,7 +528,7 @@ router.post('/:id/debrief', calendarAiRateLimiter, asyncHandler(async (req, res)
     await backgroundQueue.add(
       BACKGROUND_JOB_TYPES.CALENDAR_UPDATE_PROSPECT_HEALTH,
       { userId, workspaceId, prospectId: event.prospect_id },
-      { jobId: `health_${event.prospect_id}:${event.id}`, attempts: 3, backoff: { type: 'exponential', delay: 3000 } }
+      { jobId: `health_${event.prospect_id}_${event.id}`, attempts: 3, backoff: { type: 'exponential', delay: 3000 } }
     ).catch(err => logError('enqueue update_prospect_health', err, { eventId: event.id }));
   }
 

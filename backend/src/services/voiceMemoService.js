@@ -89,7 +89,7 @@ export async function createMemo({ workspaceId, userId, eventId, buffer, mimeTyp
   await backgroundQueue.add(
     BACKGROUND_JOB_TYPES.VOICE_MEMO_TRANSCRIBE,
     { memoId: memo.id, workspaceId, userId },
-    { jobId: `transcribe:${memo.id}`, attempts: 3, backoff: { type: 'exponential', delay: 5000 } }
+    { jobId: `transcribe_${memo.id}`, attempts: 3, backoff: { type: 'exponential', delay: 5000 } }
   ).catch(err => logError('enqueue voice_memo_transcribe', err, { memoId: memo.id }));
 
   return { memo };
@@ -106,31 +106,45 @@ export async function transcribeMemo({ memoId, workspaceId, userId }) {
 
   await supabaseAdmin.from('voice_memos').update({ transcription_status: 'processing' }).eq('id', memoId);
 
+  let transcript;
   try {
     const cloudinary = (await import('../config/cloudinary.js')).default;
     const audioUrl = cloudinary.url(memo.storage_path, { resource_type: 'video' });
 
     const audioBuffer = await fetch(audioUrl).then(r => r.arrayBuffer());
-    const transcript = await transcribeAudio(audioBuffer, { mimeType: memo.mime_type, filename: memo.original_filename || 'memo.webm' });
+    transcript = await transcribeAudio(audioBuffer, { mimeType: memo.mime_type, filename: memo.original_filename || 'memo.webm' });
 
     await supabaseAdmin.from('voice_memos').update({
       transcript_text: transcript.text,
       transcription_status: 'completed',
       transcribed_at: new Date().toISOString(),
     }).eq('id', memoId);
-
-    await backgroundQueue.add(
-      BACKGROUND_JOB_TYPES.VOICE_MEMO_ENRICH,
-      { memoId, workspaceId, userId },
-      { jobId: `voice-enrich:${memoId}`, attempts: 3, backoff: { type: 'exponential', delay: 5000 } }
-    );
   } catch (err) {
+    // Only the transcription step itself lands here now. Enqueueing
+    // enrichment is handled separately below, outside this try/catch, so a
+    // failure to enqueue can no longer overwrite a transcription that
+    // actually succeeded.
     await supabaseAdmin.from('voice_memos').update({
       transcription_status: 'failed',
       transcription_error: err.message?.slice(0, 500),
     }).eq('id', memoId);
     throw err;
   }
+
+  // Transcription is fully committed at this point (DB already says
+  // 'completed'). Enqueueing enrichment is a separate concern from here on:
+  // if it fails, log it rather than reporting transcription itself as
+  // failed and rethrowing. Previously this call lived inside the try above
+  // with jobId `voice-enrich:${memoId}` — BullMQ rejects ':' in custom job
+  // ids ("Custom Id cannot contain :"), so every transcription successfully
+  // completed and then immediately got relabeled 'failed' by the catch
+  // block on this line, retrying transcription from scratch up to
+  // `attempts` times per memo for no reason related to transcription at all.
+  await backgroundQueue.add(
+    BACKGROUND_JOB_TYPES.VOICE_MEMO_ENRICH,
+    { memoId, workspaceId, userId },
+    { jobId: `voice_enrich_${memoId}`, attempts: 3, backoff: { type: 'exponential', delay: 5000 } }
+  ).catch(err => logError('enqueue voice_memo_enrich', err, { memoId }));
 }
 
 /**
@@ -239,7 +253,7 @@ export async function retryTranscription({ memoId, workspaceId, userId }) {
   await backgroundQueue.add(
     BACKGROUND_JOB_TYPES.VOICE_MEMO_TRANSCRIBE,
     { memoId, workspaceId, userId },
-    { jobId: `transcribe:${memoId}:retry:${Date.now()}`, attempts: 3, backoff: { type: 'exponential', delay: 5000 } }
+    { jobId: `transcribe_retry_${memoId}_${Date.now()}`, attempts: 3, backoff: { type: 'exponential', delay: 5000 } }
   );
   return { success: true };
 }

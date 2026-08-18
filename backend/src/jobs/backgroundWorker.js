@@ -70,6 +70,13 @@ const loadUserCtx = async (userId, workspaceId) => {
   return { ...userRow, ...wp, workspace_id: workspaceId, id: userId };
 };
 
+// Small, safe subset of job.data worth attaching to dispatch/failure logs so
+// a log line can be traced back to a record without risking a dump of large
+// free-text payloads (rawNotes, tip_context, debrief_content, ...) into logs.
+const JOB_ID_FIELDS = ['memoId', 'eventId', 'chatId', 'goalId', 'prospectId', 'userId', 'workspaceId'];
+const pickIds = (data = {}) =>
+  Object.fromEntries(JOB_ID_FIELDS.filter(k => data?.[k] !== undefined).map(k => [k, data[k]]));
+
 const handlers = {
 
   async [BACKGROUND_JOB_TYPES.TIP_CARD_GENERATE](data) {
@@ -106,7 +113,10 @@ const handlers = {
       .select('id', { count: 'exact', head: true })
       .eq('workspace_id', workspaceId).eq('user_id', userId).eq('generated_by', 'ai_daily')
       .gte('created_at', today + 'T00:00:00');
-    if (todayCards > 0) return;
+    if (todayCards > 0) {
+      log('first_time_cards_generate skipped — already generated today', { userId, workspaceId });
+      return;
+    }
     const archetype = userCtx.archetype || 'seller';
     const { data: goals } = await supabaseAdmin.from('user_goals')
       .select('goal_text, target_value, target_unit, current_value')
@@ -261,6 +271,8 @@ const handlers = {
     );
 
     if (commitments.length) {
+
+      console.log(`commitmets found : ${commitments}`);
       const { error } = await supabaseAdmin.from('conversation_commitments').insert(
         commitments.map(c => ({
           workspace_id: workspaceId, user_id: userId, prospect_id: event.prospect_id || null,
@@ -272,6 +284,8 @@ const handlers = {
     }
 
     if (signals.length) {
+      console.log(`signals found : ${signals}`);
+
       const { error } = await supabaseAdmin.from('conversation_signals').insert(
         signals.map(s => ({
           workspace_id: workspaceId, user_id: userId, prospect_id: event.prospect_id || null,
@@ -334,7 +348,7 @@ const handlers = {
         title: '✉️ Follow-up drafts ready',
         body: `Three follow-up options are ready for "${event.title}".`,
         data: { type: 'follow_up_ready', event_id: eventId },
-      }, userCtx.fcm_token).catch(() => {});
+      }, userCtx.fcm_token).catch(err => logError('calendar_generate_followup_notify', err, { eventId }));
     }
     log('calendar_generate_followup DONE', { eventId });
   },
@@ -484,11 +498,24 @@ async function updateProspectHealth(userId, workspaceId, prospectId) {
   score -= overdueCount * 12;
 
   const finalScore = Math.max(0, Math.min(100, Math.round(score)));
-  await supabaseAdmin.from('prospects').update({
+  log('prospect_health computed', {
+    prospectId, workspaceId, finalScore,
+    lastEventOutcome: lastEvent?.outcome ?? null,
+    recentSignalCount: recentSignals.length,
+    overdueCommitmentCount: overdueCount,
+  });
+
+  const { error: updateError } = await supabaseAdmin.from('prospects').update({
     relationship_health_score: finalScore,
     health_updated_at:         now.toISOString(),
     last_contact_at:           now.toISOString(),
   }).eq('id', prospectId).eq('workspace_id', workspaceId);
+
+  if (updateError) {
+    // Previously discarded entirely — a failed write here left the score
+    // silently stale with nothing in the logs to explain why.
+    logError('update_prospect_health/write', updateError, { prospectId, workspaceId, finalScore });
+  }
 }
 
 
@@ -496,12 +523,76 @@ async function updateProspectHealth(userId, workspaceId, prospectId) {
 export const startBackgroundWorker = () => {
   const worker = new Worker('background', async (job) => {
     const handler = handlers[job.name];
-    if (!handler) { logError('dispatch', new Error(`Unknown job: ${job.name}`)); return; }
-    await handler(job.data);
+
+    if (!handler) {
+      // NOTE ON BEHAVIOR: this still `return`s rather than `throw`s, matching
+      // the prior implementation exactly — but that means BullMQ marks an
+      // unrecognized job.name as *completed* (see worker.on('completed')
+      // below) even though no handler ever ran. Tagged distinctly
+      // ('dispatch/unknown_job') so this is easy to grep/alert on. Left
+      // unchanged rather than switched to throw, since that would change
+      // retry/failure behavior, which is outside the scope of a logging pass.
+      logError('dispatch/unknown_job', new Error(`Unknown job: ${job.name}`), {
+        jobId: job.id, jobName: job.name, dataKeys: Object.keys(job.data || {}),
+      });
+      return;
+    }
+
+    const startedAt = Date.now();
+    log('job picked up', {
+      jobName: job.name,
+      jobId: job.id,
+      attemptsMade: job.attemptsMade,
+      maxAttempts: job.opts?.attempts || 1,
+      ...pickIds(job.data),
+    });
+
+    try {
+      await handler(job.data);
+      log('job handler resolved', {
+        jobName: job.name,
+        jobId: job.id,
+        durationMs: Date.now() - startedAt,
+      });
+    } catch (err) {
+      // Logged here in addition to worker.on('failed') below because this is
+      // the only place with the precise duration and in-flight attempt
+      // number available synchronously at the throw site. Always rethrown —
+      // never swallowed — so BullMQ's own retry/backoff and 'failed' event
+      // continue to fire exactly as before.
+      logError('job handler threw', err, {
+        jobName: job.name,
+        jobId: job.id,
+        durationMs: Date.now() - startedAt,
+        attemptsMade: job.attemptsMade,
+        maxAttempts: job.opts?.attempts || 1,
+        ...pickIds(job.data),
+      });
+      throw err;
+    }
   }, { connection: bullmqConnection, concurrency: 5 });
 
+  worker.on('completed', (job) => {
+    const durationMs = (job.finishedOn && job.processedOn) ? job.finishedOn - job.processedOn : undefined;
+    log(`job[${job.name}] completed`, {
+      jobId: job.id,
+      durationMs,
+      attemptsMade: job.attemptsMade,
+      ...pickIds(job.data),
+    });
+  });
+
   worker.on('failed', async (job, err) => {
-    logError(`job[${job?.name}]`, err, { jobId: job?.id });
+    const maxAttempts = job?.opts?.attempts || 1;
+    const willRetry    = job?.attemptsMade != null && job.attemptsMade < maxAttempts;
+
+    logError(`job[${job?.name}]`, err, {
+      jobId: job?.id,
+      attemptsMade: job?.attemptsMade,
+      maxAttempts,
+      willRetry,
+      ...pickIds(job?.data),
+    });
 
     // IMPL-SENTRY-01: external visibility for job failures
     try {
@@ -512,6 +603,9 @@ export const startBackgroundWorker = () => {
     // failure branch instead of an infinite "Preparing..." pulse, and stops
     // the daily sweep from re-enqueueing a permanently-broken event forever
     // (see coreJobs.js's runCalendarPrepJob — it filters on prep_failed = false).
+    // Condition left byte-for-byte identical to the prior implementation —
+    // `willRetry` above is a separately-computed logging field only, not
+    // wired into this decision, so this branch's behavior is unchanged.
     if (job?.name === BACKGROUND_JOB_TYPES.CALENDAR_PREP_GENERATE && job.attemptsMade >= (job.opts?.attempts || 1)) {
       const { eventId, workspaceId } = job.data;
       try {
@@ -524,10 +618,25 @@ export const startBackgroundWorker = () => {
           })
           .eq('id', eventId)
           .eq('workspace_id', workspaceId);
+        log('prep_failed status persisted', { eventId, workspaceId });
       } catch (updateError) {
-        console.error('Failed to update prep_failed status:', updateError);
+        logError('prep_failed_status_update', updateError, { eventId, workspaceId });
       }
     }
+  });
+
+  worker.on('stalled', (jobId) => {
+    // Lock expired mid-processing — usually a crashed worker process, an
+    // overwhelmed event loop, or a handler that hung past the lock duration.
+    // BullMQ only passes the raw jobId here, not the full job object.
+    logError('job stalled', new Error('Job stalled'), { jobId });
+  });
+
+  worker.on('error', (err) => {
+    // Worker-level errors not tied to any specific job — e.g. a dropped
+    // Redis connection. There was previously no listener at all for this,
+    // so these were only visible as an unhandled 'error' event.
+    logError('worker_error', err, {});
   });
 
   log('Background worker started', { concurrency: 5 });

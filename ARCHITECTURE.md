@@ -1,368 +1,441 @@
-# FounderSales Backend — Architecture
+# FounderSales — System Architecture
 
-**Scope:** this document covers `backend/` — a Node.js/Express API plus its background job system. The frontend (`frontend/`, React) lives in this same repository but is covered separately; this document is about the API and job system only.
+**Status:** Backend architecture reference. Frontend is React + TypeScript; see §12 for what's documented about it and why the rest is deliberately out of scope for now.
+**Scope:** The `src/` backend service — API, services, background workers, and the AI infrastructure layer underneath all of it.
 
 ---
 
-## 1. System Overview
+## 1. Executive Summary
 
-FounderSales is a multi-tenant backend: every piece of data belongs to a **workspace** (a team or a solo founder's own space), and almost every route resolves the caller's workspace membership before touching anything else. The system has two halves that share the same codebase but run different responsibilities:
+FounderSales is a multi-tenant sales coaching and outreach platform. A user's product context, voice, and history flow through an AI layer (branded to the user as **Clutch**, the platform's AI companion) that appears in five distinct places: opportunity discovery, outreach message generation, roleplay practice with a simulated buyer, calendar meeting intelligence, and ongoing coaching driven by real outcome data.
 
-- **The API** — Express routes that read/write Supabase Postgres directly, call one of four LLM providers with automatic fallback, and enqueue background jobs for anything that shouldn't block a response.
-- **The job system** — BullMQ workers, backed by Redis, that run scheduled jobs (nightly pattern detection, weekly skill snapshots, daily digests) and on-demand jobs enqueued by the API (message scoring, meeting prep, voice memo transcription).
+The backend is a single Node.js/Express service (ESM, `"type": "module"`) backed by **Supabase (Postgres)** for persistence and **Redis** for background job coordination, distributed rate limiting, and cross-instance AI-provider state. It follows a layered structure — routes → middleware → controllers/route-handlers → services → Supabase — with business logic living in `services/` specifically so the same functions are callable from an HTTP route or a background worker without duplication.
+
+What makes this backend more than a thin AI wrapper is concentrated in a few places worth naming up front, each covered in depth later in this document:
+
+- **A four-provider AI fallback chain** (§4) with per-key cooldown state shared across horizontally-scaled instances via Redis, structured error classification (not string-matching) driving four distinct retry behaviors, and selective vision-model routing that only attaches image data to models actually capable of using it.
+- **A cost-gating layer for calendar AI** (§7) that decides, before spending a token, whether a given AI call is worth making at all — cooldown-based research reuse, low-stakes event skipping, quota-aware degradation.
+- **A single-request practice-conversation engine** (§6) that bundles reply generation, an internal buyer monologue, outcome detection, and coaching feedback into one AI call rather than four sequential ones.
+- **A blended skill-scoring system** (§8) that reconciles two independently-scored data sources — real sent-message analysis and simulated practice sessions — onto one comparable scale.
+
+---
+
+## 2. System Overview
 
 ```mermaid
 flowchart TB
-    subgraph Client["Frontend (frontend/)"]
-        FE[React app]
+    subgraph Client["Client"]
+        FE["React + TypeScript SPA"]
     end
 
-    subgraph API["API Process (src/app.js)"]
-        EX[Express app]
+    subgraph API["API Process (app.js)"]
+        EX["Express App"]
     end
 
-    subgraph Workers["Background Workers"]
-        SCHED[scheduledWorker<br/>concurrency: 1]
-        BG[backgroundWorker<br/>concurrency: 5]
-        PRAC[practiceWorker<br/>concurrency: 10]
+    subgraph Workers["Background Processing"]
+        W1["scheduledWorker.js\n(cron-driven)"]
+        W2["practiceWorker.js\n(event-driven)"]
+        W3["backgroundWorker.js\n(durable fire-and-forget)"]
+        SCHED["registerSchedules.js"]
     end
 
     subgraph Data["Data & Infra"]
-        PG[(Supabase Postgres)]
-        REDIS[(Redis)]
-        CLOUD[(Cloudinary<br/>files & voice memos)]
+        PG[("Postgres\nvia Supabase")]
+        REDIS[("Redis")]
+        CLOUD[("Cloudinary\nfile storage")]
     end
 
-    subgraph AI["AI Providers"]
-        CB[Cerebras]
-        GQ[Groq]
-        MS[Mistral]
-        OR[OpenRouter]
-        EXA[Exa Search]
+    subgraph AI["AI Provider Layer"]
+        CB["Cerebras"]
+        GQ["Groq"]
+        MI["Mistral"]
+        OR["OpenRouter"]
+    end
+
+    subgraph Ext["External Services"]
+        EXA["Exa — web search"]
+        FCM["Firebase Cloud Messaging"]
+        RESEND["Resend / SMTP — email"]
+        SENTRY["Sentry"]
     end
 
     FE -->|HTTPS / JSON| EX
     EX -->|supabase-js| PG
-    EX -->|redis client| REDIS
+    EX -->|ioredis| REDIS
+    EX -->|uploads| CLOUD
     EX -->|enqueue| REDIS
-    EX -->|chat completions, fallback chain| CB & GQ & MS & OR
-    EX -->|prospect discovery| EXA
-    EX -->|signed uploads| CLOUD
+    EX -->|search| EXA
+    EX -->|fallback chain| CB & GQ & MI & OR
 
-    REDIS -->|BullMQ jobs| SCHED
-    REDIS -->|BullMQ jobs| BG
-    REDIS -->|BullMQ jobs| PRAC
-    SCHED --> PG
-    BG --> PG
-    PRAC --> PG
-    SCHED & BG & PRAC -.->|AI calls| CB & GQ & MS & OR
+    REDIS -->|BullMQ jobs| W1 & W2 & W3
+    SCHED -->|repeatable jobs| REDIS
+
+    W1 & W2 & W3 --> PG
+    W1 & W2 & W3 -->|fallback chain| CB & GQ & MI & OR
+    W2 & W3 --> FCM
+    W1 --> RESEND
+    EX & W1 & W2 & W3 -.->|error tracking| SENTRY
 ```
 
----
-
-## 2. Why this shape
-
-The product's core loop (see `PRODUCT_OVERVIEW.md`) requires a lot of AI calls that don't need to block a request: scoring a message after feedback is logged, generating a weekly skill snapshot, detecting patterns across two months of messages, transcribing a voice memo. None of these need to finish before the HTTP response returns. The architecture is built around that split: **the API does the minimum work needed to acknowledge a request and enqueue everything else**, and three purpose-built workers pick the work up.
-
-Three separate workers, not one, because their job shapes are genuinely different:
-
-| Worker | Concurrency | Job shape |
-|---|---|---|
-| `scheduledWorker` | 1 | Cron-driven, whole-workspace-or-global sweeps (pattern detection, digests). Deliberately serialized — these jobs read large slices of data and shouldn't overlap with themselves. |
-| `backgroundWorker` | 5 | Fire-and-forget, per-record jobs (calendar prep, commitment extraction, voice memo enrichment). Retried with exponential backoff. |
-| `practiceWorker` | 10 | High-frequency, low-latency jobs tied to an active user session (delivery/seen simulation, skill scoring, coaching annotations). Needs headroom because a user is often waiting on the *next* thing in the UI even though this specific job is async. |
+**Why this shape, not microservices:** the domain — a person's product context, their outreach history, their practice performance, their calendar — is a small number of tightly related entities with cross-cutting AI concerns (a voice profile informs message generation, practice scoring, *and* calendar prep) that are cheaper to share as one process's library code than to split across service boundaries and pay network/consistency costs for. The one place the system *does* decompose is synchronous request handling vs. asynchronous background work — a genuinely different scaling axis, covered in §11.
 
 ---
 
-## 3. Backend Layers
+## 3. Architectural Principles
 
-```
-src/
-├── app.js              # Express assembly — middleware chain, route mounting, error handler
-├── config/              # External client singletons + centralized rate-limiter registry
-├── middleware/            # auth, workspace resolution, validation, error handling, trace IDs
-├── routes/                # One Express router per resource
-├── services/               # Business logic — DB queries, AI calls, orchestration
-├── schemas/                  # Zod schemas that validate AI *output*, not just request input
-├── validators/                 # Zod schemas for request bodies
-├── jobs/                        # Queue definitions, three workers, and every job handler
-└── utils/                        # Logging, pagination, provider-error classification, parsing
-```
-
-Routes stay thin: parse `req.body`/`req.params`, call a service or two, shape the response. Business logic — including every AI prompt — lives in `services/`. This is what makes it possible for the exact same conversation-analysis logic to run whether it was triggered by an HTTP request or a queued job (`jobs/conversationAnalysisJob.js` is called from both `routes/feedback.js`'s enqueue and `practiceWorker.js`'s dispatch).
+1. **Thin routes, fat services.** Route handlers parse the request, call one or more service functions, and shape the response. Business logic — Supabase queries, RPC calls, AI orchestration, notification dispatch — lives in `services/`.
+2. **One shared implementation per concern.** Calendar prep generation is the clearest example: it used to exist in three separate places (inline in the route, re-implemented in the background worker, and a third helper nobody actually called) and now exists in exactly one function (`services/calendarPrep.js`) used by every trigger path. `utils/pagination.js`, `utils/parser.js` (AI JSON-response parsing with six fallback strategies), and the shared logger factory (`utils/logger.js`) follow the same instinct — centralize a pattern the moment it appears in two places, not after it's drifted in five.
+3. **Workspace-scoped, not user-scoped, data model.** Every AI-relevant table — `workspace_profiles`, `practice_sessions`, `conversation_analyses`, `skill_progression`, `communication_patterns` — is keyed by `(workspace_id, user_id)`, not `user_id` alone, because one person can belong to multiple workspaces (their own company, a client's, a team they advise) and their voice profile, skill history, and practice performance are legitimately different per workspace. This wasn't the original design — comments throughout the job files (`growthIntelligenceScheduler.js`, `skillProgressionJob.js`, `patternDetectionJob.js`) document a deliberate migration where `workspace_profiles!inner` joins return arrays in Supabase's client, and the fix in every case was finding the array element matching `active_workspace_id` rather than trusting array index 0.
+4. **AI cost is treated as a design constraint, not an afterthought.** The clearest evidence is `services/calendarAiGate.js` — a dedicated module whose entire job is deciding whether an AI call is worth making *before* making it, with every decision logged to `calendar_ai_events` so the impact is queryable, not just asserted. See §7.
+5. **Structured error classification over string matching.** `utils/providerErrors.js` replaced substring-matching a formatted error message (`err.message.includes('429')`) with a typed `ProviderCallError` carrying the real HTTP status code, network error code, and parsed response body — because a substring match on "500" can't distinguish an actual HTTP 500 from a token count or model name that happens to contain those digits, and because the original substring approach cooled down individual API keys for provider-wide outages that had nothing to do with the key's own validity.
+6. **Redis state is shared across instances by design, with an explicit kill switch.** AI-provider key cooldowns, model-discovery caching, and rate-limit counters are all Redis-backed specifically so a horizontally-scaled deployment behaves correctly — an instance that sees a key fail needs every other instance to know. Every one of these systems has a documented in-memory fallback path and an environment-variable kill switch (`MULTIPROVIDER_REDIS_STATE_ENABLED`) to revert to it, on the reasoning that the AI-provider layer is the single highest-traffic code path in the service and deserves a same-day rollback option that doesn't require a deploy.
 
 ---
 
-## 4. Request Lifecycle
+## 4. AI Provider Infrastructure
 
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant TR as traceId
-    participant AUTH as authenticate
-    participant WS as resolveWorkspace
-    participant RL as rate limiter (namespaced)
-    participant R as Route handler
-    participant S as Service
-    participant PG as Postgres
-    participant Q as BullMQ
+This is the part of the system most worth understanding in depth, because it's the layer every other AI feature in the product sits on top of.
 
-    C->>TR: Request
-    TR->>TR: attach req.traceId (X-Trace-Id header)
-    TR->>AUTH: next()
-    AUTH->>PG: supabase.auth.getUser(token)
-    alt invalid/expired token
-        AUTH-->>C: 401
-    else valid
-        AUTH->>AUTH: check Redis profile cache (30s TTL)
-        AUTH->>WS: next() with req.user
-        WS->>PG: workspace + membership + workspace_profile (parallel)
-        WS->>WS: cache combined result (Redis, 30s TTL)
-        alt not an active member
-            WS-->>C: 403/404
-        else member confirmed
-            WS->>RL: next() with req.workspace, req.membership
-            RL->>R: within limit
-            R->>S: call service
-            S->>PG: query/write
-            opt needs async follow-up
-                S->>Q: enqueue job
-            end
-            S-->>R: result
-            R-->>C: JSON response
-        end
-    end
-```
-
-Every workspace-scoped router is mounted behind the same two-middleware chain (`authenticate`, `resolveWorkspace`) in `app.js`, so a route file never has to re-implement "is this a valid, active member." Field-level authorization (e.g. only an `owner` can transfer ownership, only `manager`+ can view team pipeline) is layered on top via `requirePermission(role)`.
-
----
-
-## 5. Authentication & Identity
-
-Identity is delegated entirely to **Supabase Auth**. The backend never stores or checks passwords itself — `middleware/auth.js` calls `supabaseAdmin.auth.getUser(token)` to verify the bearer JWT, then loads the corresponding `users` row (cached in Redis for 30 seconds, keyed per user, explicitly invalidated on profile writes).
-
-A user's **product context** — product description, target audience, voice profile, archetype — deliberately does *not* live on the `users` table. It lives on `workspace_profiles`, scoped to `(workspace_id, user_id)`. This is what makes multi-workspace membership correct: the same person can be a member of two workspaces with two different products and two different voice profiles, and `resolveWorkspace` resolves the right one per request based on `users.active_workspace_id`.
-
-```mermaid
-flowchart LR
-    JWT[Bearer JWT] --> A[requireAuth]
-    A -->|user.id| B[resolveWorkspace]
-    B -->|active_workspace_id| C{workspace_profiles<br/>workspace_id + user_id}
-    C --> D[req.workspaceProfile]
-    B --> E[req.workspace / req.membership]
-```
-
-Google OAuth is supported through Supabase's own OAuth flow; the backend's job on callback is limited to verifying the returned token and creating/resolving the `users` + `workspace_profiles` rows via an atomic RPC (`create_user_with_workspace`), never handling credentials directly.
-
----
-
-## 6. Workspace / Multi-Tenancy Model
-
-Every data-bearing table carries `workspace_id`. Membership rows (`workspace_members`) carry a `role` (`owner` / `admin` / `manager` / `member`) and a `status` (`active` / `suspended` / `pending_invite` / `removed`). Invites are token-based: a random token is hashed before storage, and acceptance is handled by a Postgres function (`accept_workspace_invite`) rather than sequential application-level writes, so a token can't be redeemed twice under concurrent requests.
-
-Two Redis caches sit in front of this model — the auth-layer profile cache (§5) and a separate 30-second workspace-context cache (`middleware/workspace.js`) holding the resolved workspace + membership + workspace_profile triple. Both are explicitly invalidated on the write paths that change them (role change, member removal, profile update) rather than relying purely on TTL expiry — the TTL is a ceiling on staleness, not the only invalidation mechanism.
-
----
-
-## 7. Database Design
-
-Postgres via Supabase. A few structural choices worth calling out:
-
-**Sequence columns for stable pagination.** `chats`, `chat_messages`, and `user_events` each carry a `bigserial seq` column, independent of `created_at`. Timestamp-based cursors break under concurrent inserts with equal timestamps; `seq` doesn't. `chat.js`'s message pagination and `calendar.js`'s cursor pagination both key off `seq`, not `created_at`.
-
-**Generated columns for derived scores.** `opportunities.composite_score` and `prospects.name_normalized` are `GENERATED ALWAYS AS (...) STORED` columns — the composite score (average of fit/timing/intent) and the whitespace/case-normalized name used for fuzzy-dedup matching are computed by Postgres itself, not recalculated in application code on every read.
-
-**A three-layer prospect deduplication model** (`services/prospectDedup.js`):
-1. Exact identifier match (email or LinkedIn URL) → auto-merge, no ambiguity.
-2. Normalized-name exact match (whitespace/case variance only) → auto-merge.
-3. Trigram similarity (`pg_trgm`, via a `find_similar_prospects` RPC) on genuinely different-looking names → **never** auto-merged, only flagged into `prospect_merge_candidates` for a human decision. Auto-merging on fuzzy name similarity risks silently combining two different real people who happen to share a name — a real failure mode, not a hypothetical one, so the system deliberately stops short of automating that specific decision.
-
-**Buyer psychology as structured JSON, not free text.** `practice_sessions.buyer_profile`, `buyer_state`, and `buyer_state_history` store the AI buyer's persona and a running history of interest/trust/confusion scores at every exchange — this is what lets `insights.js`'s `practice/buyer-state-trajectory` endpoint compute, across 20 sessions, the exact exchange index where founder momentum typically peaks and where it typically drops off.
-
-**Immutable-by-convention scoring history.** `conversation_analyses`, `skill_progression`, and `user_skill_profile` are append-only per period — a new week's snapshot is a new row, not an update to last week's. This is what makes week-over-week delta computation (`composite_delta`) a simple two-row comparison rather than a derived/reconstructed value.
-
----
-
-## 8. AI Provider Layer
-
-`services/multiProvider.js` is the single choke point every AI call in the codebase goes through. It maintains a priority-ordered queue across four providers — Cerebras, Groq, Mistral, OpenRouter — each with its own pool of API keys, and walks the queue on failure rather than surfacing a provider outage to the caller.
+### 4.1 The fallback chain
 
 ```mermaid
 flowchart TB
-    CALL[callWithFallbackGroq] --> BUILD[buildProviderQueue]
-    BUILD --> Q1[Cerebras: keys × models]
-    BUILD --> Q2[Groq: keys × models]
-    BUILD --> Q3[Mistral: keys × models]
-    BUILD --> Q4[OpenRouter: keys × models]
-    Q1 --> TRY{Try next queue entry}
-    Q2 --> TRY
-    Q3 --> TRY
-    Q4 --> TRY
-    TRY -->|success| DONE[Return content + token usage]
-    TRY -->|KEY_FAULT: 401/403/429| COOL[Cool this key,<br/>1h, Redis-backed]
-    TRY -->|PROVIDER_TRANSIENT: 5xx/network| SKIP[Don't cool the key —<br/>not the key's fault]
-    TRY -->|BAD_MODEL: 400, model-not-found signal| EVICT[Evict model from<br/>discovery cache]
-    TRY -->|NON_RETRYABLE| THROW[Report to Sentry, throw immediately]
-    COOL --> TRY
-    SKIP --> TRY
-    EVICT --> TRY
+    Start["callWithFallback(messages, tier)"] --> Build["buildProviderQueue(tier)"]
+    Build --> Loop{"For each\n(provider, model, key)\nin priority order"}
+    Loop -->|attempt| Call["callProvider()"]
+    Call -->|success| Done["Return content + usage\n+ model_used"]
+    Call -->|failure| Classify["classifyProviderError(err)"]
+    Classify -->|KEY_FAULT\n401/403/429| Cool["markKeyFailed()\ncool this key 1h, Redis-shared"]
+    Classify -->|PROVIDER_TRANSIENT\n500/502/503/504,\nnetwork errors| Skip["do NOT cool the key —\nnot the key's fault"]
+    Classify -->|BAD_MODEL\n400 + model-not-found\nsignal in response body| Evict["evict this model from\nthe Redis-cached model list"]
+    Classify -->|NON_RETRYABLE\neverything else| Abort["report to Sentry,\nrethrow immediately —\nstop the whole chain"]
+    Cool --> Loop
+    Skip --> Loop
+    Evict --> Loop
+    Loop -->|queue exhausted| Fail["throw ALL_PROVIDERS_FAILED\nreport to Sentry"]
 ```
 
-Two decisions here worth spelling out:
+Provider priority is fixed — **Cerebras → Groq → Mistral → OpenRouter** — chosen by free-tier throughput (Cerebras's free tier offers the highest tokens-per-minute ceiling, OpenRouter is the paid fallback of last resort). Within each provider, multiple API keys can be configured (`GROQ_API_KEY_1` through `_10`, similarly for the others) so a single provider account hitting its own rate limit doesn't take that entire provider out of rotation.
 
-**Structured error classification, not string matching.** `utils/providerErrors.js` classifies failures by the real HTTP status code and parsed error body captured at the point the request was made, not by pattern-matching a formatted error message. The earlier approach (kept as a documented fallback path) treated any 4xx/5xx roughly the same and risked cooling a key down for an hour over a provider-wide outage that had nothing to do with that specific key's validity.
+Every request tries every (provider, model, key) combination in priority order until one succeeds or the queue is exhausted. This means a single `callWithFallbackGroq()` call can, in the worst case, attempt dozens of combinations — but in the overwhelmingly common case, the first entry (Cerebras's primary model, first configured key) succeeds and nothing past it is ever touched.
 
-**Vision support without penalizing every other model.** Only `meta-llama/llama-4-scout` (in the Groq queue) is flagged vision-capable. Image parts are attached to the outgoing request only when the model actually being tried this attempt is that one; every other model in the fallback chain still receives plain-text messages. This means an image attachment doesn't silently degrade the whole fallback chain's reliability just because most of the providers in it can't see it.
+### 4.2 Why four classifications, not "retryable vs. not"
 
-**Redis-backed key cooldown and model discovery, shared across instances.** A key that returns 429 is marked cooling in Redis (not in-process memory) for one hour, so a second API instance doesn't keep hammering a key the first instance already learned was rate-limited. Model discovery (which models a provider's `/models` endpoint actually lists right now) is cached for 6 hours behind a distributed lock, so only one instance ever performs the discovery HTTP call per provider per window — every other instance reads the shared result. A `MULTIPROVIDER_REDIS_STATE_ENABLED` kill switch reverts the whole file to its original in-memory-only behavior with no deploy required, specifically because this is the single highest-traffic file in the codebase and any change to it needs an instant rollback path.
+The critical distinction the classifier makes is **who is at fault**:
 
-Every call records token usage against `(workspace_id, user_id, model, source_job)` via `services/tokenTracker.js`, which is how per-workspace AI cost is queryable later without a separate observability system.
+- A `429` is the *key's* fault (or at least, this key's problem right now) — cool it, try the next key or provider.
+- A `503` is the *provider's* fault — cooling the key would be actively wrong, since the key itself did nothing wrong and would sit unnecessarily unavailable for an hour over an outage that has nothing to do with it.
+- A `400` naming a model that no longer exists is the *model reference's* fault, not the key's — evicting the model from the discovery cache (rather than the key from rotation) means other requests, and other instances via the shared Redis cache, stop hitting the same known-dead model without waiting out an unrelated key cooldown.
+- Anything else is presumed to be an actual bug in how the request was constructed — retrying that against three more providers just wastes time reproducing the same failure and masks a problem that needs fixing in code, so the chain aborts immediately and reports to Sentry at error severity rather than silently degrading.
 
----
+### 4.3 Cross-instance coordination
 
-## 9. Search / Prospect Discovery
+```mermaid
+sequenceDiagram
+    participant I1 as Instance 1
+    participant R as Redis
+    participant I2 as Instance 2
 
-`services/exa.js` wraps Exa's neural search API with the same multi-key, Redis-backed cooldown mechanism as the LLM layer (via a shared `services/providerCooldown.js` module — the cooldown logic itself isn't duplicated between the two files, just parameterized by provider name).
+    I1->>I1: Groq key #3 returns 429
+    I1->>R: HSET mp:cooldown:groq:3<br/>{failCount, failedAt}, EX 3600
+    Note over R: Shared cooldown state
 
-Before spending a search call, `needsRealTimeSearch()` runs a cheap LLM call that looks at how developed the founder's profile is (product description length, target audience specificity, ICP trigger) and decides whether a live search is likely to find anything real. If the profile is too thin, or the workspace's daily Exa quota is exhausted, the system falls back to AI-generated practice examples — clearly flagged `is_example: true` so they're never displayed as real leads.
+    I2->>I2: buildProviderQueue() for a new request
+    I2->>R: HGETALL mp:cooldown:groq:3
+    R-->>I2: {failCount: 1, failedAt: ...}
+    I2->>I2: key #3 excluded from this queue —<br/>never attempted, no wasted 429
 
----
+    Note over I1,I2: Same pattern applies to Exa search keys<br/>via the same shared providerCooldown.js module
+```
 
-## 10. Background Jobs
+Without this, an instance that discovers a bad key has no way to tell any other instance — every other instance keeps sending traffic to a key already known to be failing, until each independently rediscovers the same failure. The cooldown module (`services/providerCooldown.js`) is generic over an arbitrary `provider` string, which is why Exa's own key rotation (`services/exa.js`) shares the exact same mechanism rather than maintaining a structurally identical, independently-drifting copy of the same idea.
 
-### 10.1 Job types and dispatch
+Model discovery (which chat-capable models a provider currently exposes) works the same way: cached in Redis for 6 hours, refreshed by whichever instance happens to win a short-lived distributed lock (`withLock()`, 15-second TTL) rather than every instance independently hitting every provider's `/models` endpoint on every boot.
 
-`config/constants.js`'s `BACKGROUND_JOB_TYPES` is the single source of truth for job names — a route enqueues by constant, `backgroundWorker.js` dispatches by the same constant, so a typo in a job name fails at import time rather than silently creating an unlistened-to queue.
+### 4.4 Vision routing
 
 ```mermaid
 flowchart LR
-    subgraph Enqueue points
-        R1[routes/calendar.js]
-        R2[routes/feedback.js]
-        R3[routes/onboarding.js]
-        R4[routes/goals.js]
-        SCH[registerSchedules.js<br/>cron]
-    end
-
-    R1 & R2 & R3 & R4 --> BQ[(backgroundQueue)]
-    R2 --> PQ[(practiceQueue)]
-    SCH --> SQ[(scheduledQueue)]
-
-    BQ --> BW[backgroundWorker]
-    PQ --> PW[practiceWorker]
-    SQ --> SW[scheduledWorker]
+    A["chat.js: user sends message\nwith image attachment"] --> B["extractImageParts()\npulls base64 data URLs\nback out of processed attachments"]
+    B --> C["callWithFallbackGroq({ images })"]
+    C --> D{"buildProviderQueue\niterates candidates"}
+    D --> E{"Is this specific\nmodel in\nVISION_CAPABLE_MODELS?"}
+    E -->|"yes\n(llama-4-scout, gemma-4-31b)"| F["Attach images as\nmulti-part content\nto the LAST message"]
+    E -->|"no — every other\nmodel in the queue"| G["Plain text-only\nmessages, unchanged"]
+    F --> H[Provider call]
+    G --> H
 ```
 
-### 10.2 Idempotency for calendar prep — a two-layer guard
+Only two models across the entire four-provider, ~13-model priority list are actually vision-capable. Rather than either refusing images entirely or sending a multi-part content array to every provider regardless of whether it expects one, `buildMessagesForProvider()` checks the specific model about to be called on *this specific attempt* and only restructures the message payload when that model can use it — every other model in the fallback queue still receives the exact same plain-text messages array it always would, with the image attachment represented instead as a text placeholder (built by `buildGrokAttachmentPrompt()`) describing that an image was attached. If the fallback chain lands on a non-vision model, the user's image doesn't cause a malformed request — it just isn't visually interpreted by that particular attempt.
 
-Meeting prep can be triggered from three independent places: event creation, a manual "regenerate" button, and a nightly sweep that catches anything prep-generation missed. All three previously risked generating prep twice for the same event under a race. The fix has two layers:
+### 4.5 Usage tracking
 
-1. **BullMQ jobId dedup** — every enqueue uses a deterministic `jobId` (`prep:${eventId}`), so two enqueues for the *same* trigger collapse into one queued job.
-2. **A DB-state re-check inside the handler itself** — before generating anything, the handler re-reads `user_events.prep_generated` from Postgres. jobId dedup alone doesn't protect against two *different* jobIds (the on-creation path and the nightly sweep) racing for the same event; the DB check does.
-
-This pattern — durable job + a fresh DB check at the top of the handler — is used anywhere prep-like generation exists in this codebase, rather than trusting the queue's own dedup as sufficient on its own.
-
-### 10.3 AI cost gating before generation
-
-`services/calendarAiGate.js` is a rule engine every calendar AI trigger routes through *before* spending a model call: skip prep for a low-context "other" event type with no attendee info; skip research if the same prospect was already researched within the last 14 days (reusing the cached research instead); skip commitment/signal extraction on notes under 20 characters. Every gate decision — proceed, skip, or reuse-cache — is logged to `calendar_ai_events` with a reason, so the cost-reduction impact of the gate is queryable, not just asserted.
-
-### 10.4 Chat history summarization
-
-Full conversation history isn't replayed to the model forever. `constants.js`'s `CHAT_HISTORY_WINDOW` (20 messages) is what actually gets sent raw; anything older is folded into a running `chats.summary` field by a background job once a chat accumulates `CHAT_SUMMARIZE_EVERY_N_MESSAGES` (20) new messages since its last summarization. `buildSystemPromptForChat()` prepends that summary ahead of the live window, so a long-running coaching conversation doesn't grow its per-turn token cost linearly with the conversation's total length.
+Every AI call that carries `workspaceId` + `userId` is recorded via `record_ai_usage`, a Postgres RPC that writes an append-only row to `ai_usage_events` *and* atomically upserts a same-day rollup in `workspace_ai_usage_daily` — one write, two purposes, rather than a separate aggregation pass. This is what backs Exa's workspace-level daily quota checks (`checkWorkspaceExaUsage`) and the workspace usage-summary endpoint, and is deliberately workspace-and-user-scoped together rather than either alone, since the original single-`id`-parameter design (documented in `tokenTracker.js`'s own header) had genuinely ambiguous semantics — sometimes meaning "user," sometimes "workspace" — that made cost reporting unreliable.
 
 ---
 
-## 11. Streaming
+## 5. Request Lifecycle
 
-Chat responses can stream over Server-Sent Events. `services/streaming.js`'s `streamAndSave()` inserts a placeholder assistant message row first, streams tokens to the client as they arrive from the provider, and finalizes the row (content, token count, delivery status) once the stream completes — so a client that disconnects mid-stream still leaves a consistent, queryable message row behind rather than an orphaned placeholder. `stream_options: { include_usage: true }` is set on every streaming request specifically so the final SSE chunk carries real token counts; without it, streamed responses had no token accounting at all.
+```mermaid
+flowchart TB
+    START([Incoming HTTP request]) --> COOKIE[cookieParser]
+    COOKIE --> HELMET["helmet — security headers"]
+    HELMET --> CORS["cors — explicit origin allowlist"]
+    CORS --> MORGAN[morgan request logging]
+    MORGAN --> BODY["express.json — 2mb limit"]
+    BODY --> TRACE["traceId — attach X-Trace-Id"]
+    TRACE --> ROUTE{Route match}
+
+    ROUTE -->|"/api/auth/*"| AUTHLIM["authLimiter — IP-keyed"]
+    ROUTE -->|"most other routes"| AUTHMW["authenticate —\nverify Supabase JWT,\nRedis-cached profile (30s)"]
+    AUTHMW --> WSMW["resolveWorkspace —\nverify active membership,\nRedis-cached context (30s)"]
+    WSMW --> ROUTELIM["Route-specific limiter\n(chatLimiter, practiceLimiter,\ncalendarAiLimiter, etc.)"]
+    ROUTELIM --> HANDLER["Route handler:\nvalidate → call service(s) →\nshape response"]
+    HANDLER --> SERVICE["Service layer:\nSupabase queries, RPC calls,\nAI orchestration"]
+    SERVICE --> RESPOND[Response sent]
+
+    HANDLER -.->|thrown error| ERRHANDLER[errorHandler middleware]
+    SERVICE -.->|thrown error| ERRHANDLER
+    AUTHMW -.->|401| ERRHANDLER
+    WSMW -.->|403| ERRHANDLER
+    ERRHANDLER --> RESPOND
+```
+
+### 5.1 Authentication
+
+`authenticate` (`middleware/auth.js`) verifies a Supabase JWT via `supabaseAdmin.auth.getUser(token)` and attaches `req.user` — identity and device fields only (name, email, tier, FCM token, notification preferences). Product/business context deliberately does **not** live on `req.user`; it's fetched separately by workspace resolution, because a user's product description and voice profile are workspace-specific, not global to their account. The profile fetch itself is Redis-cached for 30 seconds, keyed per user, with an important correctness note: the raw JWT is never attached to `req.user` at all, even though it's already been verified — there's no legitimate downstream use for it, and keeping it off the request object closes off any risk of it leaking into a log line or error response by accident.
+
+### 5.2 Workspace resolution
+
+`resolveWorkspace` (`middleware/workspace.js`) verifies the caller is an active member of `req.user.active_workspace_id`, fetching workspace, membership, and workspace-profile rows in parallel and caching the combined result in Redis for 30 seconds (`ws:ctx:{userId}:{workspaceId}`). Every route mounted behind the `...ws` spread (`[authenticate, resolveWorkspace]`) in `app.js` gets this. The 30-second window is an explicit, bounded staleness trade-off — the same pattern Kith-style systems use for membership caching — accepted because it removes two-to-three Postgres round-trips from what is otherwise the single most frequently executed check in the entire API.
+
+### 5.3 Rate limiting
+
+Every limiter in the system is defined once in `config/limiters.js` via a `buildLimiter()` factory that **requires** an explicit, unique Redis namespace string — there is no default namespace available from that factory, which is a direct fix for a real bug: several limiters previously called `createRateLimitStore()` with no argument at all, silently defaulting to a shared `'default'` Redis key space and, in a few cases, genuinely merging counters across logically unrelated routes (an onboarding burst and a goals check-in decrementing the same Redis counter, because both keyed on `req.user?.id || req.ip` in the same `'default'` namespace). Nineteen distinct limiters exist today, each sized to its own actual cost profile rather than sharing one generic ceiling — a chat message (40/min, since every message triggers an AI call) is a fundamentally different cost than a pipeline stage-drag (120/min, cheap DB writes with no AI at all).
 
 ---
 
-## 12. Rate Limiting
+## 6. Practice Simulation Engine
 
-Every limiter in the codebase is defined once, in `config/limiters.js`, each with an explicit, unique Redis namespace (`ratelimit:<namespace>:`). This exists because of a real bug class: several limiters previously called a shared store-construction function with no namespace argument, which silently defaulted every one of them to the same `'default'` Redis key prefix — meaning a user hitting an AI-heavy route and a completely unrelated pipeline route could decrement the *same* counter. `createRateLimitStore()` now warns loudly if anything ever calls it without an explicit namespace, so a regression here is visible in logs immediately instead of silently merging two limits again.
+This is the most conversationally sophisticated AI feature in the system — a realistic buyer simulation that runs synchronously inside the request/response cycle, not as a background job, because the user is having a live conversation and needs the reply immediately.
 
-Limiters are sized per route's actual cost profile rather than one blanket "AI limiter" — `chat`/`practice` (every user turn = one model call) get more headroom than `goals`/`commitments` (one cheap call per user action), and `insights` (mostly cache-shielded, 4–24h TTLs) is more generous than a raw per-request-cost estimate would suggest, since most requests never reach the model at all.
-
-If Redis is unavailable at the moment a limiter's store is constructed, the limiter falls back to express-rate-limit's in-memory store (degraded — per-instance, not cluster-wide — but functional) rather than the request failing outright.
-
----
-
-## 13. Caching Strategy
-
-Redis serves four distinct roles, kept in separate key namespaces so a problem in one doesn't look like a problem in another:
-
-| Role | TTL | Fail mode |
-|---|---|---|
-| Auth profile cache (`profile:{userId}`) | 30s | Falls back to a fresh Postgres read |
-| Workspace context cache (`ws:ctx:{userId}:{workspaceId}`) | 30s | Falls back to a fresh Postgres read |
-| Rate-limit counters (`ratelimit:{namespace}:`) | rolling window | Falls back to in-memory (per-instance) |
-| AI provider state — key cooldowns, model discovery (`mp:*`) | 1h / 6h | Falls back to in-memory, kill-switchable |
-
-Every Redis-backed feature in this codebase is written to **fail open**: a Redis outage degrades precision (slightly stale cache, per-instance rate limiting, per-instance provider cooldown) but never blocks a request outright. This is a deliberate, consistent choice — Redis is treated as an optimization layer over Postgres and process state, never as a system of record.
-
----
-
-## 14. File Storage & Voice Memos
-
-Uploads (avatars, attachments, voice memos) go through Cloudinary rather than a self-managed object store. Voice memos specifically use Cloudinary's `video` resource type (its convention for audio), which returns duration metadata in the upload response for free, avoiding a second probe of the file.
-
-Voice memo processing is a three-stage async pipeline, each stage its own idempotent job:
+### 6.1 Session lifecycle
 
 ```mermaid
 sequenceDiagram
     participant U as User
-    participant API as calendar.js
-    participant CL as Cloudinary
-    participant Q as backgroundQueue
-    participant W as backgroundWorker
-    participant GW as Groq Whisper
+    participant R as practice.js routes
+    participant AI as multiProvider (fallback chain)
+    participant Q as practice-jobs queue
 
-    U->>API: POST /voice-memo (multipart audio)
-    API->>CL: uploadAudioBuffer()
-    API->>Q: enqueue VOICE_MEMO_TRANSCRIBE
-    API-->>U: 201 {memo: pending}
+    U->>R: POST /start {scenario_type, pressure_modifier?}
+    R->>AI: generateBuyerProfile() — name, role, pain,<br/>hidden motivations, starting interest/trust scores
+    R->>R: apply pressure_modifier stat adjustments<br/>(e.g. aggressive_buyer: -10 interest, -10 trust)
+    R-->>U: session_id, buyer_profile, instruction
 
-    Q->>W: transcribe job
-    W->>CL: fetch audio
-    W->>GW: transcribeAudio()
-    W->>W: persist transcript_text
-    W->>Q: enqueue VOICE_MEMO_ENRICH
+    loop Each message exchange
+        U->>R: POST /:sessionId/message
+        alt scenario_type === 'ghost'
+            R->>AI: evaluateMessageQualityForGhost()
+            alt quality_score >= 40
+                R->>AI: generatePracticeProspectReplyV3<br/>(one-turn override as 'interested')
+                R-->>U: reply + buyer_state (ghost broke silence)
+            else
+                R-->>U: ghosted: true, coaching hint (no reply)
+            end
+        else
+            R->>AI: generatePracticeProspectReplyV3<br/>(single bundled call)
+            Note over AI: Returns: reply text, internal_monologue,<br/>conversation_outcome, goal_achieved,<br/>state_delta, coaching_tip — one call
+            R->>R: apply state_delta to buyer_state
+            R-->>U: reply + updated buyer_state + outcome
+        end
+        R->>Q: enqueue PRACTICE_DELIVERED (500ms), PRACTICE_SEEN (1500ms)
+    end
 
-    Q->>W: enrich job
-    W->>W: extractCommitmentsAndSignals()<br/>(same pipeline typed notes use)
-    W->>W: generateMeetingDebrief()
-    W->>W: persist debrief + commitments + signals
+    U->>R: POST /:sessionId/complete
+    R->>Q: enqueue SKILL_SCORES (2s), ANNOTATIONS (5s), PLAYBOOK (2h)
+    R-->>U: 200
 ```
 
-A voice memo is never a parallel feature with its own AI logic — `enrichMemo()` calls the exact same `extractCommitmentsAndSignals` and `generateMeetingDebrief` functions the typed-notes debrief flow uses. The only thing that differs between a typed debrief and a voice-memo debrief is which function produced the raw text.
+### 6.2 Why one bundled call instead of four
+
+`generatePracticeProspectReplyV3` returns, from a single AI call: the reply text (1–3 sentences, in-character), an internal monologue (the buyer's unfiltered private reaction — deliberately distinct in tone from the polished reply, used post-session to show the user what the buyer was *actually* thinking versus what they said), a conversation-outcome classification (`continuing` vs. a named ending like `meeting_scheduled`, `deal_lost`, `price_negotiation`), a `goal_achieved` boolean checked against whatever session goal the user set at the start, numeric state deltas for interest/trust/confusion, and an inline coaching tip. An earlier architecture (still present as V1/V2 functions in `groq-practice.js`, kept for reference rather than deleted) made these as separate sequential calls. Bundling them into one response cuts both latency (the user is waiting on this) and cost (one call instead of up to four) per conversational turn — the tradeoff is a more constrained, carefully-engineered prompt and JSON schema that has to reliably produce all six fields in one shot, with `parseV3Reply()` providing field-by-field fallback defaults if the model's response is malformed rather than failing the whole turn.
+
+### 6.3 The ghost scenario's quality gate
+
+A "ghost" scenario means the buyer doesn't reply — but real prospects sometimes do respond to an exceptionally strong message even after going quiet. Rather than a hardcoded "ghost always means silence," every message in a ghost scenario is scored 0–100 by `evaluateMessageQualityForGhost()` on specificity, value clarity, personalization, and ask quality; a score of 40 or higher genuinely breaks the silence (the buyer profile is temporarily treated as `'interested'` for that one reply), and anything below it stays silent with a coaching hint explaining why. This means the "hardest" practice mode still rewards a good message instead of being an unconditional dead end regardless of what the user writes.
+
+### 6.4 Pressure modifiers
+
+Four optional modifiers (`decision_maker_watching`, `aggressive_buyer`, `competitor_mentioned`, `compliance_concern`) inject a dedicated block into the AI system prompt describing a specific behavioral shift — shorter and more blunt for an aggressive buyer, more deliberate and approval-conscious for compliance concern — and apply a one-time numeric adjustment to the buyer's starting interest/trust scores before the conversation begins, so the effect is felt from the very first reply rather than only showing up in prompt tone.
 
 ---
 
-## 15. Error Handling & Logging
+## 7. Calendar Intelligence
 
-A shared `AppError` hierarchy (`middleware/errorHandler.js`) carries an explicit `statusCode`; services throw typed errors, routes never construct HTTP status codes themselves. A catch-all in the error handler translates raw Postgres/Supabase errors into a generic `DB_ERROR` response so a leaked driver error never reaches a client.
+Calendar AI is the feature most deliberately engineered around **not** spending AI calls reflexively — every trigger point passes through a dedicated gating module before any model is invoked.
 
-Every log line is namespaced (`createLogger('Chat')`, `createLogger('Practice')`, ...) with structured `key=value` fields rather than free-text concatenation, and every request carries a trace ID (generated or forwarded from an upstream `X-Trace-Id` header) echoed back in the response, so a single request's log lines can be correlated even when interleaved with concurrent requests.
+### 7.1 The cost gate
 
-Sentry is wired in as a genuinely optional, no-op-if-unconfigured layer (`config/sentry.js`) — the app runs identically with `SENTRY_DSN` unset. Because most AI-call failures in this codebase are already caught locally and turned into a graceful fallback value rather than rethrown, automatic Express-level error capture alone would miss the failures most worth seeing. `Sentry.captureException` calls are placed at a small number of deliberate choke points instead — final provider-fallback exhaustion, job-handler failures, non-retryable AI errors — rather than scattered across every individual catch block.
+```mermaid
+flowchart TB
+    subgraph Triggers
+        T1["Event created\nwith attendee context"]
+        T2["Daily prep sweep"]
+        T3["Debrief submitted\nwith raw notes"]
+        T4["Debrief completed"]
+    end
+
+    T1 & T2 --> G1{"shouldGeneratePrep()\n— has attendee context?\n— low-stakes type + no linked deal?"}
+    G1 -->|skip| P1["buildTrivialEventPrep()\nno AI call, still flips\nprep_generated=true"]
+    G1 -->|proceed, pick tier| P2["generateEnrichedEventPrep()\ntier: 'quality' if tied to a deal\nor event_type='demo', else 'fast'"]
+
+    T1 --> G2{"shouldRunResearch()\n— already researched?\n— research done <14 days ago\nfor this SAME prospect,\nany event?\n— workspace quota available?"}
+    G2 -->|reuse| P3["Reuse existing research —\nzero-cost, cross-event"]
+    G2 -->|quota exceeded| P4["Skip entirely"]
+    G2 -->|proceed| P5["Exa search + Groq synthesis"]
+
+    T3 --> G3{"shouldExtractCommitmentsSignals()\n— raw notes >= 20 chars?"}
+    G3 -->|too short| P6[Skip]
+    G3 -->|proceed| P7["ONE call extracts BOTH\ncommitments AND signals"]
+
+    T4 --> G4{"shouldGenerateFollowUp()\n— outcome='dead' with no\nnext-step recommendation?"}
+    G4 -->|skip| P8[Skip]
+    G4 -->|proceed| P9["3 follow-up variants:\nbrief / substantive / re-engagement"]
+
+    P1 & P2 & P3 & P4 & P5 & P6 & P7 & P8 & P9 --> LOG["Every decision logged to\ncalendar_ai_events\n(workspace, event, function,\ndecision, reason, tier)"]
+```
+
+Every one of these gates writes its decision — proceed, skip, or reused-cache, plus the specific reason — to a dedicated audit table. This is what makes "we optimized AI cost on calendar features" a checkable claim rather than an assertion: the actual proceed/skip ratio, and *why* each skip happened, is a real query against `calendar_ai_events`, not something inferred from logs.
+
+### 7.2 Merged commitment and signal extraction
+
+A meeting debrief's raw notes used to trigger two independent AI calls on the exact same input text — one to extract commitments ("I'll send you the proposal by Friday"), a separate one to detect buying/risk/timing/engagement signals. `services/calendarCommitmentsSignals.js` replaced both with one call returning both arrays, additionally passing in the prospect's currently-open commitments so the model can recognize "I'll follow up" as reinforcing an existing tracked commitment rather than manufacturing a duplicate every time the same intent gets restated across multiple meetings.
+
+### 7.3 Research reuse across events
+
+Prospect research (an Exa search plus a Groq synthesis pass turning raw search results into a structured intelligence brief) is deliberately reused across *different* meetings with the *same* prospect within a 14-day cooldown, rather than researched fresh per event — because a prospect's public information doesn't meaningfully change meeting-to-meeting, and researching it three times for three meetings in the same two weeks is pure waste. The cooldown check queries every event linked to the same `prospect_id`, not just the current one.
 
 ---
 
-## 16. Security Notes
+## 8. Skill Scoring & Coaching Data Model
 
-- **Service-role Postgres access is the practical trust boundary**, not Row-Level Security — the backend uses Supabase's service-role client for nearly all operations, so authorization is enforced by the middleware chain (`authenticate` → `resolveWorkspace` → `requirePermission`), not by RLS policies. This is architecturally consistent *as long as* the service-role key never reaches a client, which the code respects.
-- **Mass-assignment protection via explicit Zod schemas with `.strict()`** on update routes (e.g. `prospects.js`'s `updateProspectSchema`) — a client cannot smuggle `workspace_id` or `user_id` into a body that gets spread into an update call.
-- **Invite tokens are hashed before storage** and compared by hash, never stored or logged in plaintext.
-- **Ownership checks precede mutations, not just reads** — `.eq('user_id', userId)` is applied on every `UPDATE`/`DELETE`, not only on the preceding `SELECT`, closing a class of bug where a pre-check passes but the actual mutation is unscoped.
-- **Copyright/PII-conscious search behavior** is enforced at the calling layer (`web_search`), not covered here — this document is about the backend's own data boundaries.
+FounderSales tracks skill in two genuinely different ways and deliberately reconciles them onto one comparable scale rather than treating them as separate systems the user has to interpret independently.
+
+```mermaid
+flowchart LR
+    subgraph Real["Real Outreach"]
+        A["Message sent →\nfeedback logged"] --> B["conversation_analyses\nhook/clarity/value_prop/\npersonalization/cta/tone\n— each 0-10"]
+    end
+
+    subgraph Sim["Practice Simulation"]
+        C["Session completed"] --> D["practice_sessions.skill_scores\nclarity/value/discovery/\nobjection_handling/brevity/\ncta_strength — each 0-100"]
+    end
+
+    B --> E["skillProgressionJob.js\nweekly blend"]
+    D -->|"÷ 10 to normalize scale"| E
+    E --> F["skill_progression\none row per\n(workspace, user, week)\ncomposite_score_avg,\ntop_weakness, top_strength"]
+
+    F --> G["adaptiveCurriculum\n3-session drill plan\ntargeting weakest axis"]
+    F --> H["insights.js endpoints\ntrend detection, persistence\nclassification, drill recs"]
+```
+
+The two sources score genuinely different axes — real messages are scored on hook/tone/personalization because that's what's observable from static text; practice sessions additionally score `discovery` and `objection_handling`, which only exist as a signal across a multi-turn conversation. Where axes overlap (clarity, value, CTA), the weekly job blends both sources by simple averaging *after* normalizing practice's 0–100 scale down to conversation-analysis's 0–10 scale — a detail worth calling out because getting this normalization wrong (blending a 0–100 and a 0–10 number directly) was an actual bug fixed during this system's development, documented inline in `skillProgressionJob.js`.
 
 ---
 
-## 17. Scaling Considerations
+## 9. Database Design
 
-- **Stateless API tier.** No in-process session state; the auth and workspace caches are Redis-backed specifically so a second API instance sees the same cache, not an independent one.
-- **Workers scale independently of the API.** Each worker is its own process with its own concurrency setting — `practiceWorker` can be given more headroom under load without touching the API's request-handling capacity.
-- **Cursor-based pagination on every high-volume list** (chats, chat messages, calendar events) via the `seq` column, so a client paging through history is doing an index-backed keyset lookup, not an offset scan that gets slower as the table grows.
-- **Batched queries over N+1** — several endpoints (workspace analytics, team leaderboard, dashboard) fetch all rows for a set of member IDs in one query and aggregate in application code, rather than issuing one query per member.
+### 9.1 Access pattern
+
+The backend uses Supabase's Postgres exclusively through the `supabase-js` query builder (`supabaseAdmin.from(...)`) via the service-role client, which bypasses Row-Level Security — authorization is enforced by the middleware chain (§5), not by RLS policies. This is the same trade-off documented in comparable systems: correct as long as the service-role key stays server-side and the middleware chain is never bypassed, with no independent database-layer backstop today.
+
+### 9.2 Core schema shape
+
+```mermaid
+erDiagram
+    USERS ||--o{ WORKSPACE_MEMBERS : "belongs to"
+    WORKSPACES ||--o{ WORKSPACE_MEMBERS : has
+    WORKSPACES ||--o{ WORKSPACE_PROFILES : "one profile per member per workspace"
+    WORKSPACES ||--o{ OPPORTUNITIES : contains
+    WORKSPACES ||--o{ PROSPECTS : contains
+    WORKSPACES ||--o{ PRACTICE_SESSIONS : contains
+    WORKSPACES ||--o{ CHATS : contains
+    OPPORTUNITIES ||--o{ FEEDBACK : "outcome logged as"
+    FEEDBACK ||--o| CONVERSATION_ANALYSES : "triggers AI scoring"
+    PROSPECTS ||--o{ USER_EVENTS : "meetings with"
+    USER_EVENTS ||--o{ CONVERSATION_COMMITMENTS : yields
+    USER_EVENTS ||--o{ CONVERSATION_SIGNALS : yields
+    USER_EVENTS ||--o{ VOICE_MEMOS : "may have"
+    PRACTICE_SESSIONS ||--o{ PRACTICE_BADGES : earns
+    CHATS ||--o{ CHAT_MESSAGES : contains
+    WORKSPACES ||--o{ SKILL_PROGRESSION : "weekly snapshots"
+    WORKSPACES ||--o{ AI_USAGE_EVENTS : "append-only log"
+    AI_USAGE_EVENTS }o--|| WORKSPACE_AI_USAGE_DAILY : "rolled up into"
+```
+
+### 9.3 Atomicity via Postgres RPCs
+
+Every genuine race-condition boundary in this system is pushed into a Postgres stored procedure rather than emulated with multiple sequential JS calls:
+
+| RPC | Called from | Prevents |
+|---|---|---|
+| `create_workspace_for_user` | `workspaces.js`, `auth.js` registration | A workspace existing with no owning member row, or vice versa — creates workspace + owner membership + empty profile in one transaction |
+| `accept_workspace_invite` | `user.js` invite acceptance | Two simultaneous accept attempts both succeeding, or a workspace-profile insert diverging from the membership activation |
+| `transfer_workspace_ownership` | `workspaces.js` | Ownership existing on two members simultaneously, or on neither, mid-transfer |
+| `increment_chat_stats` | Every chat message insert path | Lost updates to `message_count`/`last_message_at` under concurrent writes to the same chat |
+| `increment_performance_stats` | `feedback.js` | Lost updates to a user's running send/positive/negative counters |
+| `increment_goal_progress` | `goals.js` note submission | Lost updates to a goal's current value |
+| `record_ai_usage` | `tokenTracker.js`, every AI-call site with workspace context | A usage event being logged without its daily rollup updating in the same operation |
+| `find_similar_prospects` | `prospectDedup.js` | N+1 client-side fuzzy matching — trigram similarity computed in the database, not pulled client-side |
+| `upsert_objection_count` | `conversationAnalysisJob.js` | Lost updates to an objection's occurrence count under concurrent analysis jobs |
+
+### 9.4 Soft state, not soft deletes, is the norm
+
+Most entities in this schema use status/state fields (`opportunities.stage`, `practice_sessions.completed`, `voice_memos.transcription_status`) rather than deletion at all — the closest thing to a deletion pattern is `users.is_deleted` (a full soft-delete with PII scrubbing on account deletion) and workspace-member `status = 'removed'`. Financial/outcome history (`feedback`, `conversation_analyses`) is never deleted once created.
+
+---
+
+## 10. Multi-Tenancy Model
+
+A single person (`users` row) can hold membership in multiple `workspaces`, each a separate `workspace_members` row with its own `role` (owner/admin/manager/member) and its own `workspace_profiles` row — meaning the *same person* can have a different product description, different voice profile, and different practice/skill history per workspace they belong to. `users.active_workspace_id` determines which workspace's context is currently in scope for a request; switching workspaces (`POST /api/user/switch-workspace`) atomically invalidates both the old and new workspace's cached membership context so a switch takes effect immediately rather than waiting out the 30-second cache window.
+
+This model is why so many job files in this codebase carry comments about `workspace_profiles!inner` returning an array from Supabase and needing explicit resolution against `active_workspace_id` rather than trusting array order — it's the direct consequence of one user legitimately having several simultaneously-valid profile rows, not an edge case to special-case around.
+
+---
+
+## 11. Scalability & Deployment Topology
+
+### 11.1 Current topology
+
+The codebase runs as a single process today: `app.js` starts the Express server and, immediately after, calls `startAllJobs()` to boot the scheduler and all three BullMQ workers in the same process. This is deliberately convenient for early-stage deployment but couples API request-handling capacity to background-job throughput — a burst of AI-heavy scheduled jobs (the Sunday-evening pattern-detection-through-curriculum pipeline in particular) shares the same event loop as incoming API requests.
+
+### 11.2 Planned split-process topology
+
+A `server.js` (API-only) / `workers/index.js` (scheduler + all three workers, no HTTP server) split is planned specifically to decouple these two scaling concerns, following the same shape described in §2's diagram legend — every worker factory function already used by `startAllJobs()` is self-contained and importable independently of Express setup, so this split is a boot-sequence change, not a rewrite of job logic. See `BACKGROUND_JOBS.md` §8.1 for the operational detail.
+
+### 11.3 Why this decomposition, not a smaller one
+
+The AI provider layer's Redis-backed state (§4.3) is what makes horizontal *API* scaling safe today, independent of the worker split — any number of `app.js` instances (or, post-split, `server.js` instances) can run concurrently against the same Redis without duplicating rate-limit counters, AI-key cooldown state, or model-discovery caching, because none of that state is held in process memory as the source of truth.
+
+---
+
+## 12. Frontend
+
+The frontend is a React + TypeScript single-page application. Full architectural documentation of the frontend (state management approach, component structure, API client pattern) is intentionally deferred rather than guessed at here — this document only claims what's confirmed: the stack is React with TypeScript, consuming the backend's REST API described throughout this document. A more detailed frontend architecture section will be added once that codebase is available for the same level of tracing applied to the backend above.
+
+---
+
+## 13. Known Gaps & Engineering Trade-offs
+
+Documented explicitly because a system with zero visible trade-offs is less credible, not more:
+
+1. **`pattern_insights` has no registered handler** (see `BACKGROUND_JOBS.md` §4.3) — a self-enqueued job from the weekly pattern-detection run currently fails every time, a known and scoped gap pending a decision between two wiring options that were deliberately left unresolved rather than guessed at.
+2. **Single-process deployment today, split planned** (§11.1–11.2) — background job load and API request load currently share one event loop.
+3. **Service-role Postgres access, not RLS, is the enforcement boundary** (§9.1) — correct as long as the middleware chain is never bypassed, with no independent database-layer backstop.
+4. **30-second membership/profile cache staleness** (§5.1–5.2) — an explicit, bounded trade-off against removing repeated Postgres round-trips from the hottest part of every authenticated request; a role change made through the app takes effect immediately for the device that made it, but can take up to 30 seconds to propagate to a different session.
+5. **Booking pages are schema-present but not wired.** `booking_pages` and `availability_windows` tables exist in the schema for a planned public booking-page feature (a prospect books time directly, which would create a calendar event) — this is not yet connected to any route or service and isn't part of the current feature set.
+
+---
+
+*This document reflects the backend as currently implemented, including the split-process topology described as planned in §11.2, which is added alongside this documentation.*

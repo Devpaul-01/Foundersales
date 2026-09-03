@@ -22,6 +22,25 @@ import { sleep, logJob }            from '../utils/jobHelpers.js';
 
 const FOLLOWUP_BATCH_DELAY_MS = 1500;
 
+// Extracted for unit testing — see backend/src/jobs/__tests__/followupSequenceJob.test.js.
+// Behavior is unchanged from the original inline implementation: Supabase's
+// `!inner` join can return workspace_profiles as an array when there's
+// ambiguity, so we must find the profile matching the opportunity's own
+// workspace_id rather than blindly taking the first array entry.
+export const matchWorkspaceProfile = (opp) => {
+  const profiles = Array.isArray(opp.workspace_profiles)
+    ? opp.workspace_profiles
+    : [opp.workspace_profiles];
+
+  const matchedProfile = profiles.find(p => p?.workspace_id === opp.workspace_id);
+
+  if (!matchedProfile && profiles.length > 0) {
+    console.warn(`[FollowupJob] No matching workspace profile for opp ${opp.id} (workspace ${opp.workspace_id}), using fallback`);
+  }
+
+  return matchedProfile || profiles[0] || {};
+};
+
 export const runFollowupSequenceJob = async () => {
   const startTime = Date.now();
   console.log(`[FollowupJob] Starting ${new Date().toISOString()}`);
@@ -70,24 +89,10 @@ export const runFollowupSequenceJob = async () => {
 
       // FIX MED-12: workspace_profiles is an array — find the profile that matches
       // the opportunity's workspace_id, not just the first profile.
-      const normalized = pageData.map(opp => {
-        const profiles = Array.isArray(opp.workspace_profiles)
-          ? opp.workspace_profiles
-          : [opp.workspace_profiles];
-        
-        // ✅ Find profile where workspace_id matches the opportunity's workspace
-        const matchedProfile = profiles.find(p => p?.workspace_id === opp.workspace_id);
-        
-        // ✅ If no match, use first profile as fallback (with warning)
-        if (!matchedProfile && profiles.length > 0) {
-          console.warn(`[FollowupJob] No matching workspace profile for opp ${opp.id} (workspace ${opp.workspace_id}), using fallback`);
-        }
-        
-        return {
-          ...opp,
-          workspace_profiles: matchedProfile || profiles[0] || {},
-        };
-      });
+      const normalized = pageData.map(opp => ({
+        ...opp,
+        workspace_profiles: matchWorkspaceProfile(opp),
+      }));
 
       opps = opps.concat(normalized);
       if (pageData.length < PAGE_SIZE) break;

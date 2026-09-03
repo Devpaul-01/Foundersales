@@ -312,7 +312,7 @@ sequenceDiagram
     W->>G: transcribeAudio()
     G-->>W: transcript text
     W->>W: UPDATE voice_memos SET transcription_status='completed'
-    Note over W: transcription is now fully committed —<br/>enrichment enqueue failure below can't undo it
+    Note over W: transcription is now fully committed — enrichment enqueue failure below can't undo it
     W->>Q: enqueue voice_memo_enrich (jobId: voice_enrich_{memoId})
     Q->>W: job fires (separate invocation)
     W->>W: generateMeetingDebrief() + extractCommitmentsAndSignals()

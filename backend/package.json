@@ -33,7 +33,7 @@
     "nodemailer": "^6.9.9",
     "pdf-parse": "^1.1.1",
     "rate-limit-redis": "^4.0.0",
-    "redis": "^4.6.12",
+    "redis": "^5.0.0",
     "resend": "^3.2.0",
     "uuid": "^9.0.0",
     "zod": "^3.22.4"

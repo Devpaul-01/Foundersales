@@ -7,6 +7,9 @@
   "scripts": {
     "start": "node src/app.js",
     "dev": "nodemon src/app.js",
+    "test": "vitest",
+    "test:watch": "vitest --watch",
+    "test:coverage": "vitest --coverage",
     "db:migrate:v1": "echo 'Run schema.sql in Supabase SQL editor'",
     "db:migrate:v2": "echo 'Run schema_v2.sql in Supabase SQL editor after schema.sql'"
   },
@@ -39,6 +42,8 @@
     "zod": "^3.22.4"
   },
   "devDependencies": {
-    "nodemon": "^3.0.3"
+    "nodemon": "^3.0.3",
+    "vitest": "^2.1.8",
+    "@vitest/coverage-v8": "^2.1.8"
   }
 }

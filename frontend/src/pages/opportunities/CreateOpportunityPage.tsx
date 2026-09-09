@@ -133,6 +133,29 @@ const EMPTY_FORM: CreateForm = {
   intent_score:      null,
 };
 
+// Realistic sample data for quickly prefilling the form during dev/testing.
+// Not used in production flows — wire up via the "Fill sample data" dev button below.
+const MOCK_FORM: CreateForm = {
+  platform:          'linkedin',
+  target_name:       'Priya Nandakumar',
+  source_url:        'https://www.linkedin.com/in/priya-nandakumar-cro',
+  stage:             'replied',
+  target_context:
+    'VP of Growth at a Series B fintech (~140 employees). Posted last week about ' +
+    'struggling to keep SDR outreach personalized at scale. Mutual connection with ' +
+    'our head of sales. Company just raised a $28M round, likely hiring.',
+  prepared_message:
+    "Hi Priya — saw your post about the SDR personalization bottleneck as you scale " +
+    "outreach. We built a tool that handles exactly that (used by a few fintech teams " +
+    "your size). Worth a quick look?",
+  follow_up_message:
+    "Hey Priya, following up in case this got buried — happy to send a 2-min loom " +
+    "walkthrough instead if that's easier to skim.",
+  fit_score:         8,
+  timing_score:      7,
+  intent_score:      6,
+};
+
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function CreateOpportunityPage() {
@@ -189,6 +212,13 @@ export default function CreateOpportunityPage() {
     if (validate()) createMutation.mutate();
   };
 
+  // Dev-only helper: prefill the form with realistic sample data so you're not
+  // re-typing test data on every reload. Safe to delete before shipping.
+  const fillSampleData = () => {
+    setForm(MOCK_FORM);
+    setErrors({});
+  };
+
   // Live composite score preview
   const scoredValues = [form.fit_score, form.timing_score, form.intent_score].filter(
     (v): v is number => v !== null,
@@ -218,13 +248,20 @@ export default function CreateOpportunityPage() {
             </p>
           </div>
         </div>
-        <Button
-          size="sm"
-          isLoading={createMutation.isPending}
-          onClick={handleSubmit}
-        >
-          Save opportunity
-        </Button>
+        <div className="flex items-center gap-2">
+          {import.meta.env.DEV && (
+            <Button size="sm" variant="secondary" onClick={fillSampleData}>
+              Fill sample data
+            </Button>
+          )}
+          <Button
+            size="sm"
+            isLoading={createMutation.isPending}
+            onClick={handleSubmit}
+          >
+            Save opportunity
+          </Button>
+        </div>
       </div>
 
       {/* ── Section 1: Prospect ── */}

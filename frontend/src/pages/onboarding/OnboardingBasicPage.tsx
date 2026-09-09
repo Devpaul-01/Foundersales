@@ -1,14 +1,7 @@
 import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { useForm } from 'react-hook-form';
-import { zodResolver } from '@hookform/resolvers/zod';
-import { onboardingBasicSchema, type OnboardingBasicSchema } from '@/lib/schemas';
-import { onboardingApi } from '@/api/onboarding';
-import { useAuth } from '@/hooks/useAuth';
 import { Button } from '@/components/ui/Button';
 import { Input, Textarea, Select } from '@/components/ui/Input';
 import { InlineAlert } from '@/components/common/index';
-import { AppError } from '@/api/types';
 import { USER_ROLES, INDUSTRIES } from '@/lib/constants';
 import { cn } from '@/lib/utils';
 
@@ -39,19 +32,36 @@ const COUNTRIES = [
   { value: 'Other', label: 'Other (please specify)' },
 ];
 
+const DEMO_PRODUCT_DESCRIPTION =
+  "Northbeam Analytics is a reporting layer for data teams — it pulls metrics from your warehouse, ad platforms, and CRM into live dashboards, so nobody has to manually rebuild a slide deck every Monday.";
+
+const DEMO_TARGET_AUDIENCE =
+  "Heads of data or ops at B2B SaaS companies with 15–40 person teams, currently stitching together weekly reports by hand across 3+ tools.";
+
+const DEMO_BIO =
+  "Ex-data engineer turned founder. Spent four years watching teams burn entire afternoons on reporting and decided to fix it.";
+
 export default function OnboardingBasicPage() {
-  const navigate = useNavigate();
-  const { refreshUser } = useAuth();
-  const [serverError, setServerError] = useState('');
-  const [selectedPlatforms, setSelectedPlatforms] = useState<string[]>([]);
-  const [selectedCountry, setSelectedCountry] = useState<string>('');
+  const [serverError] = useState('');
+  const [selectedPlatforms, setSelectedPlatforms] = useState<string[]>([
+    'linkedin', 'reddit', 'producthunt',
+  ]);
+  const [selectedCountry, setSelectedCountry] = useState<string>('United States');
   const [otherCountry, setOtherCountry] = useState<string>('');
 
-  const { register, handleSubmit, watch, setValue, formState: { errors, isSubmitting } } =
-    useForm<OnboardingBasicSchema>({ resolver: zodResolver(onboardingBasicSchema) });
-
-  const productDesc = watch('product_description', '');
-  const countryValue = watch('country', '');
+  const [name, setName] = useState('Priya Sharma');
+  const [businessName, setBusinessName] = useState('Northbeam Analytics');
+  const [website, setWebsite] = useState('https://northbeam.io');
+  const [state, setState] = useState('California');
+  const [productDescription, setProductDescription] = useState(DEMO_PRODUCT_DESCRIPTION);
+  const [targetAudience, setTargetAudience] = useState(DEMO_TARGET_AUDIENCE);
+  const [primaryGoal, setPrimaryGoal] = useState('Book 10 qualified discovery calls this month');
+  const [role, setRole] = useState('founder');
+  const [industry, setIndustry] = useState('saas');
+  const [experienceLevel, setExperienceLevel] = useState('intermediate');
+  const [businessStage, setBusinessStage] = useState('Early-stage, $8k MRR');
+  const [bio, setBio] = useState(DEMO_BIO);
+  const [isSubmitting] = useState(false);
 
   const togglePlatform = (p: string) =>
     setSelectedPlatforms((prev) =>
@@ -61,38 +71,18 @@ export default function OnboardingBasicPage() {
   const handleCountryChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const value = e.target.value;
     setSelectedCountry(value);
-    if (value !== 'Other') {
-      setValue('country', value);
+    if (value === 'Other') {
       setOtherCountry('');
-    } else {
-      setValue('country', '');
     }
   };
 
   const handleOtherCountryChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const value = e.target.value;
-    setOtherCountry(value);
-    setValue('country', value);
+    setOtherCountry(e.target.value);
   };
 
-  const onSubmit = async (data: OnboardingBasicSchema) => {
-    setServerError('');
-    
-    // Log the data being sent to backend
-    console.log('[OnboardingBasic] Submitting data:', JSON.stringify({
-      ...data,
-      preferred_platforms: selectedPlatforms,
-    }, null, 2));
-    
-    try {
-      await onboardingApi.submitBasic({ ...data, preferred_platforms: selectedPlatforms });
-      console.log('[OnboardingBasic] Submit successful');
-      await refreshUser();
-      navigate('/onboarding/q/1');
-    } catch (err) {
-      console.error('[OnboardingBasic] Submit error:', err);
-      setServerError(err instanceof AppError ? err.message : 'Something went wrong.');
-    }
+  const onSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    // Static demo — no submission/network side effects.
   };
 
   return (
@@ -105,18 +95,35 @@ export default function OnboardingBasicPage() {
       </div>
 
       {serverError && (
-        <InlineAlert type="error" message={serverError} onDismiss={() => setServerError('')} />
+        <InlineAlert type="error" message={serverError} />
       )}
 
-      <form onSubmit={handleSubmit(onSubmit)} className="space-y-5">
+      <form onSubmit={onSubmit} className="space-y-5">
         {/* Personal */}
         <div className="bg-white rounded-lg border border-surface-border p-5 space-y-4">
           <h2 className="text-sm font-semibold text-text-primary">Personal info</h2>
-          <Input label="Your name" placeholder="Jane Doe" required error={errors.name?.message} {...register('name')} />
-          <Input label="Business name" placeholder="Acme Inc." {...register('business_name')} />
-          <Input label="Website" type="url" placeholder="https://yoursite.com" error={errors.website?.message} {...register('website')} />
-          
-          {/* Location Section - NEW */}
+          <Input
+            label="Your name"
+            placeholder="Jane Doe"
+            required
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+          />
+          <Input
+            label="Business name"
+            placeholder="Acme Inc."
+            value={businessName}
+            onChange={(e) => setBusinessName(e.target.value)}
+          />
+          <Input
+            label="Website"
+            type="url"
+            placeholder="https://yoursite.com"
+            value={website}
+            onChange={(e) => setWebsite(e.target.value)}
+          />
+
+          {/* Location Section */}
           <div className="pt-2 border-t border-gray-100">
             <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wider mb-3">Location</h3>
             <div className="grid grid-cols-2 gap-4">
@@ -127,7 +134,6 @@ export default function OnboardingBasicPage() {
                   placeholder="Select country"
                   value={selectedCountry}
                   onChange={handleCountryChange}
-                  error={errors.country?.message}
                 />
                 {selectedCountry === 'Other' && (
                   <Input
@@ -139,11 +145,11 @@ export default function OnboardingBasicPage() {
                   />
                 )}
               </div>
-              <Input 
-                label="State / Region" 
-                placeholder="e.g., California, Lagos, London" 
-                error={errors.state?.message}
-                {...register('state')} 
+              <Input
+                label="State / Region"
+                placeholder="e.g., California, Lagos, London"
+                value={state}
+                onChange={(e) => setState(e.target.value)}
               />
             </div>
           </div>
@@ -152,20 +158,14 @@ export default function OnboardingBasicPage() {
         {/* Product */}
         <div className="bg-white rounded-lg border border-surface-border p-5 space-y-4">
           <h2 className="text-sm font-semibold text-text-primary">Your product / service</h2>
-          {productDesc.length === 0 && (
-            <InlineAlert
-              type="warning"
-              message="💡 The more detail you add here, the smarter your Clutch AI coach becomes."
-            />
-          )}
           <Textarea
             label="Product description"
             placeholder="Describe what you sell, who it's for, and what problem it solves..."
             rows={4}
             maxLength={2000}
             showCount
-            error={errors.product_description?.message}
-            {...register('product_description')}
+            value={productDescription}
+            onChange={(e) => setProductDescription(e.target.value)}
           />
           <Textarea
             label="Target audience"
@@ -173,9 +173,15 @@ export default function OnboardingBasicPage() {
             rows={3}
             maxLength={1000}
             showCount
-            {...register('target_audience')}
+            value={targetAudience}
+            onChange={(e) => setTargetAudience(e.target.value)}
           />
-          <Textarea label="Primary goal" placeholder="What's your #1 sales goal right now?" {...register('primary_goal')} />
+          <Textarea
+            label="Primary goal"
+            placeholder="What's your #1 sales goal right now?"
+            value={primaryGoal}
+            onChange={(e) => setPrimaryGoal(e.target.value)}
+          />
         </div>
 
         {/* Role & Industry */}
@@ -186,13 +192,15 @@ export default function OnboardingBasicPage() {
               label="Your role"
               options={USER_ROLES as unknown as Array<{value:string;label:string}>}
               placeholder="Select role"
-              {...register('role')}
+              value={role}
+              onChange={(e) => setRole(e.target.value)}
             />
             <Select
               label="Industry"
               options={INDUSTRIES as unknown as Array<{value:string;label:string}>}
               placeholder="Select industry"
-              {...register('industry')}
+              value={industry}
+              onChange={(e) => setIndustry(e.target.value)}
             />
           </div>
           <Select
@@ -203,9 +211,15 @@ export default function OnboardingBasicPage() {
               { value:'advanced',     label:'Advanced — seasoned seller' },
             ]}
             placeholder="Select level"
-            {...register('experience_level')}
+            value={experienceLevel}
+            onChange={(e) => setExperienceLevel(e.target.value)}
           />
-          <Input label="Business stage" placeholder="Pre-revenue, early-stage, growth..." {...register('business_stage')} />
+          <Input
+            label="Business stage"
+            placeholder="Pre-revenue, early-stage, growth..."
+            value={businessStage}
+            onChange={(e) => setBusinessStage(e.target.value)}
+          />
         </div>
 
         {/* Platforms */}
@@ -237,7 +251,8 @@ export default function OnboardingBasicPage() {
             placeholder="A sentence or two about you and your background..."
             rows={2}
             maxLength={2000}
-            {...register('bio')}
+            value={bio}
+            onChange={(e) => setBio(e.target.value)}
           />
         </div>
 

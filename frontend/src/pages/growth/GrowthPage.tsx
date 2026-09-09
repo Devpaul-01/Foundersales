@@ -1,115 +1,370 @@
 // ============================================================
 // FILE: src/pages/growth/GrowthPage.tsx
 //
-// Changes vs previous version:
-//  - GrowthFeedCard: marks card as read via IntersectionObserver
-//    (POST /api/growth/cards/:id/read, fires once at 60% visibility)
-//  - GrowthFeedCard: dismiss button (POST /api/growth/cards/:id/dismiss)
-//    with optimistic local removal + query invalidation
-//  - WeeklyPlanSection: fetches GET /api/growth/plan and renders
-//    a dedicated card above the feed
-//  - HistorySection: fetches GET /api/growth/history with
-//    All / Tips / Plans filter tabs + prev/next pagination
-//  - GrowthPage: Feed | History tab switcher in header area
+// DEMO BUILD — for screenshots / product walkthroughs only.
+//  - All data below is hardcoded and local. No network calls,
+//    no react-query, no auth context, no loading states.
+//  - Design and interaction patterns (tabs, expand/collapse,
+//    dismiss, check-in flow, history pagination) are preserved
+//    and fully functional against the static data.
+//  - Swap the DEMO_* constants back out for real API-backed
+//    hooks when wiring this up to the backend again.
 // ============================================================
-import React, { useState, useRef, useCallback, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { useInfiniteQuery, useQuery, useMutation } from '@tanstack/react-query';
-import { growthApi }   from '@/api/growth';
-import { chatApi }     from '@/api/chat';
-import { queryClient } from '@/lib/queryClient';
-import { queryKeys }   from '@/lib/queryKeys';
-import { useAuth }     from '@/hooks/useAuth';
-import { useToast }    from '@/hooks/useToast';
-import { Button }      from '@/components/ui/Button';
-import { Textarea }    from '@/components/ui/Input';
-import { Skeleton }    from '@/components/ui/Skeleton';
-import { EmptyState, Spinner } from '@/components/common/index';
-import { formatRelativeDate, cn } from '@/lib/utils';
+import React, { useState } from 'react';
 import {
   Flame, TrendingUp, Award, Lightbulb, CheckCircle2,
   BookOpen, RefreshCw, X, Calendar, ChevronLeft, ChevronRight,
 } from 'lucide-react';
-import type { GrowthCard, DailyCheckIn } from '@/api/types';
+
+// ── Minimal local utilities (replacing @/lib/utils, @/components/ui) ──
+function cn(...args: Array<string | false | null | undefined>) {
+  return args.filter(Boolean).join(' ');
+}
+
+function formatRelativeDate(iso: string): string {
+  const date = new Date(iso);
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffMins = Math.round(diffMs / 60000);
+  const diffHours = Math.round(diffMs / 3600000);
+  const diffDays = Math.round(diffMs / 86400000);
+  if (diffMins < 60) return diffMins <= 1 ? 'Just now' : `${diffMins}m ago`;
+  if (diffHours < 24) return `${diffHours}h ago`;
+  if (diffDays === 1) return 'Yesterday';
+  if (diffDays < 7) return `${diffDays}d ago`;
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+function Button({
+  children, onClick, size = 'sm', variant = 'primary', disabled, isLoading, className,
+}: {
+  children: React.ReactNode;
+  onClick?: () => void;
+  size?: 'xs' | 'sm';
+  variant?: 'primary' | 'ghost';
+  disabled?: boolean;
+  isLoading?: boolean;
+  className?: string;
+}) {
+  const sizeCls = size === 'xs' ? 'text-xs px-2.5 py-1.5' : 'text-sm px-4 py-2';
+  const variantCls =
+    variant === 'ghost'
+      ? 'text-text-primary hover:bg-black/5'
+      : 'bg-brand text-white hover:bg-brand-600 shadow-sm';
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled || isLoading}
+      className={cn(
+        'inline-flex items-center justify-center rounded-lg font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed',
+        sizeCls, variantCls, className,
+      )}
+    >
+      {isLoading ? <Spinner size="xs" /> : children}
+    </button>
+  );
+}
+
+function Spinner({ size = 'sm' }: { size?: 'xs' | 'sm' }) {
+  const px = size === 'xs' ? 12 : 16;
+  return (
+    <svg
+      className="animate-spin text-current"
+      style={{ width: px, height: px }}
+      viewBox="0 0 24 24"
+      fill="none"
+    >
+      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+    </svg>
+  );
+}
+
+function Textarea({
+  value, onChange, rows = 2, maxLength, placeholder,
+}: {
+  value: string;
+  onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => void;
+  rows?: number;
+  maxLength?: number;
+  placeholder?: string;
+}) {
+  return (
+    <textarea
+      value={value}
+      onChange={onChange}
+      rows={rows}
+      maxLength={maxLength}
+      placeholder={placeholder}
+      className="w-full rounded-lg border border-surface-border bg-white px-3 py-2 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-brand/40 focus:border-brand resize-none"
+    />
+  );
+}
+
+function EmptyState({
+  icon, headline, subline,
+}: { icon: React.ReactNode; headline: string; subline: string }) {
+  return (
+    <div className="flex flex-col items-center justify-center text-center py-12 px-6 bg-surface-base/60 border border-dashed border-surface-border rounded-xl">
+      <div className="text-text-muted mb-3">{icon}</div>
+      <p className="text-sm font-semibold text-text-primary mb-1">{headline}</p>
+      <p className="text-sm text-text-muted max-w-xs">{subline}</p>
+    </div>
+  );
+}
+
+// ── Types (mirroring @/api/types shapes) ────────────────────────
+interface GrowthCard {
+  id: string;
+  card_type: string;
+  title: string;
+  body: string;
+  created_at: string;
+  is_read: boolean;
+  action_label?: string;
+  action_type?: 'internal_chat' | string;
+}
+
+interface DailyCheckIn {
+  date: string;
+  questions: string[];
+  processed_at: string | null;
+  ai_response: string | null;
+}
 
 // ── Card styles ───────────────────────────────────────────────
 const CARD_STYLE: Record<string, { bg: string; icon: React.ReactNode }> = {
-  tip:        { bg: 'bg-blue-50/60 border-brand-200',     icon: <Lightbulb    size={15} className="text-brand"        /> },
-  strategy:   { bg: 'bg-indigo-50/60 border-indigo-200',  icon: <TrendingUp   size={15} className="text-indigo-500"   /> },
-  challenge:  { bg: 'bg-amber-50/60 border-amber-200',    icon: <Award        size={15} className="text-amber-500"    /> },
-  reflection: { bg: 'bg-purple-50/60 border-purple-200',  icon: <BookOpen     size={15} className="text-purple-500"   /> },
-  resource:   { bg: 'bg-emerald-50/60 border-emerald-200', icon: <BookOpen    size={15} className="text-emerald-500"  /> },
-  insight:    { bg: 'bg-blue-50/60 border-brand-200',     icon: <Lightbulb    size={15} className="text-brand"        /> },
-  community:  { bg: 'bg-rose-50/60 border-rose-200',      icon: <CheckCircle2 size={15} className="text-rose-500"     /> },
+  tip:        { bg: 'bg-blue-50/60 border-brand-200',      icon: <Lightbulb    size={15} className="text-brand"        /> },
+  strategy:   { bg: 'bg-indigo-50/60 border-indigo-200',   icon: <TrendingUp   size={15} className="text-indigo-500"   /> },
+  challenge:  { bg: 'bg-amber-50/60 border-amber-200',     icon: <Award        size={15} className="text-amber-500"    /> },
+  reflection: { bg: 'bg-purple-50/60 border-purple-200',   icon: <BookOpen     size={15} className="text-purple-500"   /> },
+  resource:   { bg: 'bg-emerald-50/60 border-emerald-200', icon: <BookOpen     size={15} className="text-emerald-500"  /> },
+  insight:    { bg: 'bg-blue-50/60 border-brand-200',      icon: <Lightbulb    size={15} className="text-brand"        /> },
+  community:  { bg: 'bg-rose-50/60 border-rose-200',       icon: <CheckCircle2 size={15} className="text-rose-500"     /> },
 };
+
+// ============================================================
+// DEMO DATA — hardcoded, realistic, varied. No API involved.
+// ============================================================
+const DEMO_USER = {
+  name: 'Priya Nathan',
+  archetype: 'The Closer',
+  check_in_streak: 12,
+};
+
+const now = new Date();
+const hoursAgo = (h: number) => new Date(now.getTime() - h * 3600_000).toISOString();
+const daysAgo = (d: number) => new Date(now.getTime() - d * 86400_000).toISOString();
+
+const DEMO_WEEKLY_PLAN = {
+  id: 'plan_2026_w36',
+  title: 'Tighten your discovery calls',
+  body:
+    "You've closed 4 deals this month, but call notes show discovery running long — average 34 minutes before you get to budget. This week, practice landing on the 3 qualifying questions (budget, timeline, decision process) inside the first 12 minutes. Try it on your next two calls with Meridian Logistics and Fenwick & Cole, then log what changed in your debrief.",
+  action_label: 'Practice this in a role-play',
+  action_type: 'internal_chat',
+  cached: true,
+};
+
+const DEMO_CHECK_IN: DailyCheckIn = {
+  date: now.toISOString().slice(0, 10),
+  questions: [
+    "What's one call or conversation today that didn't go the way you wanted?",
+    'What would you do differently if you had it again?',
+  ],
+  processed_at: hoursAgo(3),
+  ai_response:
+    "Sounds like the Fenwick call stalled because the champion couldn't speak to budget — that's a common signal to loop in an economic buyer earlier, not push harder on features. Nice catch flagging it instead of glossing over it. Bring this into Thursday's role-play and we'll drill the pivot.",
+};
+
+// Full feed — first page's worth for the "Feed" tab
+const DEMO_FEED_CARDS: GrowthCard[] = [
+  {
+    id: 'card_101',
+    card_type: 'insight',
+    title: 'Your close rate jumps 18% after a same-day recap email',
+    body:
+      "Across your last 26 closed-won deals, the 14 where you sent a recap email within 2 hours of the call closed 18% faster on average than the ones where the recap went out the next day or later. Prospects are still warm right after the call — momentum decays fast. Consider drafting the recap during the last 5 minutes of the call itself, before you move to the next thing.",
+    created_at: hoursAgo(2),
+    is_read: false,
+    action_label: 'Draft a recap template',
+    action_type: 'internal_chat',
+  },
+  {
+    id: 'card_102',
+    card_type: 'challenge',
+    title: "This week's challenge: ask for the referral before the close",
+    body:
+      "You're strong at closing but referrals are down 40% quarter over quarter. On your next 3 closed deals, ask 'who else on your team is dealing with this same problem?' before you send the contract — not after. Log the outcome in your debrief so we can see what moves the needle.",
+    created_at: hoursAgo(6),
+    is_read: false,
+    action_label: 'Role-play the ask',
+    action_type: 'internal_chat',
+  },
+  {
+    id: 'card_103',
+    card_type: 'strategy',
+    title: 'Reframe price objections around cost of inaction',
+    body:
+      "In your last 4 debriefs, price objections came up right after you presented ROI numbers — that's a sign the ROI framing landed but felt abstract. Try anchoring to what the status quo is already costing them per month before you introduce your price. It reorders the comparison from 'their budget vs. our price' to 'current cost vs. new cost.'",
+    created_at: hoursAgo(10),
+    is_read: true,
+    action_label: 'Practice this reframe',
+    action_type: 'internal_chat',
+  },
+  {
+    id: 'card_104',
+    card_type: 'tip',
+    title: 'Slow down your intro by 10 seconds',
+    body:
+      'Calls that opened with a brief pause before the pitch — even just a beat after "thanks for making time" — had noticeably better engagement in the first two minutes. It signals confidence rather than a rehearsed script.',
+    created_at: daysAgo(1),
+    is_read: true,
+  },
+  {
+    id: 'card_105',
+    card_type: 'reflection',
+    title: 'Look back at the Grantham Co. debrief',
+    body:
+      "You flagged feeling rushed on this call and it shows in the transcript — 6 questions in the first 90 seconds. Worth revisiting what triggered the rushed feeling: was it the prospect's tone, the clock, or something going in beforehand? Naming the trigger makes it easier to catch next time.",
+    created_at: daysAgo(2),
+    is_read: true,
+  },
+  {
+    id: 'card_106',
+    card_type: 'resource',
+    title: 'Worth a read: "The Challenger Sale" framework on teaching for differentiation',
+    body:
+      "Given how often your calls default to feature walkthroughs, this framework on teaching prospects something new about their own business — rather than pitching capabilities — maps closely to what's already working in your strongest calls with Council Ridge and Fenwick & Cole.",
+    created_at: daysAgo(3),
+    is_read: true,
+  },
+  {
+    id: 'card_107',
+    card_type: 'community',
+    title: '3 reps with a similar archetype hit a new milestone this week',
+    body:
+      "Other 'Closer' archetypes on your team crossed 90% quota attainment this week using the same early-qualification approach from your weekly plan. You're on a similar trajectory — 84% attainment with 9 days left in the cycle.",
+    created_at: daysAgo(4),
+    is_read: true,
+  },
+];
+
+// Extra page to demonstrate "load more" without needing real pagination
+const DEMO_FEED_CARDS_PAGE_2: GrowthCard[] = [
+  {
+    id: 'card_108',
+    card_type: 'tip',
+    title: 'Your Tuesday afternoon calls out-convert every other slot',
+    body:
+      'Tuesday 1–3pm calls have a 61% next-step conversion rate versus a 38% average across the rest of the week. Worth protecting that slot for high-priority accounts rather than internal syncs.',
+    created_at: daysAgo(5),
+    is_read: true,
+  },
+  {
+    id: 'card_109',
+    card_type: 'strategy',
+    title: 'Bring a mutual success story into cold outreach',
+    body:
+      "Cold emails referencing a similar-industry customer story got a 22% higher reply rate than generic value-prop openers in your last batch. You already have three strong stories on file — Council Ridge, Meridian, and Aldwych Partners — worth rotating them by industry.",
+    created_at: daysAgo(6),
+    is_read: true,
+  },
+];
+
+// History dataset — mix of tips and plans across several weeks
+const DEMO_HISTORY_CARDS: GrowthCard[] = [
+  ...DEMO_FEED_CARDS,
+  ...DEMO_FEED_CARDS_PAGE_2,
+  {
+    id: 'card_201',
+    card_type: 'strategy',
+    title: "Last week's plan: Handle the 'send me something in writing' stall",
+    body:
+      "You improved from 6 to 2 stalled deals last week by proposing a 15-minute follow-up call instead of a cold email whenever a prospect asked for written info. Keep leaning on that pattern going into this month's renewals.",
+    created_at: daysAgo(8),
+    is_read: true,
+  },
+  {
+    id: 'card_202',
+    card_type: 'tip',
+    title: 'Mirror the last 3 words before answering objections',
+    body: 'A small mirroring habit — repeating the last few words of an objection before responding — correlated with longer, more detailed prospect responses across your recorded calls this month.',
+    created_at: daysAgo(9),
+    is_read: true,
+  },
+  {
+    id: 'card_203',
+    card_type: 'strategy',
+    title: "Plan from 2 weeks ago: Shorten your proposal turnaround",
+    body:
+      'You cut average proposal turnaround from 3.4 days to 1.8 days by drafting a skeleton proposal live on the call. Two of the three deals that used this approach closed within the following week.',
+    created_at: daysAgo(15),
+    is_read: true,
+  },
+  {
+    id: 'card_204',
+    card_type: 'resource',
+    title: 'Worth a read: negotiating without discounting on price',
+    body: 'A short piece on trading value-adds (extended onboarding, priority support) instead of discounts when a prospect pushes on price late in the cycle — closely matches two situations from your recent debriefs.',
+    created_at: daysAgo(18),
+    is_read: true,
+  },
+  {
+    id: 'card_205',
+    card_type: 'challenge',
+    title: 'Challenge from 3 weeks ago: multi-thread every deal over $20K',
+    body: 'You added a second contact on 7 of 9 qualifying deals, and those 7 are moving 30% faster through the pipeline than single-threaded deals from the prior quarter.',
+    created_at: daysAgo(21),
+    is_read: true,
+  },
+  {
+    id: 'card_206',
+    card_type: 'strategy',
+    title: "Plan from a month ago: Lead with outcomes, not features, in demos",
+    body: 'Demos restructured around the 3 outcomes a prospect cared about (rather than a full feature tour) ran 9 minutes shorter on average and got booked follow-ups 25% more often.',
+    created_at: daysAgo(28),
+    is_read: true,
+  },
+];
 
 // ── Growth feed card ──────────────────────────────────────────
 interface GrowthFeedCardProps {
-  card:      GrowthCard;
+  card: GrowthCard;
   onDismiss: () => void;
+  onStartChat: (card: GrowthCard) => void;
 }
 
-function GrowthFeedCard({ card, onDismiss }: GrowthFeedCardProps) {
+function GrowthFeedCard({ card, onDismiss, onStartChat }: GrowthFeedCardProps) {
   const [expanded, setExpanded] = useState(false);
-  const navigate     = useNavigate();
-  const { showToast } = useToast();
-  const cardRef = useRef<HTMLDivElement>(null);
-  const style   = CARD_STYLE[card.card_type] ?? { bg: 'bg-white border-surface-border', icon: null };
+  const [dismissing, setDismissing] = useState(false);
+  const [startingChat, setStartingChat] = useState(false);
+  const style = CARD_STYLE[card.card_type] ?? { bg: 'bg-white border-surface-border', icon: null };
   const hasMore = (card.body?.length ?? 0) > 180;
 
-  // ── Mark as read (POST /api/growth/cards/:id/read) ────────
-  const readMutation = useMutation({
-    mutationFn: () => growthApi.markCardRead(card.id),
-  });
+  const handleDismiss = () => {
+    setDismissing(true);
+    setTimeout(() => onDismiss(), 150); // brief, purely local "optimistic" feel
+  };
 
-  useEffect(() => {
-    if (card.is_read || readMutation.isSuccess || readMutation.isPending) return;
-    const el = cardRef.current;
-    if (!el) return;
-    const ob = new IntersectionObserver(
-      ([entry]) => {
-        if (entry.isIntersecting) {
-          readMutation.mutate();
-          ob.disconnect();
-        }
-      },
-      { threshold: 0.6 },
-    );
-    ob.observe(el);
-    return () => ob.disconnect();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [card.id, card.is_read]);
-
-  // ── Dismiss (POST /api/growth/cards/:id/dismiss) ──────────
-  const dismissMutation = useMutation({
-    mutationFn: () => growthApi.dismissCard(card.id),
-    onSuccess:  () => onDismiss(),
-  });
-
-  // ── Start chat about this card ────────────────────────────
-  const chatMutation = useMutation({
-    mutationFn: () =>
-      chatApi.createWithMessage({
-        message:        `Let's discuss this: "${card.title}"`,
-        chat_type:      'general',
-        chat_mode:      'general',
-        growth_card_id: card.id,
-        title:          `Growth: ${card.title}`.slice(0, 100),
-      }),
-    onSuccess: (response) => navigate(`/chat/${response.data.chat.id}`),
-    onError:   () => showToast('Could not start chat. Please try again.', 'error'),
-  });
+  const handleChat = () => {
+    setStartingChat(true);
+    setTimeout(() => {
+      setStartingChat(false);
+      onStartChat(card);
+    }, 400);
+  };
 
   return (
-    <div ref={cardRef} className={cn('border rounded-xl p-4 space-y-2 relative', style.bg)}>
+    <div className={cn('border rounded-xl p-4 space-y-2 relative transition-opacity', style.bg, dismissing && 'opacity-0')}>
       {/* Dismiss button */}
       <button
-        onClick={() => dismissMutation.mutate()}
-        disabled={dismissMutation.isPending}
+        onClick={handleDismiss}
+        disabled={dismissing}
         className="absolute top-3 right-3 p-1 rounded-md text-text-muted hover:text-text-primary hover:bg-black/5 transition-colors disabled:opacity-40"
         aria-label="Dismiss card"
       >
-        {dismissMutation.isPending ? <Spinner size="xs" /> : <X size={13} />}
+        <X size={13} />
       </button>
 
       <div className="flex items-start justify-between gap-3 pr-6">
@@ -131,13 +386,7 @@ function GrowthFeedCard({ card, onDismiss }: GrowthFeedCardProps) {
         </button>
       )}
       {card.action_label && card.action_type === 'internal_chat' && (
-        <Button
-          size="xs"
-          variant="ghost"
-          className="mt-1"
-          isLoading={chatMutation.isPending}
-          onClick={() => chatMutation.mutate()}
-        >
+        <Button size="xs" variant="ghost" className="mt-1" isLoading={startingChat} onClick={handleChat}>
           {card.action_label}
         </Button>
       )}
@@ -145,36 +394,24 @@ function GrowthFeedCard({ card, onDismiss }: GrowthFeedCardProps) {
   );
 }
 
-// ── Weekly plan section (GET /api/growth/plan) ────────────────
-function WeeklyPlanSection() {
-  const navigate      = useNavigate();
-  const { showToast } = useToast();
+// ── Weekly plan section (static demo data) ─────────────────────
+function WeeklyPlanSection({ onStartChat }: { onStartChat: (title: string) => void }) {
+  const [refreshing, setRefreshing] = useState(false);
+  const [startingChat, setStartingChat] = useState(false);
+  const plan = DEMO_WEEKLY_PLAN;
 
-  const { data, isLoading, isError, refetch, isFetching } = useQuery({
-    // NOTE: add queryKeys.growthPlan to your queryKeys file
-    queryKey: ['growth', 'plan'],
-    queryFn:  () => growthApi.getWeeklyPlan().then((r) => r.data),
-    staleTime: 60 * 60_000, // plan is generated weekly — 1 hr stale is fine
-    retry: 1,
-  });
+  const handleRefresh = () => {
+    setRefreshing(true);
+    setTimeout(() => setRefreshing(false), 600);
+  };
 
-  const chatMutation = useMutation({
-    mutationFn: (plan: typeof data['plan']) =>
-      chatApi.createWithMessage({
-        message:        `Let's explore this week's plan: "${plan.title}"`,
-        chat_type:      'general',
-        chat_mode:      'general',
-        growth_card_id: plan.id,
-        title:          `Growth: ${plan.title}`.slice(0, 100),
-      }),
-    onSuccess: (response) => navigate(`/chat/${response.data.chat.id}`),
-    onError:   () => showToast('Could not start chat. Please try again.', 'error'),
-  });
-
-  if (isLoading) return <Skeleton className="h-28" rounded="xl" />;
-  if (isError || !data?.plan) return null; // silently skip if unavailable
-
-  const { plan, cached } = data;
+  const handleChat = () => {
+    setStartingChat(true);
+    setTimeout(() => {
+      setStartingChat(false);
+      onStartChat(plan.title);
+    }, 400);
+  };
 
   return (
     <div className="bg-indigo-50/60 border border-indigo-200 rounded-xl p-4 space-y-2">
@@ -182,19 +419,19 @@ function WeeklyPlanSection() {
         <div className="flex items-center gap-2">
           <Calendar size={15} className="text-indigo-500" />
           <p className="text-sm font-semibold text-text-primary">This week's plan</p>
-          {cached && (
+          {plan.cached && (
             <span className="text-xs text-indigo-400 bg-white/60 border border-indigo-100 rounded-full px-2 py-0.5">
               Current
             </span>
           )}
         </div>
         <button
-          onClick={() => refetch()}
-          disabled={isFetching}
+          onClick={handleRefresh}
+          disabled={refreshing}
           className="p-1 text-text-muted hover:text-indigo-500 transition-colors disabled:opacity-40"
           aria-label="Refresh plan"
         >
-          <RefreshCw size={13} className={isFetching ? 'animate-spin' : ''} />
+          <RefreshCw size={13} className={refreshing ? 'animate-spin' : ''} />
         </button>
       </div>
 
@@ -203,13 +440,7 @@ function WeeklyPlanSection() {
         <p className="text-sm text-text-secondary leading-relaxed">{plan.body}</p>
       )}
       {plan.action_label && plan.action_type === 'internal_chat' && (
-        <Button
-          size="xs"
-          variant="ghost"
-          className="mt-1"
-          isLoading={chatMutation.isPending}
-          onClick={() => chatMutation.mutate(plan)}
-        >
+        <Button size="xs" variant="ghost" className="mt-1" isLoading={startingChat} onClick={handleChat}>
           {plan.action_label}
         </Button>
       )}
@@ -217,7 +448,7 @@ function WeeklyPlanSection() {
   );
 }
 
-// ── History section (GET /api/growth/history) ─────────────────
+// ── History section (static demo dataset, paginated locally) ──
 type HistoryFilter = 'all' | 'tips' | 'plans';
 
 const HISTORY_FILTERS: { label: string; value: HistoryFilter }[] = [
@@ -226,30 +457,27 @@ const HISTORY_FILTERS: { label: string; value: HistoryFilter }[] = [
   { label: 'Plans', value: 'plans' },
 ];
 
-const HISTORY_LIMIT = 15;
+const HISTORY_LIMIT = 6;
+
+const PLAN_TYPES = new Set(['strategy', 'challenge']);
 
 function HistorySection() {
   const [filter, setFilter] = useState<HistoryFilter>('all');
-  const [page,   setPage  ] = useState(0);
+  const [page, setPage] = useState(0);
 
   const handleFilter = (f: HistoryFilter) => { setFilter(f); setPage(0); };
 
-  const { data, isLoading, isError, isFetching } = useQuery({
-    // NOTE: add queryKeys.growthHistory to your queryKeys file
-    queryKey: ['growth', 'history', filter, page],
-    queryFn:  () =>
-      growthApi.getHistory({
-        limit:  HISTORY_LIMIT,
-        offset: page * HISTORY_LIMIT,
-        type:   filter === 'all' ? undefined : filter,
-      }).then((r) => r.data),
-    staleTime: 2 * 60_000,
-    placeholderData: (prev) => prev, // keep previous page visible while fetching next
+  const filtered = DEMO_HISTORY_CARDS.filter((c) => {
+    if (filter === 'all') return true;
+    if (filter === 'plans') return PLAN_TYPES.has(c.card_type);
+    return !PLAN_TYPES.has(c.card_type);
   });
 
-  const cards   = data?.cards ?? [];
-  const hasMore = cards.length === HISTORY_LIMIT;
+  const start = page * HISTORY_LIMIT;
+  const cards = filtered.slice(start, start + HISTORY_LIMIT);
+  const hasMore = start + HISTORY_LIMIT < filtered.length;
   const hasPrev = page > 0;
+  const totalPages = Math.max(1, Math.ceil(filtered.length / HISTORY_LIMIT));
 
   return (
     <div className="space-y-4">
@@ -272,15 +500,7 @@ function HistorySection() {
       </div>
 
       {/* Card list */}
-      {isLoading ? (
-        <div className="space-y-3">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <Skeleton key={i} className="h-20" rounded="xl" />
-          ))}
-        </div>
-      ) : isError ? (
-        <p className="text-sm text-text-muted text-center py-8">Could not load history.</p>
-      ) : cards.length === 0 ? (
+      {cards.length === 0 ? (
         <EmptyState
           icon={<BookOpen size={28} />}
           headline="No history yet"
@@ -291,7 +511,7 @@ function HistorySection() {
           }
         />
       ) : (
-        <div className={cn('space-y-3 transition-opacity duration-150', isFetching && 'opacity-50')}>
+        <div className="space-y-3">
           {cards.map((card) => {
             const style = CARD_STYLE[card.card_type] ?? { bg: 'bg-white border-surface-border', icon: null };
             return (
@@ -319,21 +539,11 @@ function HistorySection() {
       {/* Pagination */}
       {(hasPrev || hasMore) && (
         <div className="flex items-center justify-between pt-1">
-          <Button
-            size="xs"
-            variant="ghost"
-            disabled={!hasPrev || isFetching}
-            onClick={() => setPage((p) => p - 1)}
-          >
+          <Button size="xs" variant="ghost" disabled={!hasPrev} onClick={() => setPage((p) => p - 1)}>
             <ChevronLeft size={14} className="mr-1" /> Previous
           </Button>
-          <span className="text-xs text-text-muted">Page {page + 1}</span>
-          <Button
-            size="xs"
-            variant="ghost"
-            disabled={!hasMore || isFetching}
-            onClick={() => setPage((p) => p + 1)}
-          >
+          <span className="text-xs text-text-muted">Page {page + 1} of {totalPages}</span>
+          <Button size="xs" variant="ghost" disabled={!hasMore} onClick={() => setPage((p) => p + 1)}>
             Next <ChevronRight size={14} className="ml-1" />
           </Button>
         </div>
@@ -342,64 +552,27 @@ function HistorySection() {
   );
 }
 
-// ── Check-in section (unchanged logic) ───────────────────────
+// ── Check-in section (static demo data) ────────────────────────
 function CheckInSection({ streak }: { streak: number }) {
-  const { showToast }   = useToast();
-  const { refreshUser } = useAuth();
-  const [answers,   setAnswers  ] = useState<Record<string, string>>({});
+  const [answers, setAnswers] = useState<Record<string, string>>({});
   const [moodScore, setMoodScore] = useState<number | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
 
-  const { data: checkInData, isLoading: checkInLoading } = useQuery({
-    queryKey: queryKeys.checkInToday,
-    queryFn:  () => growthApi.getTodayCheckIn().then((r) => r.data),
-    staleTime: 60 * 60_000,
-    refetchOnWindowFocus: false,
-  });
-
-  const submitMutation = useMutation({
-    mutationFn: () =>
-      growthApi.submitCheckIn({
-        answers,
-        mood_score: moodScore ?? undefined,
-        date: checkInData?.check_in.date,
-      }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.checkInToday });
-      queryClient.invalidateQueries({ queryKey: queryKeys.growthFeed() });
-      refreshUser();
-      showToast('Check-in saved!', 'success');
-    },
-    onError: (err: any) => {
-      if (err?.code === 'ALREADY_SUBMITTED') {
-        queryClient.invalidateQueries({ queryKey: queryKeys.checkInToday });
-      } else {
-        showToast('Could not save check-in.', 'error');
-      }
-    },
-  });
-
-  if (checkInLoading) return <Skeleton className="h-40" rounded="xl" />;
-
-  const checkIn: DailyCheckIn | undefined = checkInData?.check_in;
-  const isNew = checkInData?.is_new;
-  if (!checkIn) return null;
-
-  // Handle both string[] and object[] formats
-  const rawQuestions = checkIn.questions ?? [];
-  const questions: Array<{ id: string; question: string }> = rawQuestions.map((q, idx) => {
-    if (typeof q === 'string') {
-      return { id: `q${idx + 1}`, question: q };
-    }
-    if (q?.question) {
-      return { id: q.id || `q${idx + 1}`, question: q.question };
-    }
-    return { id: `q${idx + 1}`, question: String(q) };
-  });
-
+  const checkIn = DEMO_CHECK_IN;
+  const questions = checkIn.questions.map((q, idx) => ({ id: `q${idx + 1}`, question: q }));
   const allAnswered = questions.length > 0 && questions.every((q) => answers[q.id]?.trim());
 
-  // Already submitted today — show AI response
-  if (!isNew && checkIn.processed_at && checkIn.ai_response) {
+  const handleSubmit = () => {
+    setSubmitting(true);
+    setTimeout(() => {
+      setSubmitting(false);
+      setSubmitted(true);
+    }, 500);
+  };
+
+  // Already submitted today (demo default) — show AI response
+  if (!submitted && checkIn.processed_at && checkIn.ai_response) {
     return (
       <div className="bg-brand-50 border border-brand-200 rounded-xl p-4 space-y-2">
         <div className="flex items-center gap-2">
@@ -409,6 +582,20 @@ function CheckInSection({ streak }: { streak: number }) {
           </p>
         </div>
         <p className="text-sm text-text-secondary leading-relaxed">{checkIn.ai_response}</p>
+      </div>
+    );
+  }
+
+  if (submitted) {
+    return (
+      <div className="bg-brand-50 border border-brand-200 rounded-xl p-4 space-y-2">
+        <div className="flex items-center gap-2">
+          <Flame size={15} className="text-orange-500" />
+          <p className="text-sm font-semibold text-text-primary">{streak + 1}-day streak 🔥</p>
+        </div>
+        <p className="text-sm text-text-secondary leading-relaxed">
+          Check-in saved. Clutch is looking it over — your reflection will show up here shortly.
+        </p>
       </div>
     );
   }
@@ -460,12 +647,7 @@ function CheckInSection({ streak }: { streak: number }) {
         </div>
       </div>
 
-      <Button
-        size="sm"
-        disabled={!allAnswered}
-        isLoading={submitMutation.isPending}
-        onClick={() => submitMutation.mutate()}
-      >
+      <Button size="sm" disabled={!allAnswered} isLoading={submitting} onClick={handleSubmit}>
         Submit check-in
       </Button>
     </div>
@@ -476,54 +658,37 @@ function CheckInSection({ streak }: { streak: number }) {
 type ActiveTab = 'feed' | 'history';
 
 export default function GrowthPage() {
-  const { user }    = useAuth();
-  const loaderRef   = useRef<HTMLDivElement>(null);
-  const [activeTab,    setActiveTab   ] = useState<ActiveTab>('feed');
-  // Optimistic dismiss: track dismissed IDs locally so the card
-  // vanishes immediately without waiting for a refetch.
+  const [activeTab, setActiveTab] = useState<ActiveTab>('feed');
   const [dismissedIds, setDismissedIds] = useState<Set<string>>(new Set());
+  const [visibleCount, setVisibleCount] = useState(DEMO_FEED_CARDS.length);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
 
-  const { data, fetchNextPage, hasNextPage, isFetchingNextPage, isLoading } =
-    useInfiniteQuery({
-      queryKey: queryKeys.growthFeed(),
-      queryFn:  ({ pageParam = 0 }) =>
-        growthApi.getFeed({ limit: 20, offset: pageParam }).then((r) => r.data),
-      getNextPageParam: (last) =>
-        last.pagination.has_more
-          ? (last.pagination.offset ?? 0) + (last.pagination.limit ?? 20)
-          : undefined,
-      initialPageParam: 0,
-      staleTime: 2 * 60_000,
-    });
+  const combinedFeed = [...DEMO_FEED_CARDS, ...DEMO_FEED_CARDS_PAGE_2];
+  const allCards = combinedFeed.slice(0, visibleCount).filter((c) => !dismissedIds.has(c.id));
+  const hasNextPage = visibleCount < combinedFeed.length;
+  const streak = DEMO_USER.check_in_streak;
+  const archetype = DEMO_USER.archetype;
 
-  // Infinite scroll
-  const observerCb = useCallback(
-    (entries: IntersectionObserverEntry[]) => {
-      if (entries[0].isIntersecting && hasNextPage && !isFetchingNextPage) fetchNextPage();
-    },
-    [fetchNextPage, hasNextPage, isFetchingNextPage],
-  );
-
-  useEffect(() => {
-    const el = loaderRef.current;
-    if (!el) return;
-    const ob = new IntersectionObserver(observerCb, { rootMargin: '200px' });
-    ob.observe(el);
-    return () => ob.disconnect();
-  }, [observerCb]);
-
-  const allCards  = (data?.pages.flatMap((p) => p.cards) ?? []).filter((c) => !dismissedIds.has(c.id));
-  const archetype = data?.pages[0]?.archetype;
-  const streak    = user?.check_in_streak ?? 0;
-
-  const handleDismiss = useCallback((id: string) => {
+  const handleDismiss = (id: string) => {
     setDismissedIds((prev) => new Set(prev).add(id));
-    // Invalidate so the dismissed card is excluded on next background refetch
-    queryClient.invalidateQueries({ queryKey: queryKeys.growthFeed() });
-  }, []);
+  };
+
+  const handleLoadMore = () => {
+    setLoadingMore(true);
+    setTimeout(() => {
+      setVisibleCount((v) => Math.min(v + 2, combinedFeed.length));
+      setLoadingMore(false);
+    }, 500);
+  };
+
+  const showToast = (message: string) => {
+    setToast(message);
+    setTimeout(() => setToast(null), 2200);
+  };
 
   return (
-    <div className="page-container space-y-5">
+    <div className="page-container space-y-5 max-w-2xl mx-auto p-6 relative">
       {/* Header */}
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold text-text-primary">Growth</h1>
@@ -558,16 +723,10 @@ export default function GrowthPage() {
           <CheckInSection streak={streak} />
 
           {/* Weekly plan */}
-          <WeeklyPlanSection />
+          <WeeklyPlanSection onStartChat={(title) => showToast(`Starting a chat about "${title}"…`)} />
 
           {/* Growth feed */}
-          {isLoading ? (
-            <div className="space-y-3">
-              {Array.from({ length: 4 }).map((_, i) => (
-                <Skeleton key={i} className="h-24" rounded="xl" />
-              ))}
-            </div>
-          ) : allCards.length === 0 ? (
+          {allCards.length === 0 ? (
             <EmptyState
               icon={<TrendingUp size={28} />}
               headline="Your growth feed is building"
@@ -580,16 +739,35 @@ export default function GrowthPage() {
                   key={c.id}
                   card={c}
                   onDismiss={() => handleDismiss(c.id)}
+                  onStartChat={(card) => showToast(`Starting a chat about "${card.title}"…`)}
                 />
               ))}
-              <div ref={loaderRef} className="h-4 flex items-center justify-center">
-                {isFetchingNextPage && <Spinner size="sm" />}
-              </div>
+              {hasNextPage && (
+                <div className="h-10 flex items-center justify-center">
+                  {loadingMore ? (
+                    <Spinner size="sm" />
+                  ) : (
+                    <button
+                      onClick={handleLoadMore}
+                      className="text-xs text-brand hover:underline font-medium"
+                    >
+                      Load more
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </>
       ) : (
         <HistorySection />
+      )}
+
+      {/* Lightweight local toast (replaces useToast) */}
+      {toast && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 bg-text-primary text-white text-sm px-4 py-2 rounded-lg shadow-lg">
+          {toast}
+        </div>
       )}
     </div>
   );

@@ -11,24 +11,94 @@
 //  - Matches goals-5.txt exactly
 // ============================================================
 import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { useQuery, useMutation } from '@tanstack/react-query';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { goalsApi }    from '@/api/goals';
-import { queryClient } from '@/lib/queryClient';
-import { queryKeys }   from '@/lib/queryKeys';
 import { useToast }    from '@/hooks/useToast';
 import { Button }      from '@/components/ui/Button';
 import { Input, Select, Textarea } from '@/components/ui/Input';
 import { Badge }       from '@/components/ui/Badge';
 import { Modal }       from '@/components/ui/Modal';
-import { Skeleton }    from '@/components/ui/Skeleton';
-import { EmptyState, ConfirmDialog } from '@/components/common/index';
-import { formatShortDate, formatCurrency, cn } from '@/lib/utils';
-import { Target, Plus, TrendingUp, CheckCircle2, ChevronRight, Flame } from 'lucide-react';
+import { formatShortDate, cn } from '@/lib/utils';
+import { Plus, TrendingUp, CheckCircle2 } from 'lucide-react';
 import type { UserGoal } from '@/api/types';
+
+// ============================================================
+// HARDCODED DEMO DATA — no API calls, no network requests.
+// Replace this block to change what the demo shows.
+// ============================================================
+const DEMO_GOALS: UserGoal[] = [
+  {
+    id: 'g1',
+    goal_text: 'Send 50 cold outreach messages this month',
+    goal_type: 'outreach',
+    status: 'active',
+    target_value: 50,
+    current_value: 34,
+    target_unit: 'messages',
+    target_date: '2026-09-30',
+  } as UserGoal,
+  {
+    id: 'g2',
+    goal_text: 'Close $40,000 in new revenue this quarter',
+    goal_type: 'revenue',
+    status: 'active',
+    target_value: 40000,
+    current_value: 27500,
+    target_unit: '$',
+    target_date: '2026-10-15',
+  } as UserGoal,
+  {
+    id: 'g3',
+    goal_text: 'Book 20 discovery calls with warm leads',
+    goal_type: 'meetings',
+    status: 'active',
+    target_value: 20,
+    current_value: 12,
+    target_unit: 'calls',
+    target_date: '2026-09-25',
+  } as UserGoal,
+  {
+    id: 'g4',
+    goal_text: 'Read one sales book and apply 3 takeaways',
+    goal_type: 'custom',
+    status: 'active',
+    target_value: 3,
+    current_value: 1,
+    target_unit: 'takeaways',
+    target_date: '2026-09-20',
+  } as UserGoal,
+  {
+    id: 'g5',
+    goal_text: 'Follow up with every lead within 24 hours for a full month',
+    goal_type: 'outreach',
+    status: 'completed',
+    target_value: 30,
+    current_value: 30,
+    target_unit: 'days',
+    target_date: '2026-08-31',
+  } as UserGoal,
+  {
+    id: 'g6',
+    goal_text: 'Hit $15,000 in referral revenue',
+    goal_type: 'revenue',
+    status: 'completed',
+    target_value: 15000,
+    current_value: 15800,
+    target_unit: '$',
+    target_date: '2026-07-31',
+  } as UserGoal,
+  {
+    id: 'g7',
+    goal_text: 'Attend 5 networking events this quarter',
+    goal_type: 'meetings',
+    status: 'paused',
+    target_value: 5,
+    current_value: 2,
+    target_unit: 'events',
+    target_date: '2026-11-01',
+  } as UserGoal,
+];
 
 // ── Schema aligned to goals-5.txt ────────────────────────────
 const createGoalSchema = z.object({
@@ -119,32 +189,37 @@ function GoalCard({ goal, onNote }: { goal: UserGoal; onNote: (g: UserGoal) => v
 }
 
 // ── Add goal modal ────────────────────────────────────────────
-function AddGoalModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+function AddGoalModal({
+  open, onClose, onCreate,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onCreate: (goal: UserGoal) => void;
+}) {
   const { showToast } = useToast();
   const { register, handleSubmit, reset, formState: { errors, isSubmitting } } =
     useForm<CreateGoalSchema>({ resolver: zodResolver(createGoalSchema) });
 
-  const createMutation = useMutation({
-    mutationFn: (d: CreateGoalSchema) =>
-      goalsApi.create({
-        goal_text:   d.goal_text,
-        goal_type:   d.goal_type,
-        target_value:d.target_value,
-        target_unit: d.target_unit ?? null,
-        target_date: d.target_date ?? null,
-      }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.goals() });
-      showToast('Goal created!', 'success');
-      reset();
-      onClose();
-    },
-    onError: () => showToast('Could not create goal.', 'error'),
-  });
+  const handleCreate = (d: CreateGoalSchema) => {
+    // Local-only: appends to in-memory state, no backend call.
+    onCreate({
+      id: `g${Date.now()}`,
+      goal_text:    d.goal_text,
+      goal_type:    d.goal_type,
+      status:       'active',
+      target_value: d.target_value,
+      current_value: 0,
+      target_unit:  d.target_unit ?? undefined,
+      target_date:  d.target_date ?? undefined,
+    } as UserGoal);
+    showToast('Goal created!', 'success');
+    reset();
+    onClose();
+  };
 
   return (
     <Modal isOpen={open} onClose={onClose} title="New goal" size="md">
-      <form onSubmit={handleSubmit((d) => createMutation.mutate(d))} className="space-y-4">
+      <form onSubmit={handleSubmit(handleCreate)} className="space-y-4">
         <Textarea
           label="Goal"
           required
@@ -190,7 +265,7 @@ function AddGoalModal({ open, onClose }: { open: boolean; onClose: () => void })
         </div>
         <div className="flex justify-end gap-2 pt-1">
           <Button variant="secondary" size="sm" type="button" onClick={onClose}>Cancel</Button>
-          <Button size="sm" type="submit" isLoading={createMutation.isPending || isSubmitting}>
+          <Button size="sm" type="submit" isLoading={isSubmitting}>
             Create goal
           </Button>
         </div>
@@ -203,39 +278,30 @@ function AddGoalModal({ open, onClose }: { open: boolean; onClose: () => void })
 function NoteModal({
   goal,
   onClose,
+  onLog,
 }: {
   goal:    UserGoal | null;
   onClose: () => void;
+  onLog:   (goalId: string, delta: number) => void;
 }) {
   const { showToast } = useToast();
   const { register, handleSubmit, reset, formState: { errors, isSubmitting } } =
     useForm<NoteSchema>({ resolver: zodResolver(noteSchema) });
 
-  const noteMutation = useMutation({
-    mutationFn: (d: NoteSchema) =>
-      goalsApi.addNote(goal!.id, {
-        note_text:      d.note_text,
-        explicit_delta: d.explicit_delta ?? null,
-      }),
-    onSuccess: (res) => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.goals() });
-      const data = res.data;
-      if (data.goal_completed) {
-        showToast('🎉 Goal completed! Great work!', 'success');
-      } else {
-        showToast(data.coaching_response ?? 'Progress logged!', 'success');
-      }
-      reset();
-      onClose();
-    },
-    onError: () => showToast('Could not log progress.', 'error'),
-  });
-
   if (!goal) return null;
+
+  const handleLog = (d: NoteSchema) => {
+    // Local-only: bumps current_value in memory, no backend call.
+    const delta = d.explicit_delta ?? 0;
+    onLog(goal.id, delta);
+    showToast('Progress logged!', 'success');
+    reset();
+    onClose();
+  };
 
   return (
     <Modal isOpen={!!goal} onClose={onClose} title="Log progress" size="sm">
-      <form onSubmit={handleSubmit((d) => noteMutation.mutate(d))} className="space-y-4">
+      <form onSubmit={handleSubmit(handleLog)} className="space-y-4">
         <p className="text-sm text-text-secondary">{goal.goal_text}</p>
         {goal.target_value != null && <GoalProgressBar goal={goal} />}
         <Textarea
@@ -259,7 +325,7 @@ function NoteModal({
         )}
         <div className="flex justify-end gap-2">
           <Button variant="secondary" size="sm" type="button" onClick={onClose}>Cancel</Button>
-          <Button size="sm" type="submit" isLoading={noteMutation.isPending || isSubmitting}>
+          <Button size="sm" type="submit" isLoading={isSubmitting}>
             Save
           </Button>
         </div>
@@ -272,17 +338,21 @@ function NoteModal({
 export default function GoalsPage() {
   const [addOpen,  setAddOpen]  = useState(false);
   const [noteGoal, setNoteGoal] = useState<UserGoal | null>(null);
+  // Hardcoded demo data lives in local state so Add/Log actions can still
+  // update the UI in-memory, with zero network requests.
+  const [goals, setGoals] = useState<UserGoal[]>(DEMO_GOALS);
 
-  const { data, isLoading } = useQuery({
-    queryKey: queryKeys.goals(),
-    queryFn:  () => goalsApi.list().then((r) => r.data.goals),
-    staleTime: 60_000,
-  });
-
-  const goals = data ?? [];
   const active    = goals.filter((g) => g.status === 'active');
   const completed = goals.filter((g) => g.status === 'completed');
   const paused    = goals.filter((g) => g.status === 'paused');
+
+  const handleCreate = (goal: UserGoal) => setGoals((prev) => [goal, ...prev]);
+
+  const handleLog = (goalId: string, delta: number) => {
+    setGoals((prev) => prev.map((g) => g.id === goalId
+      ? { ...g, current_value: Math.min((g.current_value ?? 0) + delta, g.target_value ?? Infinity) }
+      : g));
+  };
 
   return (
     <div className="page-container space-y-5">
@@ -293,54 +363,41 @@ export default function GoalsPage() {
         </Button>
       </div>
 
-      {isLoading ? (
-        <div className="grid gap-3 sm:grid-cols-2">
-          {Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-28" rounded="lg" />)}
-        </div>
-      ) : goals.length === 0 ? (
-        <EmptyState
-          icon={<Target size={28} />}
-          headline="No goals yet"
-          subline="Set measurable goals and Clutch tracks your progress with AI coaching."
-          action={{ label: 'Add goal', onClick: () => setAddOpen(true) }}
-        />
-      ) : (
-        <div className="space-y-5">
-          {active.length > 0 && (
-            <div className="space-y-3">
-              <p className="text-xs font-semibold text-text-muted uppercase tracking-wide">Active</p>
-              <div className="grid gap-3 sm:grid-cols-2">
-                {active.map((g) => (
-                  <GoalCard key={g.id} goal={g} onNote={setNoteGoal} />
-                ))}
-              </div>
+      <div className="space-y-5">
+        {active.length > 0 && (
+          <div className="space-y-3">
+            <p className="text-xs font-semibold text-text-muted uppercase tracking-wide">Active</p>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {active.map((g) => (
+                <GoalCard key={g.id} goal={g} onNote={setNoteGoal} />
+              ))}
             </div>
-          )}
-          {completed.length > 0 && (
-            <div className="space-y-3">
-              <p className="text-xs font-semibold text-text-muted uppercase tracking-wide">Completed</p>
-              <div className="grid gap-3 sm:grid-cols-2">
-                {completed.map((g) => (
-                  <GoalCard key={g.id} goal={g} onNote={setNoteGoal} />
-                ))}
-              </div>
+          </div>
+        )}
+        {completed.length > 0 && (
+          <div className="space-y-3">
+            <p className="text-xs font-semibold text-text-muted uppercase tracking-wide">Completed</p>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {completed.map((g) => (
+                <GoalCard key={g.id} goal={g} onNote={setNoteGoal} />
+              ))}
             </div>
-          )}
-          {paused.length > 0 && (
-            <div className="space-y-3">
-              <p className="text-xs font-semibold text-text-muted uppercase tracking-wide">Paused</p>
-              <div className="grid gap-3 sm:grid-cols-2 opacity-60">
-                {paused.map((g) => (
-                  <GoalCard key={g.id} goal={g} onNote={setNoteGoal} />
-                ))}
-              </div>
+          </div>
+        )}
+        {paused.length > 0 && (
+          <div className="space-y-3">
+            <p className="text-xs font-semibold text-text-muted uppercase tracking-wide">Paused</p>
+            <div className="grid gap-3 sm:grid-cols-2 opacity-60">
+              {paused.map((g) => (
+                <GoalCard key={g.id} goal={g} onNote={setNoteGoal} />
+              ))}
             </div>
-          )}
-        </div>
-      )}
+          </div>
+        )}
+      </div>
 
-      <AddGoalModal open={addOpen} onClose={() => setAddOpen(false)} />
-      <NoteModal goal={noteGoal} onClose={() => setNoteGoal(null)} />
+      <AddGoalModal open={addOpen} onClose={() => setAddOpen(false)} onCreate={handleCreate} />
+      <NoteModal goal={noteGoal} onClose={() => setNoteGoal(null)} onLog={handleLog} />
     </div>
   );
 }

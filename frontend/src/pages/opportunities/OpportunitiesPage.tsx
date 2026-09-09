@@ -1,23 +1,16 @@
 // ============================================================
 // FILE: src/pages/opportunities/OpportunitiesPage.tsx
+// DEMO BUILD — all data is hardcoded locally for screenshots.
+// No network requests, no react-query, no loading states.
 // ============================================================
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { opportunitiesApi } from '@/api/opportunities';
-import { queryClient }      from '@/lib/queryClient';
-import { queryKeys }        from '@/lib/queryKeys';
-import { useRole }          from '@/hooks/useRole';
-import { useAuth }          from '@/hooks/useAuth';
 import { useToast }         from '@/hooks/useToast';
 import { Button }           from '@/components/ui/Button';
-import { Badge, PlatformBadge, ScoreBadge } from '@/components/ui/Badge';
+import { Badge, PlatformBadge } from '@/components/ui/Badge';
 import { Tabs }             from '@/components/ui/Tabs';
-import { SkeletonOpportunityCard } from '@/components/ui/Skeleton';
-import { EmptyState, Spinner } from '@/components/common/index';
-import { AppError, type Opportunity } from '@/api/types';
-import { ROUTES, STATUS_LABELS } from '@/lib/constants';
-import { formatRelativeDate, cn }     from '@/lib/utils';
+import { STATUS_LABELS }    from '@/lib/constants';
+import { formatRelativeDate, cn } from '@/lib/utils';
 import { Zap, RefreshCw, ChevronRight, AlertTriangle, Plus, ExternalLink, Copy, Check } from 'lucide-react';
 
 // Platform labels mapping
@@ -41,11 +34,208 @@ const STATUS_TABS = [
   { value: 'viewed',  label: 'Viewed'  },
 ];
 
+// ── Demo data ─────────────────────────────────────────────────────────────────
+
+interface DemoOpportunity {
+  id: string;
+  platform: string;
+  target_name: string | null;
+  target_context: string | null;
+  source_url: string | null;
+  link_clicked_at: string | null;
+  message_copied_at: string | null;
+  composite_score: number;
+  fit_score: number | null;
+  timing_score: number | null;
+  intent_score: number | null;
+  status: 'pending' | 'viewed' | 'sent';
+  created_at: string;
+  generated_by: 'ai' | 'manual';
+  assigned_to: string | null;
+  user_id: string;
+  prepared_message: string;
+}
+
+const CURRENT_USER_ID = 'usr_amara_okafor';
+
+const OPPORTUNITIES: DemoOpportunity[] = [
+  {
+    id: 'opp_1001',
+    platform: 'linkedin',
+    target_name: 'Priya Ramanathan',
+    target_context: 'VP of Growth at a Series B fintech. Posted about struggling to scale outbound without adding headcount — mentioned evaluating "AI SDR" tools this quarter.',
+    source_url: 'https://linkedin.com/in/priya-ramanathan',
+    link_clicked_at: '2026-09-07T09:12:00Z',
+    message_copied_at: '2026-09-07T09:14:00Z',
+    composite_score: 8.6,
+    fit_score: 9,
+    timing_score: 9,
+    intent_score: 8,
+    status: 'pending',
+    created_at: '2026-09-07T08:40:00Z',
+    generated_by: 'ai',
+    assigned_to: null,
+    user_id: CURRENT_USER_ID,
+    prepared_message: "Hi Priya — saw your post about scaling outbound without adding headcount. We help growth teams like yours automate the research + first-touch so reps spend their time on qualified conversations. Worth a quick look?",
+  },
+  {
+    id: 'opp_1002',
+    platform: 'reddit',
+    target_name: 'u/deveraux_ops',
+    target_context: 'Founder of a 12-person DevOps consultancy, asked in r/SaaS for recommendations on lead scoring tools that don\'t require a data team to maintain.',
+    source_url: 'https://reddit.com/r/SaaS/comments/1kx92a/lead_scoring_without_a_data_team',
+    link_clicked_at: null,
+    message_copied_at: null,
+    composite_score: 7.3,
+    fit_score: 8,
+    timing_score: 7,
+    intent_score: 7,
+    status: 'pending',
+    created_at: '2026-09-06T22:05:00Z',
+    generated_by: 'ai',
+    assigned_to: 'usr_dara_kim',
+    user_id: 'usr_dara_kim',
+    prepared_message: "Hey! Saw your thread on lead scoring — most tools in that space assume you've got someone to babysit the model. We built ours so it just works out of the box, no data team required. Happy to share how a few consultancies your size are using it.",
+  },
+  {
+    id: 'opp_1003',
+    platform: 'producthunt',
+    target_name: 'Marco Filipovic',
+    target_context: 'Launched a project management tool for creative agencies last week. Comment thread shows he\'s actively looking for distribution channels and partnership ideas.',
+    source_url: 'https://producthunt.com/posts/studioflow',
+    link_clicked_at: '2026-09-05T16:20:00Z',
+    message_copied_at: '2026-09-05T16:22:00Z',
+    composite_score: 6.8,
+    fit_score: 7,
+    timing_score: 8,
+    intent_score: 5,
+    status: 'viewed',
+    created_at: '2026-09-05T14:50:00Z',
+    generated_by: 'ai',
+    assigned_to: null,
+    user_id: CURRENT_USER_ID,
+    prepared_message: "Congrats on the launch, Marco! StudioFlow looks sharp — especially the client approval flow. We work with a few agency-tool founders on co-marketing; would love to trade notes on distribution if you're open to it.",
+  },
+  {
+    id: 'opp_1004',
+    platform: 'indiehackers',
+    target_name: 'Renée Castellanos',
+    target_context: 'Bootstrapped a $14k MRR newsletter analytics tool solo. Mentioned in a comment she\'s spending 10+ hrs/week on manual outreach and it\'s "the bottleneck."',
+    source_url: 'https://indiehackers.com/post/hit-14k-mrr-solo-what-now',
+    link_clicked_at: '2026-09-04T11:03:00Z',
+    message_copied_at: null,
+    composite_score: 8.1,
+    fit_score: 8,
+    timing_score: 9,
+    intent_score: 7,
+    status: 'viewed',
+    created_at: '2026-09-04T10:15:00Z',
+    generated_by: 'ai',
+    assigned_to: null,
+    user_id: CURRENT_USER_ID,
+    prepared_message: "Renée — huge congrats on $14k MRR solo, that's no small feat. Saw outreach is eating 10+ hrs of your week; that's exactly the bottleneck we built Clutch to remove. Open to a 15-min walkthrough?",
+  },
+  {
+    id: 'opp_1005',
+    platform: 'twitter',
+    target_name: 'Jonah Whitfield',
+    target_context: 'Head of Sales at a mid-market HR platform. Tweeted frustration about their current outbound tool\'s scoring being "basically a coin flip."',
+    source_url: 'https://x.com/jonahwhitfield/status/1893820019283746',
+    link_clicked_at: null,
+    message_copied_at: null,
+    composite_score: 5.4,
+    fit_score: 6,
+    timing_score: 6,
+    intent_score: 4,
+    status: 'pending',
+    created_at: '2026-09-06T19:30:00Z',
+    generated_by: 'ai',
+    assigned_to: null,
+    user_id: CURRENT_USER_ID,
+    prepared_message: "Jonah — 'coin flip scoring' made me laugh, painfully relatable. We rebuilt scoring around actual buying signals instead of firmographic guesswork. Curious if it's worth 15 minutes to compare notes?",
+  },
+  {
+    id: 'opp_1006',
+    platform: 'hackernews',
+    target_name: 'throwaway_cto22',
+    target_context: 'CTO comment on a "Show HN" thread about their internal sales tooling stack — explicitly said they\'re "not happy" with their current prospecting workflow.',
+    source_url: 'https://news.ycombinator.com/item?id=41827392',
+    link_clicked_at: '2026-09-03T08:47:00Z',
+    message_copied_at: '2026-09-03T08:50:00Z',
+    composite_score: 6.2,
+    fit_score: 6,
+    timing_score: 7,
+    intent_score: 6,
+    status: 'sent',
+    created_at: '2026-09-02T20:12:00Z',
+    generated_by: 'ai',
+    assigned_to: null,
+    user_id: CURRENT_USER_ID,
+    prepared_message: "Saw your comment on the Show HN thread — sounds like your prospecting workflow is more duct tape than system right now. We've helped a few similar-stage teams replace that stack with one tool. Open to comparing notes?",
+  },
+  {
+    id: 'opp_1007',
+    platform: 'quora',
+    target_name: 'Isabelle Ng',
+    target_context: 'Asked a detailed question about "best practices for warm intro outreach at scale" — clearly evaluating tools, cited two competitors by name.',
+    source_url: 'https://quora.com/Best-practices-for-warm-intro-outreach-at-scale',
+    link_clicked_at: null,
+    message_copied_at: null,
+    composite_score: 7.9,
+    fit_score: 8,
+    timing_score: 8,
+    intent_score: 8,
+    status: 'pending',
+    created_at: '2026-09-07T13:02:00Z',
+    generated_by: 'ai',
+    assigned_to: 'usr_amara_okafor',
+    user_id: 'usr_dara_kim',
+    prepared_message: "Isabelle — great question, and honestly the warm-intro-at-scale problem is what got us building Clutch in the first place. Happy to share what's worked for teams doing this well, no pitch required if you'd rather just compare notes.",
+  },
+  {
+    id: 'opp_1008',
+    platform: 'other',
+    target_name: 'Tom Bellinger — Ridgeline Supply Co.',
+    target_context: 'Met briefly at SaaStr Annual. Runs ops for a regional distributor, mentioned they\'re outgrowing their spreadsheet-based lead tracking.',
+    source_url: null,
+    link_clicked_at: null,
+    message_copied_at: '2026-09-01T15:40:00Z',
+    composite_score: 0,
+    fit_score: null,
+    timing_score: null,
+    intent_score: null,
+    status: 'viewed',
+    created_at: '2026-09-01T15:30:00Z',
+    generated_by: 'manual',
+    assigned_to: null,
+    user_id: CURRENT_USER_ID,
+    prepared_message: "Great meeting you at SaaStr, Tom! Following up like I promised — happy to show you how a few distributors your size moved off spreadsheets without a painful migration. Free Thursday for 20 minutes?",
+  },
+  {
+    id: 'opp_1009',
+    platform: 'facebook',
+    target_name: 'Denise Okonkwo-Marsh',
+    target_context: 'Runs a boutique PR agency, posted in a founders group asking for referrals to "anything that helps us stop losing track of leads in a shared inbox."',
+    source_url: 'https://facebook.com/groups/foundersnetwork/posts/8827193',
+    link_clicked_at: '2026-09-06T07:55:00Z',
+    message_copied_at: null,
+    composite_score: 6.5,
+    fit_score: 7,
+    timing_score: 6,
+    intent_score: 6,
+    status: 'pending',
+    created_at: '2026-09-06T07:10:00Z',
+    generated_by: 'ai',
+    assigned_to: null,
+    user_id: CURRENT_USER_ID,
+    prepared_message: "Denise — saw your post in Founders Network. Shared-inbox lead tracking breaks down fast once you're past a handful of clients. We built Clutch to fix exactly that; want a quick look at how it'd slot into your workflow?",
+  },
+];
+
 // ── Opportunity Card ─────────────────────────────────────────────────────────
 
-function OpportunityCard({ opp, currentUserId }: { opp: Opportunity; currentUserId: string }) {
+function OpportunityCard({ opp, currentUserId }: { opp: DemoOpportunity; currentUserId: string }) {
   const navigate    = useNavigate();
-  const queryClient = useQueryClient();
   const pct = opp.composite_score;
   const scoreColor =
     pct >= 7 ? 'text-success' : pct >= 4 ? 'text-warning' : 'text-danger';
@@ -57,17 +247,9 @@ function OpportunityCard({ opp, currentUserId }: { opp: Opportunity; currentUser
 
   const isManual = opp.generated_by === 'manual';
 
-  const handleSourceClick = async (e: React.MouseEvent<HTMLAnchorElement>) => {
+  const handleSourceClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
     e.stopPropagation(); // don't navigate to detail page
-    // Fire-and-forget — don't block the browser from opening the URL
-    opportunitiesApi.trackLinkClick(opp.id).then(() => {
-      // Optimistically update the cached opportunity so link_clicked_at reflects
-      // immediately in any detail view that reads from cache.
-      queryClient.setQueryData<{ opportunity: Opportunity }>(
-        ['opportunities', opp.id],
-        (old) => old ? { opportunity: { ...old.opportunity, link_clicked_at: new Date().toISOString() } } : old,
-      );
-    }).catch(() => {/* non-critical — swallow silently */});
+    // Demo build — link click tracking is a no-op, browser handles the navigation.
   };
 
   const [copied, setCopied] = useState(false);
@@ -78,12 +260,6 @@ function OpportunityCard({ opp, currentUserId }: { opp: Opportunity; currentUser
       await navigator.clipboard.writeText(opp.prepared_message);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-      opportunitiesApi.trackMessageCopy(opp.id).then(() => {
-        queryClient.setQueryData<{ opportunity: Opportunity }>(
-          ['opportunities', opp.id],
-          (old) => old ? { opportunity: { ...old.opportunity, message_copied_at: new Date().toISOString() } } : old,
-        );
-      }).catch(() => {/* non-critical — swallow silently */});
     } catch {
       // clipboard API unavailable — fail silently
     }
@@ -210,63 +386,26 @@ function OpportunityCard({ opp, currentUserId }: { opp: Opportunity; currentUser
 
 export default function OpportunitiesPage() {
   const navigate      = useNavigate();
-  const { isManager } = useRole();
-  const { user }      = useAuth();
   const { showToast } = useToast();
   const [searchParams, setSearchParams] = useSearchParams();
   const activeStatus = searchParams.get('status') ?? 'pending';
+  const isManager = true; // demo: show manager-only controls
 
-  // Infinite scroll sentinel
-  const sentinelRef = useRef<HTMLDivElement>(null);
+  const [isDiscovering, setIsDiscovering] = useState(false);
 
-  const {
-    data, isLoading, isFetchingNextPage, fetchNextPage, hasNextPage,
-  } = useInfiniteQuery({
-    queryKey: queryKeys.opportunities({ status: activeStatus }),
-    queryFn: ({ pageParam = 0 }) =>
-      opportunitiesApi.list({ status: activeStatus, limit: 20, offset: pageParam as number })
-        .then((r) => r.data),
-    getNextPageParam: (last, pages) =>
-      last.opportunities.length === 20 ? pages.length * 20 : undefined,
-    initialPageParam: 0,
-    staleTime: 60_000,
-  });
+  const allOpps = activeStatus === 'all'
+    ? OPPORTUNITIES
+    : OPPORTUNITIES.filter((o) => o.status === activeStatus);
 
-  const handleObserver = useCallback(
-    (entries: IntersectionObserverEntry[]) => {
-      if (entries[0].isIntersecting && hasNextPage && !isFetchingNextPage) {
-        fetchNextPage();
-      }
-    },
-    [hasNextPage, isFetchingNextPage, fetchNextPage],
-  );
+  const shouldRefresh = true; // demo: always show the staleness banner for the screenshot
 
-  useEffect(() => {
-    const el = sentinelRef.current;
-    if (!el) return;
-    const observer = new IntersectionObserver(handleObserver, { threshold: 0.1 });
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, [handleObserver]);
-
-  const refreshMutation = useMutation({
-    mutationFn: () => opportunitiesApi.refresh().then((r) => r.data),
-    onSuccess: (res) => {
-      queryClient.invalidateQueries({ queryKey: ['opportunities'] });
-      showToast(`Found ${res.count} new opportunities!`, 'success');
-      if (res.notice) showToast(res.notice, 'info');
-    },
-    onError: (err) => {
-      if (err instanceof AppError && err.status === 429) {
-        showToast('Discovery limit reached (5/hr). Try again later.', 'warning');
-      } else {
-        showToast('Could not discover opportunities.', 'error');
-      }
-    },
-  });
-
-  const allOpps       = data?.pages.flatMap((p) => p.opportunities) ?? [];
-  const shouldRefresh = data?.pages[0]?.should_refresh;
+  const handleDiscover = () => {
+    setIsDiscovering(true);
+    setTimeout(() => {
+      setIsDiscovering(false);
+      showToast('Found 4 new opportunities!', 'success');
+    }, 600);
+  };
 
   return (
     <div className="page-container space-y-5">
@@ -289,9 +428,9 @@ export default function OpportunitiesPage() {
           </Button>
           <Button
             size="sm"
-            leftIcon={<RefreshCw size={13} className={refreshMutation.isPending ? 'animate-spin' : ''} />}
-            isLoading={refreshMutation.isPending}
-            onClick={() => refreshMutation.mutate()}
+            leftIcon={<RefreshCw size={13} className={isDiscovering ? 'animate-spin' : ''} />}
+            isLoading={isDiscovering}
+            onClick={handleDiscover}
           >
             Discover new
           </Button>
@@ -308,8 +447,8 @@ export default function OpportunitiesPage() {
           <Button
             variant="outline"
             size="xs"
-            onClick={() => refreshMutation.mutate()}
-            isLoading={refreshMutation.isPending}
+            onClick={handleDiscover}
+            isLoading={isDiscovering}
           >
             Discover now
           </Button>
@@ -326,31 +465,11 @@ export default function OpportunitiesPage() {
       />
 
       {/* List */}
-      {isLoading ? (
-        <div className="space-y-3">
-          {Array.from({ length: 4 }).map((_, i) => <SkeletonOpportunityCard key={i} />)}
-        </div>
-      ) : allOpps.length === 0 ? (
-        <EmptyState
-          icon={<Zap size={32} />}
-          headline="No opportunities yet"
-          subline={shouldRefresh ? 'Discover new prospects to get started.' : 'Check back soon or run discovery.'}
-          action={{ label: 'Discover now', onClick: () => refreshMutation.mutate() }}
-        />
-      ) : (
-        <>
-          <div className="space-y-3">
-            {allOpps.map((opp) => (
-              <OpportunityCard key={opp.id} opp={opp} currentUserId={user?.id ?? ''} />
-            ))}
-          </div>
-          {/* Infinite scroll sentinel */}
-          <div ref={sentinelRef} className="flex justify-center py-4">
-            {isFetchingNextPage && <Spinner size="sm" />}
-          </div>
-        </>
-      )}
-
+      <div className="space-y-3">
+        {allOpps.map((opp) => (
+          <OpportunityCard key={opp.id} opp={opp} currentUserId={CURRENT_USER_ID} />
+        ))}
+      </div>
     </div>
   );
 }

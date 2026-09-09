@@ -1,16 +1,17 @@
 // ============================================================
 // FILE: src/pages/auth/AcceptInvitePage.tsx
 // ============================================================
-import React, { useEffect, useRef, useState } from 'react';
-import { useSearchParams, useNavigate, Link } from 'react-router-dom';
-import { useAuth } from '@/hooks/useAuth';
-import { userApi } from '@/api/user';
-import { onboardingApi } from '@/api/onboarding';
-import { queryClient } from '@/lib/queryClient';
+import React, { useRef, useState } from 'react';
+import { useNavigate, Link } from 'react-router-dom';
 import { ROUTES } from '@/lib/constants';
-import { Spinner } from '@/components/common/index';
 import { Button } from '@/components/ui/Button';
-import { AppError } from '@/api/types';
+
+// ============================================================
+// DEMO MODE: no invite-token lookup, no auth check, no backend
+// calls. The page opens straight into the "needs profile setup"
+// step with a realistic workspace name so it can be screenshotted
+// without hitting an API.
+// ============================================================
 
 // ── Quick-fill chips ────────────────────────────────────────
 const GOAL_SUGGESTIONS = [
@@ -37,22 +38,19 @@ type PageStatus =
   | 'error';
 
 export default function AcceptInvitePage() {
-  const [searchParams]  = useSearchParams();
-  const token           = searchParams.get('token');
   const navigate        = useNavigate();
-  const { isAuthenticated, isLoading, refreshUser, user } = useAuth();
 
-  const [status, setStatus]               = useState<PageStatus>('loading');
+  const [status, setStatus]               = useState<PageStatus>('needs_goal');
   const [message, setMessage]             = useState('');
-  const [workspaceName, setWorkspaceName] = useState('');
+  const [workspaceName]                   = useState('Northwind Sales Team');
 
-  // ── Form state ───────────────────────────────────────────
-  const [userName,         setUserName]         = useState('');
-  const [goalText,         setGoalText]         = useState('');
-  const [selectedSuggestion, setSelectedSuggestion] = useState<string | null>(null);
-  const [experienceLevel,  setExperienceLevel]  = useState('');
-  const [bio,              setBio]              = useState('');
-  const [websites,         setWebsites]         = useState<string[]>([]);
+  // ── Form state (pre-filled with realistic demo values) ────
+  const [userName,         setUserName]         = useState('Jordan Alvarez');
+  const [goalText,         setGoalText]         = useState('Close more enterprise deals this quarter');
+  const [selectedSuggestion, setSelectedSuggestion] = useState<string | null>('Close more deals');
+  const [experienceLevel,  setExperienceLevel]  = useState('experienced');
+  const [bio,              setBio]              = useState("I'm an Account Executive selling to mid-market and enterprise ops teams.");
+  const [websites,         setWebsites]         = useState<string[]>(['https://linkedin.com/in/jordanalvarez']);
   const [websiteInput,     setWebsiteInput]     = useState('');
 
   const nameInputRef  = useRef<HTMLInputElement>(null);
@@ -65,59 +63,6 @@ export default function AcceptInvitePage() {
     el.style.height = 'auto';
     el.style.height = `${el.scrollHeight}px`;
   };
-
-  // ── Accept invite once auth state is known ───────────────
-  useEffect(() => {
-    if (isLoading) return;
-
-    if (!token) {
-      setStatus('error');
-      setMessage('No invite token provided. Please check your invite link.');
-      return;
-    }
-
-    if (!isAuthenticated) {
-      localStorage.setItem('pending_invite_token', token);
-      navigate(`${ROUTES.LOGIN}?invite=1`, { replace: true });
-      return;
-    }
-
-    const accept = async () => {
-      try {
-        const { data } = await userApi.acceptInvite(token);
-        await refreshUser();
-        queryClient.clear();
-        setWorkspaceName(data.workspace.name);
-
-        if (data.needs_profile_setup) {
-          if (user?.name) setUserName(user.name);
-          setStatus('needs_goal');
-          setTimeout(() => nameInputRef.current?.focus(), 50);
-        } else {
-          setStatus('success');
-          setMessage(`Welcome to ${data.workspace.name}!`);
-          setTimeout(() => navigate(ROUTES.HOME, { replace: true }), 1500);
-        }
-      } catch (err) {
-        if (err instanceof AppError) {
-          if (err.code === 'ALREADY_A_MEMBER') {
-            setStatus('already_member');
-          } else if (err.code === 'INVALID_OR_EXPIRED_TOKEN') {
-            setStatus('error');
-            setMessage('This invite link has expired or is invalid.');
-          } else {
-            setStatus('error');
-            setMessage(err.message || 'Failed to accept invite. Please try again.');
-          }
-        } else {
-          setStatus('error');
-          setMessage('An unexpected error occurred.');
-        }
-      }
-    };
-
-    accept();
-  }, [isLoading, isAuthenticated, token, navigate, refreshUser]);
 
   // ── Website helpers ──────────────────────────────────────
   const addWebsite = () => {
@@ -136,24 +81,12 @@ export default function AcceptInvitePage() {
     if (e.key === 'Enter') { e.preventDefault(); addWebsite(); }
   };
 
-  // ── Submit ───────────────────────────────────────────────
-  const handleGoalSubmit = async () => {
+  // ── Submit (demo mode: no backend call) ───────────────────
+  const handleGoalSubmit = () => {
     const trimmedGoal = goalText.trim();
-    const trimmedName = userName.trim();
     if (!trimmedGoal || status === 'submitting') return;
     setStatus('submitting');
-    try {
-      await onboardingApi.submitAbbreviated({
-        primary_goal: trimmedGoal,
-        ...(trimmedName      ? { name: trimmedName }                       : {}),
-        ...(experienceLevel  ? { experience_level: experienceLevel }       : {}),
-        ...(bio.trim()       ? { bio: bio.trim() }                         : {}),
-        ...(websites.length  ? { websites }                                : {}),
-      });
-    } catch {
-      // Non-fatal — profile setup failure shouldn't block app access.
-    }
-    navigate(ROUTES.HOME, { replace: true });
+    setTimeout(() => navigate(ROUTES.HOME, { replace: true }), 400);
   };
 
   const handleSuggestionClick = (suggestionLabel: string) => {
@@ -175,16 +108,6 @@ export default function AcceptInvitePage() {
       handleGoalSubmit();
     }
   };
-
-  // ── Loading ──────────────────────────────────────────────
-  if (status === 'loading') {
-    return (
-      <div className="min-h-dvh flex flex-col items-center justify-center gap-4">
-        <Spinner size="lg" />
-        <p className="text-sm text-text-muted">Accepting your invitation…</p>
-      </div>
-    );
-  }
 
   // ── Profile setup step ───────────────────────────────────
   if (status === 'needs_goal' || status === 'submitting') {

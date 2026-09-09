@@ -1,30 +1,28 @@
 // ============================================================
 // FILE: src/pages/chat/ChatListPage.tsx
 //
-// CHAT AUDIT CHANGE (task #6): chat list is now paginated via
-// useInfiniteQuery. Offset-based (not full keyset) — see
-// IMPLEMENTATION_SUMMARY.md for why: last_message_at is nullable, which
-// makes a clean keyset comparison meaningfully more complex for limited
-// benefit at "hundreds/thousands of chats per user" scale. The backend
-// (chat.js GET /) returns has_more/next_offset using the standard
-// limit+1 trick so this doesn't need a separate COUNT query.
+// DEMO BUILD — all API/query-client calls removed and replaced with
+// realistic hardcoded local data so this page renders fully offline for
+// screenshots. Search, filters, rename, and delete are all wired up
+// against in-memory state so the UI still behaves like the real thing;
+// nothing here talks to a network.
 // ============================================================
-import React, { useEffect, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { chatApi }     from '@/api/chat';
-import { queryKeys }   from '@/lib/queryKeys';
-import { useToast }    from '@/hooks/useToast';
-import { Button }      from '@/components/ui/Button';
-import { Skeleton }    from '@/components/ui/Skeleton';
-import { EmptyState }  from '@/components/common/index';
-import { formatRelativeDate, cn } from '@/lib/utils';
-import { CHAT_LIST_PAGE_SIZE } from '@/lib/constants';
+import React, { useMemo, useState } from 'react';
 import {
   MessageCircle, Plus, ChevronRight, Search, X,
-  MoreVertical, Pencil, Trash2, Check, Loader2,
+  MoreVertical, Pencil, Trash2, Check,
 } from 'lucide-react';
-import type { Chat } from '@/api/types';
+
+// ── Local types (mirrors the shape of the real Chat model) ──────────
+interface Chat {
+  id: string;
+  title: string;
+  chat_type: 'general' | 'opportunity' | 'practice';
+  chat_mode: 'general' | 'meeting_notes' | 'prep' | 'followup_coach';
+  message_count: number;
+  last_message_at: string | null;
+  created_at: string;
+}
 
 const MODE_LABELS: Record<string, string> = {
   general:        'General',
@@ -39,9 +37,6 @@ const TYPE_DOT: Record<string, string> = {
   practice:    'bg-purple-500',
 };
 
-// FIX: chat list filters (type + mode). Values match chatApi.list()'s
-// `type`/`mode` params, which the server (chat.js GET /) applies as
-// `.eq('chat_type', type)` / `.eq('chat_mode', mode)` when present.
 const TYPE_FILTER_OPTIONS: Array<{ value: string; label: string }> = [
   { value: '',            label: 'All types' },
   { value: 'general',     label: 'General' },
@@ -57,14 +52,185 @@ const MODE_FILTER_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'followup_coach', label: 'Follow-up coach' },
 ];
 
-function useDebouncedValue<T>(value: T, delayMs: number): T {
-  const [debounced, setDebounced] = useState(value);
-  useEffect(() => {
-    const timer = setTimeout(() => setDebounced(value), delayMs);
-    return () => clearTimeout(timer);
-  }, [value, delayMs]);
-  return debounced;
+// ── Minimal relative-date formatter (no external util dependency) ───
+function formatRelativeDate(iso: string | null): string {
+  if (!iso) return '';
+  const date = new Date(iso);
+  const now  = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffMin = Math.round(diffMs / 60000);
+  const diffHr  = Math.round(diffMin / 60);
+  const diffDay = Math.round(diffHr / 24);
+
+  if (diffMin < 1) return 'Just now';
+  if (diffMin < 60) return `${diffMin}m ago`;
+  if (diffHr < 24) return `${diffHr}h ago`;
+  if (diffDay === 1) return 'Yesterday';
+  if (diffDay < 7) return `${diffDay}d ago`;
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
+
+function cn(...classes: Array<string | false | null | undefined>) {
+  return classes.filter(Boolean).join(' ');
+}
+
+// ── Hardcoded demo dataset ────────────────────────────────────────
+// Realistic conversation titles, types, modes, message counts, and
+// timestamps spread across the last few weeks so the list feels lived-in.
+const now = new Date();
+const daysAgo = (d: number, h = 0, m = 0) => {
+  const dt = new Date(now);
+  dt.setDate(dt.getDate() - d);
+  dt.setHours(dt.getHours() - h, dt.getMinutes() - m, 0, 0);
+  return dt.toISOString();
+};
+
+const INITIAL_CHATS: Chat[] = [
+  {
+    id: 'chat_1001',
+    title: 'Northwind Logistics — renewal risk review',
+    chat_type: 'opportunity',
+    chat_mode: 'prep',
+    message_count: 18,
+    last_message_at: daysAgo(0, 0, 12),
+    created_at: daysAgo(2),
+  },
+  {
+    id: 'chat_1002',
+    title: 'Weekly pipeline sync — notes',
+    chat_type: 'general',
+    chat_mode: 'meeting_notes',
+    message_count: 34,
+    last_message_at: daysAgo(0, 1, 45),
+    created_at: daysAgo(0, 2, 10),
+  },
+  {
+    id: 'chat_1003',
+    title: 'Objection handling: "too expensive"',
+    chat_type: 'practice',
+    chat_mode: 'general',
+    message_count: 9,
+    last_message_at: daysAgo(0, 4),
+    created_at: daysAgo(0, 5),
+  },
+  {
+    id: 'chat_1004',
+    title: 'Acme Corp — discovery call follow-up',
+    chat_type: 'opportunity',
+    chat_mode: 'followup_coach',
+    message_count: 12,
+    last_message_at: daysAgo(1, 3),
+    created_at: daysAgo(1, 6),
+  },
+  {
+    id: 'chat_1005',
+    title: 'Brightline Health kickoff prep',
+    chat_type: 'opportunity',
+    chat_mode: 'prep',
+    message_count: 22,
+    last_message_at: daysAgo(1, 8),
+    created_at: daysAgo(3),
+  },
+  {
+    id: 'chat_1006',
+    title: 'Cold outreach script — mid-market SaaS',
+    chat_type: 'general',
+    chat_mode: 'general',
+    message_count: 6,
+    last_message_at: daysAgo(2),
+    created_at: daysAgo(2, 1),
+  },
+  {
+    id: 'chat_1007',
+    title: 'Vantage Retail QBR — meeting notes',
+    chat_type: 'general',
+    chat_mode: 'meeting_notes',
+    message_count: 41,
+    last_message_at: daysAgo(2, 5),
+    created_at: daysAgo(2, 7),
+  },
+  {
+    id: 'chat_1008',
+    title: 'Roleplay: negotiating a multi-year contract',
+    chat_type: 'practice',
+    chat_mode: 'general',
+    message_count: 15,
+    last_message_at: daysAgo(3, 2),
+    created_at: daysAgo(3, 4),
+  },
+  {
+    id: 'chat_1009',
+    title: 'Summit Manufacturing — champion follow-up',
+    chat_type: 'opportunity',
+    chat_mode: 'followup_coach',
+    message_count: 8,
+    last_message_at: daysAgo(4),
+    created_at: daysAgo(4, 1),
+  },
+  {
+    id: 'chat_1010',
+    title: 'Pricing page copy review',
+    chat_type: 'general',
+    chat_mode: 'general',
+    message_count: 5,
+    last_message_at: daysAgo(4, 9),
+    created_at: daysAgo(4, 10),
+  },
+  {
+    id: 'chat_1011',
+    title: 'Q3 territory planning notes',
+    chat_type: 'general',
+    chat_mode: 'meeting_notes',
+    message_count: 27,
+    last_message_at: daysAgo(5),
+    created_at: daysAgo(5, 2),
+  },
+  {
+    id: 'chat_1012',
+    title: 'Redwood Analytics — security questionnaire prep',
+    chat_type: 'opportunity',
+    chat_mode: 'prep',
+    message_count: 19,
+    last_message_at: daysAgo(6),
+    created_at: daysAgo(6, 3),
+  },
+  {
+    id: 'chat_1013',
+    title: 'Practice: cold call opener variations',
+    chat_type: 'practice',
+    chat_mode: 'general',
+    message_count: 11,
+    last_message_at: daysAgo(7),
+    created_at: daysAgo(7, 1),
+  },
+  {
+    id: 'chat_1014',
+    title: 'Harborview Insurance — renewal follow-up',
+    chat_type: 'opportunity',
+    chat_mode: 'followup_coach',
+    message_count: 14,
+    last_message_at: daysAgo(8),
+    created_at: daysAgo(9),
+  },
+  {
+    id: 'chat_1015',
+    title: 'Onboarding call notes — Delta Freight',
+    chat_type: 'general',
+    chat_mode: 'meeting_notes',
+    message_count: 23,
+    last_message_at: daysAgo(10),
+    created_at: daysAgo(10, 1),
+  },
+  {
+    id: 'chat_1016',
+    title: 'Competitive positioning vs. Ridgeline',
+    chat_type: 'general',
+    chat_mode: 'general',
+    message_count: 7,
+    last_message_at: daysAgo(12),
+    created_at: daysAgo(12, 2),
+  },
+];
 
 interface ChatRowProps {
   chat: Chat;
@@ -72,8 +238,6 @@ interface ChatRowProps {
   isEditing: boolean;
   isConfirmingDelete: boolean;
   renameValue: string;
-  isRenamePending: boolean;
-  isDeletePending: boolean;
   onOpenMenu: () => void;
   onCloseMenu: () => void;
   onStartRename: () => void;
@@ -83,6 +247,7 @@ interface ChatRowProps {
   onStartDelete: () => void;
   onCancelDelete: () => void;
   onConfirmDelete: () => void;
+  onOpen: () => void;
 }
 
 function ChatRow({
@@ -91,8 +256,6 @@ function ChatRow({
   isEditing,
   isConfirmingDelete,
   renameValue,
-  isRenamePending,
-  isDeletePending,
   onOpenMenu,
   onCloseMenu,
   onStartRename,
@@ -102,12 +265,12 @@ function ChatRow({
   onStartDelete,
   onCancelDelete,
   onConfirmDelete,
+  onOpen,
 }: ChatRowProps) {
-  const navigate = useNavigate();
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = React.useRef<HTMLInputElement>(null);
   const label = chat.chat_mode !== 'general' ? MODE_LABELS[chat.chat_mode] : chat.chat_type;
 
-  useEffect(() => {
+  React.useEffect(() => {
     if (isEditing) {
       inputRef.current?.focus();
       inputRef.current?.select();
@@ -116,7 +279,7 @@ function ChatRow({
 
   const handleRowClick = () => {
     if (isEditing || isConfirmingDelete) return;
-    navigate(`/chat/${chat.id}`);
+    onOpen();
   };
 
   return (
@@ -148,7 +311,7 @@ function ChatRow({
             <button
               type="button"
               onClick={onCommitRename}
-              disabled={isRenamePending || !renameValue.trim()}
+              disabled={!renameValue.trim()}
               className="p-1 rounded text-brand hover:bg-surface-hover disabled:opacity-40 shrink-0"
               aria-label="Save title"
             >
@@ -157,7 +320,6 @@ function ChatRow({
             <button
               type="button"
               onClick={onCancelRename}
-              disabled={isRenamePending}
               className="p-1 rounded text-text-muted hover:bg-surface-hover shrink-0"
               aria-label="Cancel rename"
             >
@@ -183,15 +345,13 @@ function ChatRow({
           <button
             type="button"
             onClick={onConfirmDelete}
-            disabled={isDeletePending}
-            className="text-xs font-medium text-red-600 hover:text-red-700 px-2 py-1 rounded hover:bg-red-50 disabled:opacity-50"
+            className="text-xs font-medium text-red-600 hover:text-red-700 px-2 py-1 rounded hover:bg-red-50"
           >
-            {isDeletePending ? 'Deleting…' : 'Delete'}
+            Delete
           </button>
           <button
             type="button"
             onClick={onCancelDelete}
-            disabled={isDeletePending}
             className="text-xs text-text-muted hover:text-text-primary px-2 py-1 rounded hover:bg-surface-hover"
           >
             Cancel
@@ -261,15 +421,9 @@ function ChatRow({
 }
 
 export default function ChatListPage() {
-  const navigate       = useNavigate();
-  const queryClient     = useQueryClient();
-  const { showToast }  = useToast();
+  const [chats, setChats] = useState<Chat[]>(INITIAL_CHATS);
 
   const [searchInput, setSearchInput] = useState('');
-  const debouncedSearch = useDebouncedValue(searchInput, 300);
-
-  // FIX: chat type / mode filters, sent through to chatApi.list() as
-  // `type`/`mode`. Empty string means "no filter" (all types/modes).
   const [typeFilter, setTypeFilter] = useState('');
   const [modeFilter, setModeFilter] = useState('');
 
@@ -278,87 +432,62 @@ export default function ChatListPage() {
   const [renameValue, setRenameValue]         = useState('');
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
-  // FIX (task #6): paginated chat list. Re-keyed on `debouncedSearch` /
-  // `typeFilter` / `modeFilter` so changing any of them starts a fresh
-  // paginated result set instead of trying to splice pages fetched under
-  // different filters.
-  const {
-    data,
-    isLoading,
-    fetchNextPage,
-    hasNextPage,
-    isFetchingNextPage,
-  } = useInfiniteQuery({
-    queryKey: [...queryKeys.chats(), { search: debouncedSearch, type: typeFilter, mode: modeFilter }],
-    queryFn: ({ pageParam }: { pageParam?: number }) =>
-      chatApi.list({
-        limit:  CHAT_LIST_PAGE_SIZE,
-        offset: pageParam ?? 0,
-        search: debouncedSearch || undefined,
-        type:   (typeFilter || undefined) as 'general' | 'opportunity' | 'practice' | undefined,
-        mode:   (modeFilter || undefined) as 'general' | 'meeting_notes' | 'prep' | 'followup_coach' | undefined,
-      }).then((r) => r.data),
-    staleTime: 30_000,
-    initialPageParam: 0,
-    getNextPageParam: (lastPage) => (lastPage.has_more ? lastPage.next_offset ?? undefined : undefined),
-  });
+  const filteredChats = useMemo(() => {
+    const q = searchInput.trim().toLowerCase();
+    return chats.filter((chat) => {
+      if (q && !chat.title.toLowerCase().includes(q)) return false;
+      if (typeFilter && chat.chat_type !== typeFilter) return false;
+      if (modeFilter && chat.chat_mode !== modeFilter) return false;
+      return true;
+    });
+  }, [chats, searchInput, typeFilter, modeFilter]);
 
-  const chats = (data?.pages ?? []).flatMap((p) => p.chats);
-
-  const newChatMutation = useMutation({
-    mutationFn: () => chatApi.create({ chat_type: 'general', chat_mode: 'general' }).then((r) => r.data.chat),
-    onSuccess: (chat) => navigate(`/chat/${chat.id}`),
-    onError: () => showToast('Could not create chat.', 'error'),
-  });
-
-  const renameMutation = useMutation({
-    mutationFn: ({ chatId, title }: { chatId: string; title: string }) =>
-      chatApi.rename(chatId, title).then((r) => r.data.chat),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.chats() });
-      setEditingId(null);
-    },
-    onError: () => showToast('Could not rename chat.', 'error'),
-  });
-
-  const deleteMutation = useMutation({
-    mutationFn: (chatId: string) => chatApi.archive(chatId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.chats() });
-      setConfirmDeleteId(null);
-      showToast('Chat deleted.', 'success');
-    },
-    onError: () => showToast('Could not delete chat.', 'error'),
-  });
+  const handleNewChat = () => {
+    const newChat: Chat = {
+      id: `chat_${Date.now()}`,
+      title: 'New chat',
+      chat_type: 'general',
+      chat_mode: 'general',
+      message_count: 0,
+      last_message_at: null,
+      created_at: new Date().toISOString(),
+    };
+    setChats((prev) => [newChat, ...prev]);
+  };
 
   const handleCommitRename = (chatId: string) => {
     const trimmed = renameValue.trim();
     if (!trimmed) return;
-    renameMutation.mutate({ chatId, title: trimmed });
+    setChats((prev) => prev.map((c) => (c.id === chatId ? { ...c, title: trimmed } : c)));
+    setEditingId(null);
   };
 
-  const hasSearch  = debouncedSearch.trim().length > 0;
+  const handleConfirmDelete = (chatId: string) => {
+    setChats((prev) => prev.filter((c) => c.id !== chatId));
+    setConfirmDeleteId(null);
+  };
+
+  const hasSearch  = searchInput.trim().length > 0;
   const hasFilters = hasSearch || !!typeFilter || !!modeFilter;
 
   return (
-    <div className="page-container space-y-4">
+    <div className="page-container space-y-4 max-w-2xl mx-auto py-6 px-4">
       <div className="flex items-end justify-between">
         <div>
           <h1 className="text-lg font-semibold text-text-primary tracking-tight">Chat</h1>
           {!!chats.length && (
             <p className="text-xs text-text-muted mt-0.5">
-              {chats.length}{hasNextPage ? '+' : ''} conversation{chats.length === 1 && !hasNextPage ? '' : 's'}
+              {chats.length} conversation{chats.length === 1 ? '' : 's'}
             </p>
           )}
         </div>
-        <Button
-          size="sm"
-          leftIcon={<Plus size={14} />}
-          isLoading={newChatMutation.isPending}
-          onClick={() => newChatMutation.mutate()}
+        <button
+          onClick={handleNewChat}
+          className="inline-flex items-center gap-1.5 text-sm font-medium text-white bg-brand hover:bg-brand-600 rounded-lg px-3 py-1.5 transition-colors"
         >
+          <Plus size={14} />
           New chat
-        </Button>
+        </button>
       </div>
 
       <div className="relative">
@@ -428,44 +557,43 @@ export default function ChatListPage() {
           openMenuId ? 'overflow-visible' : 'overflow-hidden',
         )}
       >
-        {isLoading ? (
-          <div className="p-4 space-y-4">
-            {Array.from({ length: 5 }).map((_, i) => (
-              <div key={i} className="flex items-center gap-3">
-                <Skeleton className="w-1.5 h-1.5" rounded="full" />
-                <div className="flex-1 space-y-1.5">
-                  <Skeleton className="h-4 w-48" />
-                  <Skeleton className="h-3 w-28" />
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : !chats.length ? (
+        {!filteredChats.length ? (
           hasFilters ? (
-            <EmptyState
-              icon={<Search size={22} />}
-              headline="No matching chats"
-              subline={
-                hasSearch
-                  ? `Nothing matches "${debouncedSearch}". Try a different search or filter.`
-                  : 'No chats match the selected filters.'
-              }
-              action={{
-                label: 'Clear filters',
-                onClick: () => { setSearchInput(''); setTypeFilter(''); setModeFilter(''); },
-              }}
-            />
+            <div className="flex flex-col items-center justify-center text-center py-14 px-6 gap-3">
+              <div className="w-10 h-10 rounded-full bg-surface-base flex items-center justify-center text-text-muted">
+                <Search size={20} />
+              </div>
+              <p className="text-sm font-medium text-text-primary">No matching chats</p>
+              <p className="text-xs text-text-muted max-w-xs">
+                {hasSearch
+                  ? `Nothing matches "${searchInput}". Try a different search or filter.`
+                  : 'No chats match the selected filters.'}
+              </p>
+              <button
+                onClick={() => { setSearchInput(''); setTypeFilter(''); setModeFilter(''); }}
+                className="text-xs font-medium text-brand hover:underline"
+              >
+                Clear filters
+              </button>
+            </div>
           ) : (
-            <EmptyState
-              icon={<MessageCircle size={22} />}
-              headline="No chats yet"
-              subline="Start a conversation with your Clutch AI coach."
-              action={{ label: 'Start chat', onClick: () => newChatMutation.mutate() }}
-            />
+            <div className="flex flex-col items-center justify-center text-center py-14 px-6 gap-3">
+              <div className="w-10 h-10 rounded-full bg-surface-base flex items-center justify-center text-text-muted">
+                <MessageCircle size={20} />
+              </div>
+              <p className="text-sm font-medium text-text-primary">No chats yet</p>
+              <p className="text-xs text-text-muted max-w-xs">Start a conversation with your Clutch AI coach.</p>
+              <button
+                onClick={handleNewChat}
+                className="text-xs font-medium text-white bg-brand hover:bg-brand-600 rounded-md px-3 py-1.5"
+              >
+                Start chat
+              </button>
+            </div>
           )
         ) : (
           <>
-            {chats.map((chat) => (
+            {filteredChats.map((chat) => (
               <ChatRow
                 key={chat.id}
                 chat={chat}
@@ -473,8 +601,6 @@ export default function ChatListPage() {
                 isEditing={editingId === chat.id}
                 isConfirmingDelete={confirmDeleteId === chat.id}
                 renameValue={renameValue}
-                isRenamePending={renameMutation.isPending && renameMutation.variables?.chatId === chat.id}
-                isDeletePending={deleteMutation.isPending && deleteMutation.variables === chat.id}
                 onOpenMenu={() => setOpenMenuId(chat.id)}
                 onCloseMenu={() => setOpenMenuId(null)}
                 onStartRename={() => {
@@ -486,21 +612,10 @@ export default function ChatListPage() {
                 onCancelRename={() => setEditingId(null)}
                 onStartDelete={() => setConfirmDeleteId(chat.id)}
                 onCancelDelete={() => setConfirmDeleteId(null)}
-                onConfirmDelete={() => deleteMutation.mutate(chat.id)}
+                onConfirmDelete={() => handleConfirmDelete(chat.id)}
+                onOpen={() => { /* demo: navigation disabled */ }}
               />
             ))}
-            {hasNextPage && (
-              <div className="flex justify-center py-3 border-t border-surface-border">
-                <button
-                  onClick={() => fetchNextPage()}
-                  disabled={isFetchingNextPage}
-                  className="flex items-center gap-1.5 text-xs text-text-muted hover:text-brand px-3 py-1.5 rounded-full hover:bg-brand-50 transition-colors disabled:opacity-50"
-                >
-                  {isFetchingNextPage && <Loader2 size={12} className="animate-spin" />}
-                  {isFetchingNextPage ? 'Loading…' : 'Load more chats'}
-                </button>
-              </div>
-            )}
           </>
         )}
       </div>

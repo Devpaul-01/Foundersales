@@ -1,27 +1,167 @@
 // ============================================================
 // FILE: src/pages/commitments/CommitmentsPage.tsx
-// GET /api/commitments — grouped by status (pending / overdue / done)
-// PATCH /api/commitments/:id — mark done / add note
-// Infinite scroll
+//
+// DEMO / SCREENSHOT BUILD
+//  - All data is hardcoded locally — no API calls, no react-query,
+//    no infinite scroll fetching, no loading states, no network requests.
+//  - Status filter tabs and "mark done" flow work against local state.
+//  - Preserves the original design and interaction behavior.
 // ============================================================
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useInfiniteQuery, useMutation } from '@tanstack/react-query';
-import { commitmentsApi } from '@/api/commitments';
-import { queryClient }    from '@/lib/queryClient';
-import { queryKeys }      from '@/lib/queryKeys';
-import { useToast }       from '@/hooks/useToast';
-import { useNotificationContext } from '@/contexts/NotificationContext';
 import { Button }         from '@/components/ui/Button';
 import { Badge }          from '@/components/ui/Badge';
 import { Modal }          from '@/components/ui/Modal';
 import { Textarea }       from '@/components/ui/Input';
-import { Skeleton }       from '@/components/ui/Skeleton';
-import { EmptyState, Spinner } from '@/components/common/index';
+import { EmptyState }     from '@/components/common/index';
 import { COMMITMENT_STATUS_LABELS } from '@/lib/constants';
-import { formatRelativeDate, formatShortDate, cn } from '@/lib/utils';
-import { CheckSquare, CheckCircle2, Clock, ChevronRight, AlertTriangle } from 'lucide-react';
-import type { Commitment } from '@/api/types';
+import { formatShortDate, cn } from '@/lib/utils';
+import { CheckSquare, CheckCircle2, ChevronRight, AlertTriangle } from 'lucide-react';
+
+// ── Local type (mirrors Commitment shape used by this page) ────
+type CommitmentStatus = 'pending' | 'overdue' | 'done';
+
+type Commitment = {
+  id: string;
+  commitment_text: string;
+  owner: 'you' | 'them';
+  status: CommitmentStatus;
+  due_date: string | null;
+  event_title: string | null;
+  event_id: string | null;
+  completion_note: string | null;
+};
+
+// ── Hardcoded demo data ──────────────────────────────────────
+const today = new Date();
+const shift = (days: number) => {
+  const d = new Date(today);
+  d.setDate(d.getDate() + days);
+  return d.toISOString();
+};
+
+const INITIAL_COMMITMENTS: Commitment[] = [
+  {
+    id: 'c_1',
+    commitment_text: 'Send updated pricing sheet with the annual-plan discount included',
+    owner: 'you',
+    status: 'overdue',
+    due_date: shift(-4),
+    event_title: 'Call with Marisol Ferreira',
+    event_id: 'evt_101',
+    completion_note: null,
+  },
+  {
+    id: 'c_2',
+    commitment_text: 'Loop in the security team to answer the SOC 2 questionnaire',
+    owner: 'them',
+    status: 'overdue',
+    due_date: shift(-2),
+    event_title: 'Demo with Anna Kowalski',
+    event_id: 'evt_102',
+    completion_note: null,
+  },
+  {
+    id: 'c_3',
+    commitment_text: 'Share the Loom walkthrough of the onboarding flow',
+    owner: 'you',
+    status: 'pending',
+    due_date: shift(1),
+    event_title: 'Discovery call with Marisol Ferreira',
+    event_id: 'evt_101',
+    completion_note: null,
+  },
+  {
+    id: 'c_4',
+    commitment_text: 'Get sign-off from finance on the multi-year contract terms',
+    owner: 'them',
+    status: 'pending',
+    due_date: shift(3),
+    event_title: 'Contract review with Sophie Lindqvist',
+    event_id: 'evt_103',
+    completion_note: null,
+  },
+  {
+    id: 'c_5',
+    commitment_text: 'Introduce the account exec to the VP of Sales for a joint call',
+    owner: 'you',
+    status: 'pending',
+    due_date: shift(5),
+    event_title: 'Intro call with Grant Whitfield',
+    event_id: 'evt_104',
+    completion_note: null,
+  },
+  {
+    id: 'c_6',
+    commitment_text: 'Confirm seat count for the Q4 rollout before renewal',
+    owner: 'them',
+    status: 'pending',
+    due_date: shift(7),
+    event_title: 'Renewal check-in with Devon Park',
+    event_id: 'evt_105',
+    completion_note: null,
+  },
+  {
+    id: 'c_7',
+    commitment_text: 'Send the recap deck from yesterday\'s product walkthrough',
+    owner: 'you',
+    status: 'done',
+    due_date: shift(-6),
+    event_title: 'Demo with Anna Kowalski',
+    event_id: 'evt_102',
+    completion_note: 'Sent Tuesday morning along with the pricing tiers doc.',
+  },
+  {
+    id: 'c_8',
+    commitment_text: 'Set up a shared Slack channel for the pilot rollout',
+    owner: 'you',
+    status: 'done',
+    due_date: shift(-9),
+    event_title: 'Kickoff with Priya Nadarajah',
+    event_id: 'evt_106',
+    completion_note: null,
+  },
+  {
+    id: 'c_9',
+    commitment_text: 'Provide two customer references in a similar industry',
+    owner: 'them',
+    status: 'done',
+    due_date: shift(-12),
+    event_title: 'Proposal review with Devon Park',
+    event_id: 'evt_105',
+    completion_note: 'Received references from two mid-market fintech customers.',
+  },
+  {
+    id: 'c_10',
+    commitment_text: 'Draft the mutual close plan with target signature date',
+    owner: 'you',
+    status: 'pending',
+    due_date: shift(2),
+    event_title: 'Contract review with Sophie Lindqvist',
+    event_id: 'evt_103',
+    completion_note: null,
+  },
+  {
+    id: 'c_11',
+    commitment_text: 'Follow up on whether legal needs a redlined MSA or can work from the standard template',
+    owner: 'them',
+    status: 'overdue',
+    due_date: shift(-1),
+    event_title: 'Contract review with Sophie Lindqvist',
+    event_id: 'evt_103',
+    completion_note: null,
+  },
+  {
+    id: 'c_12',
+    commitment_text: 'Check in on budget approval status with the finance stakeholder',
+    owner: 'them',
+    status: 'pending',
+    due_date: shift(6),
+    event_title: 'Check-in with Malik Osei',
+    event_id: 'evt_107',
+    completion_note: null,
+  },
+];
 
 const STATUS_TABS = [
   { value: '',        label: 'All'     },
@@ -135,74 +275,55 @@ function CommitmentRow({
 }
 
 export default function CommitmentsPage() {
-  const { showToast }  = useToast();
-  const { refreshCounts } = useNotificationContext();
+  const [commitments, setCommitments] = useState<Commitment[]>(INITIAL_COMMITMENTS);
   const [statusFilter, setStatusFilter] = useState('');
-  const loaderRef = useRef<HTMLDivElement>(null);
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
-  const { data, fetchNextPage, hasNextPage, isFetchingNextPage, isLoading } =
-    useInfiniteQuery({
-      queryKey: queryKeys.commitments({ status: statusFilter }),
-      queryFn:  ({ pageParam = 1 }) =>
-        commitmentsApi.list({ page: pageParam, limit: 25, status: statusFilter || undefined })
-          .then((r) => r.data),
-      getNextPageParam: (last) =>
-        last.pagination.has_more ? last.pagination.page + 1 : undefined,
-      initialPageParam: 1,
-      staleTime: 60_000,
-    });
+  const showToast = (message: string, type: 'success' | 'error') => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 2200);
+  };
 
-  const observerCb = useCallback((entries: IntersectionObserverEntry[]) => {
-    if (entries[0].isIntersecting && hasNextPage && !isFetchingNextPage) fetchNextPage();
-  }, [fetchNextPage, hasNextPage, isFetchingNextPage]);
+  const handleDone = (id: string, note?: string) => {
+    setCommitments((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, status: 'done', completion_note: note ?? c.completion_note } : c)),
+    );
+    showToast('Commitment marked done!', 'success');
+  };
 
-  React.useEffect(() => {
-    const el = loaderRef.current;
-    if (!el) return;
-    const ob = new IntersectionObserver(observerCb, { rootMargin: '200px' });
-    ob.observe(el);
-    return () => ob.disconnect();
-  }, [observerCb]);
+  const counts = useMemo(() => ({
+    overdue: commitments.filter((c) => c.status === 'overdue').length,
+    pending: commitments.filter((c) => c.status === 'pending').length,
+    done:    commitments.filter((c) => c.status === 'done').length,
+  }), [commitments]);
 
-  const updateMutation = useMutation({
-    mutationFn: ({ id, note }: { id: string; note?: string }) =>
-      commitmentsApi.update(id, { status: 'done', completion_note: note }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.commitments() });
-      queryClient.invalidateQueries({ queryKey: queryKeys.calendarAlerts });
-      refreshCounts();
-      showToast('Commitment marked done!', 'success');
-    },
-    onError: () => showToast('Could not update.', 'error'),
-  });
-
-  const allItems = data?.pages.flatMap((p) => p.commitments) ?? [];
-  const counts   = data?.pages[0]?.counts;
+  const filteredItems = useMemo(
+    () => (statusFilter ? commitments.filter((c) => c.status === statusFilter) : commitments),
+    [commitments, statusFilter],
+  );
 
   return (
     <div className="page-container space-y-5">
       <div className="flex items-center gap-2">
         <h1 className="text-xl font-bold text-text-primary">Commitments</h1>
-        {(counts?.overdue ?? 0) > 0 && (
-          <Badge variant="red" size="sm">{counts!.overdue} overdue</Badge>
+        {counts.overdue > 0 && (
+          <Badge variant="red" size="sm">{counts.overdue} overdue</Badge>
         )}
       </div>
 
       {/* Summary */}
-      {counts && (
-        <div className="grid grid-cols-3 gap-3">
-          {[
-            { label: 'Overdue', count: counts.overdue, color: 'text-danger'  },
-            { label: 'Pending', count: counts.pending, color: 'text-warning' },
-            { label: 'Done',    count: counts.done,    color: 'text-success' },
-          ].map((s) => (
-            <div key={s.label} className="bg-white border border-surface-border rounded-lg p-3 text-center">
-              <p className={cn('text-2xl font-bold', s.color)}>{s.count}</p>
-              <p className="text-xs text-text-muted mt-0.5">{s.label}</p>
-            </div>
-          ))}
-        </div>
-      )}
+      <div className="grid grid-cols-3 gap-3">
+        {[
+          { label: 'Overdue', count: counts.overdue, color: 'text-danger'  },
+          { label: 'Pending', count: counts.pending, color: 'text-warning' },
+          { label: 'Done',    count: counts.done,    color: 'text-success' },
+        ].map((s) => (
+          <div key={s.label} className="bg-white border border-surface-border rounded-lg p-3 text-center">
+            <p className={cn('text-2xl font-bold', s.color)}>{s.count}</p>
+            <p className="text-xs text-text-muted mt-0.5">{s.label}</p>
+          </div>
+        ))}
+      </div>
 
       {/* Status tabs */}
       <div className="flex gap-1 overflow-x-auto pb-1 scrollbar-hide">
@@ -224,19 +345,7 @@ export default function CommitmentsPage() {
 
       {/* List */}
       <div className="bg-white border border-surface-border rounded-lg overflow-hidden">
-        {isLoading ? (
-          <div className="p-4 space-y-3">
-            {Array.from({ length: 6 }).map((_, i) => (
-              <div key={i} className="flex items-center gap-3">
-                <Skeleton className="w-4 h-4 rounded-full shrink-0" />
-                <div className="flex-1 space-y-1.5">
-                  <Skeleton className="h-4 w-full" />
-                  <Skeleton className="h-3 w-32" />
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : allItems.length === 0 ? (
+        {filteredItems.length === 0 ? (
           <EmptyState
             icon={<CheckSquare size={28} />}
             headline="No commitments"
@@ -244,19 +353,29 @@ export default function CommitmentsPage() {
           />
         ) : (
           <>
-            {allItems.map((item) => (
+            {filteredItems.map((item) => (
               <CommitmentRow
                 key={item.id}
                 item={item}
-                onDone={(id, note) => updateMutation.mutate({ id, note })}
+                onDone={handleDone}
               />
             ))}
-            <div ref={loaderRef} className="h-4 flex items-center justify-center">
-              {isFetchingNextPage && <Spinner size="sm" />}
-            </div>
           </>
         )}
       </div>
+
+      {/* Lightweight local toast, replaces useToast hook for this offline demo */}
+      {toast && (
+        <div
+          className={cn(
+            'fixed bottom-5 left-1/2 -translate-x-1/2 px-4 py-2 rounded-lg text-sm font-medium shadow-lg z-50',
+            toast.type === 'success' && 'bg-success text-white',
+            toast.type === 'error'   && 'bg-danger text-white',
+          )}
+        >
+          {toast.message}
+        </div>
+      )}
     </div>
   );
 }

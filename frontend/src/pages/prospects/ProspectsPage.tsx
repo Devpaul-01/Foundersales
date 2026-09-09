@@ -1,23 +1,16 @@
 // FILE: src/pages/prospects/ProspectsPage.tsx
-// Infinite scroll list, platform badges, staleness indicator
-// POST /api/prospects to add, GET /api/prospects with filters
-import React, { useState, useRef, useCallback } from 'react';
+// DEMO BUILD — all data is hardcoded locally for screenshot/demo purposes.
+// No API calls, no react-query, no loading states. Fully offline.
+import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useInfiniteQuery, useMutation } from '@tanstack/react-query';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { prospectsApi }  from '@/api/prospects';
-import { queryClient }   from '@/lib/queryClient';
-import { queryKeys }     from '@/lib/queryKeys';
-import { useToast }      from '@/hooks/useToast';
 import { createProspectSchema, type CreateProspectSchema } from '@/lib/schemas';
 import { Button }        from '@/components/ui/Button';
 import { Input, Select, Textarea } from '@/components/ui/Input';
 import { Badge, PlatformBadge } from '@/components/ui/Badge';
 import { Avatar }        from '@/components/ui/Avatar';
 import { Modal }         from '@/components/ui/Modal';
-import { Skeleton }      from '@/components/ui/Skeleton';
-import { EmptyState, Spinner } from '@/components/common/index';
 import { PLATFORM_LABELS, PROSPECT_STATUS_LABELS } from '@/lib/constants';
 import { formatRelativeDate, cn } from '@/lib/utils';
 import { Users, Plus, ChevronRight, Search } from 'lucide-react';
@@ -30,6 +23,180 @@ const STATUS_TABS = [
   { value: 'converted', label: 'Converted'},
   { value: 'lost',      label: 'Lost'     },
 ];
+
+// ---------------------------------------------------------------------------
+// Hardcoded demo data — realistic, varied prospects across statuses/platforms
+// ---------------------------------------------------------------------------
+const DEMO_PROSPECTS: Prospect[] = [
+  {
+    id: 'p_1001',
+    name: 'Elena Marsh',
+    company: 'Northwind Capital',
+    title: 'VP of Business Development',
+    email: 'elena.marsh@northwindcap.com',
+    linkedin_url: 'https://linkedin.com/in/elenamarsh',
+    platform: 'linkedin',
+    status: 'active',
+    is_stale: false,
+    notes: 'Met at the SaaStr conference. Interested in Q1 pilot.',
+    created_at: '2026-06-02T14:20:00Z',
+    last_contact_at: '2026-09-05T09:12:00Z',
+  },
+  {
+    id: 'p_1002',
+    name: 'Marcus Odeh',
+    company: 'Fenwick & Rowe',
+    title: 'Director of Partnerships',
+    email: 'marcus@fenwickrowe.io',
+    linkedin_url: 'https://linkedin.com/in/marcusodeh',
+    platform: 'linkedin',
+    status: 'active',
+    is_stale: false,
+    notes: 'Warm intro from Sarah. Following up after demo call.',
+    created_at: '2026-07-14T11:05:00Z',
+    last_contact_at: '2026-09-06T16:40:00Z',
+  },
+  {
+    id: 'p_1003',
+    name: 'Priya Natarajan',
+    company: 'Cobalt Systems',
+    title: 'Head of Growth',
+    email: 'priya.n@cobaltsys.com',
+    linkedin_url: 'https://linkedin.com/in/priyanatarajan',
+    platform: 'twitter',
+    status: 'stale',
+    is_stale: true,
+    notes: 'Reached out after her podcast episode on outbound sales.',
+    created_at: '2026-05-20T08:30:00Z',
+    last_contact_at: '2026-07-02T13:15:00Z',
+  },
+  {
+    id: 'p_1004',
+    name: 'Jonah Whitfield',
+    company: 'Lumen Analytics',
+    title: 'CEO',
+    email: 'jonah@lumenanalytics.co',
+    linkedin_url: 'https://linkedin.com/in/jonahwhitfield',
+    platform: 'email',
+    status: 'converted',
+    is_stale: false,
+    notes: 'Signed annual contract in August. Great champion internally.',
+    created_at: '2026-04-11T10:00:00Z',
+    last_contact_at: '2026-08-28T12:00:00Z',
+  },
+  {
+    id: 'p_1005',
+    name: 'Talia Reyes',
+    company: 'Briarwood Partners',
+    title: 'Investment Associate',
+    email: 'talia.reyes@briarwoodvc.com',
+    linkedin_url: 'https://linkedin.com/in/taliareyes',
+    platform: 'linkedin',
+    status: 'active',
+    is_stale: false,
+    notes: 'Exploring co-investment opportunities. Bi-weekly check-ins.',
+    created_at: '2026-08-01T09:45:00Z',
+    last_contact_at: '2026-09-07T10:20:00Z',
+  },
+  {
+    id: 'p_1006',
+    name: 'Derek Sun',
+    company: 'Palmetto Foods',
+    title: 'Procurement Manager',
+    email: 'dsun@palmettofoods.com',
+    linkedin_url: '',
+    platform: 'phone',
+    status: 'lost',
+    is_stale: false,
+    notes: 'Went with a competitor due to pricing. Revisit in 6 months.',
+    created_at: '2026-03-18T15:30:00Z',
+    last_contact_at: '2026-06-10T11:00:00Z',
+  },
+  {
+    id: 'p_1007',
+    name: 'Aisha Bello',
+    company: 'Kestrel Media Group',
+    title: 'Marketing Director',
+    email: 'aisha.bello@kestrelmedia.com',
+    linkedin_url: 'https://linkedin.com/in/aishabello',
+    platform: 'linkedin',
+    status: 'active',
+    is_stale: false,
+    notes: 'Referred by Jonah Whitfield. Scheduling intro call next week.',
+    created_at: '2026-08-22T13:10:00Z',
+    last_contact_at: '2026-09-04T08:55:00Z',
+  },
+  {
+    id: 'p_1008',
+    name: 'Connor Blake',
+    company: 'Ashford & Vale',
+    title: 'Chief of Staff',
+    email: 'connor.blake@ashfordvale.com',
+    linkedin_url: 'https://linkedin.com/in/connorblake',
+    platform: 'twitter',
+    status: 'stale',
+    is_stale: true,
+    notes: 'No response after two follow-ups. Try a different channel.',
+    created_at: '2026-05-05T09:00:00Z',
+    last_contact_at: '2026-06-25T14:30:00Z',
+  },
+  {
+    id: 'p_1009',
+    name: 'Ines Cordova',
+    company: 'Solstice Ventures',
+    title: 'Principal',
+    email: 'ines@solsticevc.com',
+    linkedin_url: 'https://linkedin.com/in/inescordova',
+    platform: 'email',
+    status: 'active',
+    is_stale: false,
+    notes: 'Sent updated deck. Awaiting feedback from her partners.',
+    created_at: '2026-07-30T16:00:00Z',
+    last_contact_at: '2026-09-01T09:30:00Z',
+  },
+  {
+    id: 'p_1010',
+    name: 'Owen Fitzgerald',
+    company: 'Harrow Industrial',
+    title: 'VP of Operations',
+    email: 'owen.fitzgerald@harrowind.com',
+    linkedin_url: 'https://linkedin.com/in/owenfitzgerald',
+    platform: 'linkedin',
+    status: 'converted',
+    is_stale: false,
+    notes: 'Closed mid-tier plan. Upsell opportunity in Q1.',
+    created_at: '2026-02-09T12:20:00Z',
+    last_contact_at: '2026-08-15T10:10:00Z',
+  },
+  {
+    id: 'p_1011',
+    name: 'Yuki Tanaka',
+    company: 'Meridian Robotics',
+    title: 'Founder & CEO',
+    email: 'yuki@meridianrobotics.ai',
+    linkedin_url: 'https://linkedin.com/in/yukitanaka',
+    platform: 'linkedin',
+    status: 'active',
+    is_stale: false,
+    notes: 'Deep technical fit. Wants a security review before rollout.',
+    created_at: '2026-08-10T11:40:00Z',
+    last_contact_at: '2026-09-07T15:05:00Z',
+  },
+  {
+    id: 'p_1012',
+    name: 'Grace Holloway',
+    company: 'Birchfield Legal',
+    title: 'Managing Partner',
+    email: 'grace.holloway@birchfieldlegal.com',
+    linkedin_url: '',
+    platform: 'phone',
+    status: 'lost',
+    is_stale: false,
+    notes: 'Budget frozen for the year. Follow up in January.',
+    created_at: '2026-01-25T10:15:00Z',
+    last_contact_at: '2026-04-02T09:00:00Z',
+  },
+] as unknown as Prospect[];
 
 function ProspectRow({ prospect }: { prospect: Prospect }) {
   const navigate = useNavigate();
@@ -76,24 +243,18 @@ function ProspectRow({ prospect }: { prospect: Prospect }) {
 }
 
 function AddProspectModal({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const { showToast } = useToast();
-  const { register, handleSubmit, reset, formState: { errors, isSubmitting } } =
+  const { register, handleSubmit, reset, formState: { errors } } =
     useForm<CreateProspectSchema>({ resolver: zodResolver(createProspectSchema) });
 
-  const createMutation = useMutation({
-    mutationFn: (d: CreateProspectSchema) => prospectsApi.create(d),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.prospects() });
-      showToast('Prospect added!', 'success');
-      reset();
-      onClose();
-    },
-    onError: () => showToast('Could not add prospect.', 'error'),
-  });
+  // Demo-only submit handler — no network call, just closes the modal.
+  const onSubmit = (_d: CreateProspectSchema) => {
+    reset();
+    onClose();
+  };
 
   return (
     <Modal isOpen={open} onClose={onClose} title="Add prospect" size="md">
-      <form onSubmit={handleSubmit((d) => createMutation.mutate(d))} className="space-y-4">
+      <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
         <Input label="Name" required error={errors.name?.message} {...register('name')} />
         <div className="grid grid-cols-2 gap-3">
           <Input label="Company" {...register('company')} />
@@ -121,7 +282,7 @@ function AddProspectModal({ open, onClose }: { open: boolean; onClose: () => voi
         />
         <div className="flex justify-end gap-2 pt-1">
           <Button variant="secondary" size="sm" type="button" onClick={onClose}>Cancel</Button>
-          <Button size="sm" type="submit" isLoading={createMutation.isPending || isSubmitting}>
+          <Button size="sm" type="submit">
             Add prospect
           </Button>
         </div>
@@ -134,36 +295,17 @@ export default function ProspectsPage() {
   const [statusFilter, setStatusFilter] = useState('');
   const [search,       setSearch]       = useState('');
   const [addOpen,      setAddOpen]      = useState(false);
-  const loaderRef = useRef<HTMLDivElement>(null);
 
-  const { data, fetchNextPage, hasNextPage, isFetchingNextPage, isLoading } =
-    useInfiniteQuery({
-      queryKey: queryKeys.prospects({ status: statusFilter, search }),
-      queryFn:  ({ pageParam = 1 }) =>
-        prospectsApi.list({ page: pageParam, limit: 25, status: statusFilter || undefined, search: search || undefined })
-          .then((r) => r.data),
-      getNextPageParam: (last) =>
-        last.pagination.has_more ? last.pagination.page + 1 : undefined,
-      initialPageParam: 1,
-      staleTime: 60_000,
-    });
-
-  // Intersection observer for infinite scroll
-  const observerCb = useCallback((entries: IntersectionObserverEntry[]) => {
-    if (entries[0].isIntersecting && hasNextPage && !isFetchingNextPage) {
-      fetchNextPage();
-    }
-  }, [fetchNextPage, hasNextPage, isFetchingNextPage]);
-
-  React.useEffect(() => {
-    const el = loaderRef.current;
-    if (!el) return;
-    const ob = new IntersectionObserver(observerCb, { rootMargin: '200px' });
-    ob.observe(el);
-    return () => ob.disconnect();
-  }, [observerCb]);
-
-  const allProspects = data?.pages.flatMap((p) => p.prospects) ?? [];
+  // Local, static filtering over hardcoded data — no fetching involved.
+  const filteredProspects = DEMO_PROSPECTS.filter((p) => {
+    const matchesStatus = !statusFilter || p.status === statusFilter;
+    const q = search.trim().toLowerCase();
+    const matchesSearch =
+      !q ||
+      p.name.toLowerCase().includes(q) ||
+      (p.company ?? '').toLowerCase().includes(q);
+    return matchesStatus && matchesSearch;
+  });
 
   return (
     <div className="page-container space-y-5">
@@ -205,32 +347,18 @@ export default function ProspectsPage() {
 
       {/* List */}
       <div className="bg-white border border-surface-border rounded-lg overflow-hidden">
-        {isLoading ? (
-          <div className="p-4 space-y-3">
-            {Array.from({ length: 6 }).map((_, i) => (
-              <div key={i} className="flex items-center gap-3">
-                <Skeleton className="w-9 h-9 rounded-full" />
-                <div className="flex-1 space-y-1.5">
-                  <Skeleton className="h-4 w-40" />
-                  <Skeleton className="h-3 w-24" />
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : allProspects.length === 0 ? (
-          <EmptyState
-            icon={<Users size={28} />}
-            headline="No prospects yet"
-            subline="Add your first prospect to start tracking relationships."
-            action={{ label: 'Add prospect', onClick: () => setAddOpen(true) }}
-          />
-        ) : (
-          <>
-            {allProspects.map((p) => <ProspectRow key={p.id} prospect={p} />)}
-            <div ref={loaderRef} className="h-4 flex items-center justify-center">
-              {isFetchingNextPage && <Spinner size="sm" />}
+        {filteredProspects.length === 0 ? (
+          <div className="flex flex-col items-center justify-center gap-3 py-14 px-6 text-center">
+            <div className="w-12 h-12 rounded-full bg-surface-hover flex items-center justify-center text-text-muted">
+              <Users size={22} />
             </div>
-          </>
+            <div>
+              <p className="text-sm font-semibold text-text-primary">No matching prospects</p>
+              <p className="text-xs text-text-muted mt-1">Try a different search term or status filter.</p>
+            </div>
+          </div>
+        ) : (
+          filteredProspects.map((p) => <ProspectRow key={p.id} prospect={p} />)
         )}
       </div>
 

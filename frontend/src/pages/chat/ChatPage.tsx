@@ -25,24 +25,21 @@
 // — is unchanged.)
 // ============================================================
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
-import { useInfiniteQuery, useQuery, useMutation } from '@tanstack/react-query';
+import { useNavigate } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { chatApi, type ChatMessagesResponse }     from '@/api/chat';
-import { uploadApi }   from '@/api/misc';
-import { queryClient } from '@/lib/queryClient';
-import { queryKeys }   from '@/lib/queryKeys';
-import { useSSE }      from '@/hooks/useSSE';
-import { useSmoothStream } from '@/hooks/useSmoothStream';
-import { useToast }    from '@/hooks/useToast';
-import { suggestionsApi } from '@/api/misc';
 import { Button }      from '@/components/ui/Button';
-import { Skeleton }    from '@/components/ui/Skeleton';
-import { CopyButton, InlineAlert, Spinner } from '@/components/common/index';
-import { AppError, type ChatMessage, type Chat } from '@/api/types';
+import { CopyButton }  from '@/components/common/index';
+import type { ChatMessage, Chat } from '@/api/types';
 import { CHAT_MESSAGE_MAX_LENGTH, ALLOWED_FILE_TYPES, MAX_FILE_SIZE_BYTES } from '@/lib/constants';
 import { formatRelativeDate, cn, generateId } from '@/lib/utils';
+
+// ============================================================
+// DEMO MODE: this page is wired to static, hardcoded data only.
+// No network requests, no react-query, no SSE streaming, no
+// loading states. All interactions mutate local component state
+// so the UI stays fully interactive for a demo/screenshot.
+// ============================================================
 import {
   Send, Globe, Paperclip, ArrowLeft,
   Calendar, MessageCircle, X, FileText, ChevronDown, ChevronUp,
@@ -53,37 +50,116 @@ import {
 // ── Attachments ─────────────────────────────────────────────
 type MessageAttachment = { name: string; type: string; url?: string };
 
-const SEND_RETRY_ATTEMPTS = 2;
-const SEND_RETRY_BASE_DELAY_MS = 600;
+// ── Hardcoded demo data ──────────────────────────────────────
+const DEMO_CHAT: Chat = {
+  id: 'chat-8841',
+  title: 'Q3 pipeline review — Acme & Nimbus',
+  chat_mode: 'general',
+} as Chat;
 
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+const now = Date.now();
+const minsAgo = (m: number) => new Date(now - m * 60_000).toISOString();
 
-function isLikelyNetworkFailure(err: unknown) {
-  if (!err) return false;
-  if (err instanceof TypeError) return true;
-  const message = (err as Error)?.message?.toLowerCase?.() ?? '';
-  return message.includes('network') || message.includes('failed to fetch') || message.includes('offline');
-}
+const DEMO_MESSAGES: ChatMessage[] = [
+  {
+    id: 'm-1',
+    chat_id: DEMO_CHAT.id,
+    role: 'user',
+    content: 'Can you summarize where the Acme Corp and Nimbus Retail deals stand, and flag anything at risk this quarter?',
+    delivery_status: 'delivered',
+    created_at: minsAgo(46),
+  } as ChatMessage,
+  {
+    id: 'm-2',
+    chat_id: DEMO_CHAT.id,
+    role: 'assistant',
+    content:
+      "Here's where both deals stand:\n\n" +
+      '| Deal | Stage | Value | Close date | Risk |\n' +
+      '|---|---|---|---|---|\n' +
+      '| Acme Corp | Negotiation | $84,000 | Sep 26 | Low |\n' +
+      '| Nimbus Retail | Legal review | $52,500 | Oct 3 | Medium |\n\n' +
+      '**Acme Corp** — pricing is agreed and procurement signed off yesterday. The main open item is a redline on the data-retention clause, which legal expects to close by Friday.\n\n' +
+      "**Nimbus Retail** — the champion (Priya Shah) is supportive, but the deal has been sitting in legal review for 9 days with no response. I'd recommend a check-in call this week to keep momentum before quarter close.",
+    delivery_status: 'delivered',
+    created_at: minsAgo(45),
+    citations: ['https://www.acmecorp.com/newsroom/q3-partnership', 'https://nimbusretail.com/press/expansion-2026'],
+  } as ChatMessage,
+  {
+    id: 'm-3',
+    chat_id: DEMO_CHAT.id,
+    role: 'user',
+    content: "Good catch on Nimbus. Draft a short follow-up email to Priya to get the legal review moving.",
+    delivery_status: 'delivered',
+    created_at: minsAgo(41),
+    attachments: [{ name: 'nimbus-msa-redline-v3.pdf', type: 'application/pdf' }],
+  } as ChatMessage,
+  {
+    id: 'm-4',
+    chat_id: DEMO_CHAT.id,
+    role: 'assistant',
+    content:
+      "Here's a draft:\n\n" +
+      '_Subject: Quick check-in on the MSA review_\n\n' +
+      "Hi Priya,\n\nHope the rollout planning is going well on your end. I wanted to check in on the MSA — I know legal has a lot on their plate, but we'd love to keep things moving toward an early-October close if that still works for your team.\n\n" +
+      'Happy to hop on a 15-minute call this week if it would help unblock anything on the redline. Let me know what works.\n\nBest,\nJordan',
+    delivery_status: 'delivered',
+    created_at: minsAgo(40),
+  } as ChatMessage,
+  {
+    id: 'm-5',
+    chat_id: DEMO_CHAT.id,
+    role: 'user',
+    content: 'Perfect, sending that now. One more thing — what were last quarter\u2019s win rates by segment?',
+    delivery_status: 'delivered',
+    created_at: minsAgo(12),
+  } as ChatMessage,
+  {
+    id: 'm-6',
+    chat_id: DEMO_CHAT.id,
+    role: 'assistant',
+    content:
+      'Q2 win rates by segment:\n\n' +
+      '- **Enterprise** — 38% (up from 31% in Q1)\n' +
+      '- **Mid-market** — 44%\n' +
+      '- **SMB** — 52%\n\n' +
+      'Enterprise is trending up mainly on faster security-review turnaround. Mid-market is flat quarter over quarter — worth digging into if you want a deeper breakdown.',
+    delivery_status: 'delivered',
+    created_at: minsAgo(11),
+  } as ChatMessage,
+];
 
-async function withSendRetry(attempt: () => Promise<void>, onRetry?: (attemptNumber: number) => void) {
-  let lastError: unknown;
-  for (let i = 0; i <= SEND_RETRY_ATTEMPTS; i++) {
-    try {
-      await attempt();
-      return;
-    } catch (err) {
-      lastError = err;
-      const isLastAttempt = i === SEND_RETRY_ATTEMPTS;
-      if (isLastAttempt || !isLikelyNetworkFailure(err)) throw err;
-      onRetry?.(i + 1);
-      const delay = SEND_RETRY_BASE_DELAY_MS * 2 ** i;
-      await sleep(delay + delay * 0.3 * Math.random());
-    }
-  }
-  throw lastError;
-}
+const EARLIER_DEMO_MESSAGES: ChatMessage[] = [
+  {
+    id: 'm-0a',
+    chat_id: DEMO_CHAT.id,
+    role: 'user',
+    content: 'Kick us off — any new leads from the webinar yesterday?',
+    delivery_status: 'delivered',
+    created_at: minsAgo(95),
+  } as ChatMessage,
+  {
+    id: 'm-0b',
+    chat_id: DEMO_CHAT.id,
+    role: 'assistant',
+    content: 'Yes — 14 new leads came in, 3 already marked sales-qualified: Northwind Logistics, Fenwick & Cole, and Tandem Health. Want me to draft outreach for those three?',
+    delivery_status: 'delivered',
+    created_at: minsAgo(94),
+  } as ChatMessage,
+];
+
+const DEMO_SUGGESTIONS = [
+  'What deals are closing this week?',
+  'Draft a renewal email for our top account',
+  'Summarize my calls from yesterday',
+  'Which leads need follow-up today?',
+];
+
+const CANNED_REPLIES = [
+  "Got it — I've noted that down. Based on the current pipeline, this looks consistent with what we discussed earlier in the thread.",
+  "Here's a quick take: momentum looks solid overall, though it's worth keeping an eye on response times from legal this week.",
+  'I can help with that. Want me to turn this into a follow-up task, or would you rather I draft an email now?',
+];
 
 function normalizeMarkdown(content: string): string {
   return content.replace(/<br\s*\/?>/gi, '\n');
@@ -482,11 +558,15 @@ function ChatBubble({
   );
 }
 
+function showToast(msg: string, _variant?: string) {
+  // Demo mode: no toast host wired up; no-op so interactions don't throw.
+  // eslint-disable-next-line no-console
+  console.log('[toast]', msg);
+}
+
 export default function ChatPage() {
-  const { chatId }     = useParams<{ chatId: string }>();
-  const navigate       = useNavigate();
-  const { showToast }  = useToast();
-  const { stream, abort } = useSSE();
+  const chatId          = DEMO_CHAT.id;
+  const navigate        = useNavigate();
   const messagesEndRef    = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const inputRef       = useRef<HTMLTextAreaElement>(null);
@@ -500,9 +580,10 @@ export default function ChatPage() {
   // the model has started streaming a single token — lets the loading
   // state say "Searching the web…" instead of the generic thinking dots.
   const [awaitingWebSearch, setAwaitingWebSearch] = useState(false);
+  const [dbMessages, setDbMessages] = useState<ChatMessage[]>(DEMO_MESSAGES);
+  const [hasEarlier, setHasEarlier] = useState(true);
   const [localMessages, setLocalMessages] = useState<ChatMessage[]>([]);
   const [attachments,   setAttachments]   = useState<Array<{ name: string; type: string; url: string }>>([]);
-  const [uploadingFile, setUploadingFile] = useState(false);
 
   // NEW: conversation export (Markdown / print-to-PDF)
   const [showExportMenu, setShowExportMenu] = useState(false);
@@ -537,50 +618,19 @@ export default function ChatPage() {
     setRegeneratingMessageId(null);
     setAwaitingFirstToken(false);
     setAwaitingWebSearch(false);
-    queryClient.invalidateQueries({ queryKey: queryKeys.chat(chatId!) });
-    setLocalMessages([]);
-  }, [chatId]);
+  }, []);
 
-  const smooth = useSmoothStream(handleStreamRevealComplete);
-
-  // ── FIX §4.1: infinite-scroll message pagination ────────────
-  // Initial page has no `before_seq` → backend returns the LATEST
-  // messages. `getNextPageParam` reads `oldest_seq` off the last-fetched
-  // page so "load earlier" pages backward in time via a stable keyset
-  // cursor instead of the old (broken) oldest-50-with-no-way-forward
-  // behavior.
-  const {
-    data: messagesData,
-    isLoading,
-    fetchNextPage,
-    hasNextPage,
-    isFetchingNextPage,
-  } = useInfiniteQuery({
-    queryKey: queryKeys.chat(chatId!),
-    queryFn: ({ pageParam }: { pageParam?: number }) =>
-      chatApi.getById(chatId!, pageParam ? { before_seq: pageParam } : undefined).then((r) => r.data),
-    enabled: !!chatId,
-    staleTime: 30_000,
-    initialPageParam: undefined as number | undefined,
-    getNextPageParam: (lastPage: ChatMessagesResponse) =>
-      lastPage.has_more ? lastPage.oldest_seq ?? undefined : undefined,
-  });
-
-  const { data: suggestions } = useQuery({
-    queryKey: queryKeys.suggestions,
-    queryFn:  () => suggestionsApi.get().then((r) => r.data.suggestions),
-    staleTime: 5 * 60_000,
-  });
-
-  // Newest page is fetched first (data.pages[0]); older pages get
-  // appended after via fetchNextPage. Reverse before flattening so the
-  // final array is in chronological (oldest-first) order for display.
-  const chat        = messagesData?.pages[0]?.chat;
-  const linkedEvent = messagesData?.pages[0]?.linked_event ?? null;
-  const dbMessages  = useMemo(
-    () => [...(messagesData?.pages ?? [])].reverse().flatMap((p) => p.messages),
-    [messagesData],
-  );
+  // Demo mode: fixed, hardcoded chat + message list, no network fetch.
+  const isLoading   = false;
+  const chat        = DEMO_CHAT;
+  const linkedEvent = null as null | { id: string };
+  const suggestions = DEMO_SUGGESTIONS;
+  const hasNextPage = hasEarlier;
+  const isFetchingNextPage = false;
+  const fetchNextPage = useCallback(() => {
+    setDbMessages((prev) => [...EARLIER_DEMO_MESSAGES, ...prev]);
+    setHasEarlier(false);
+  }, []);
 
   const visibleMessages = useMemo(() => {
     return [...dbMessages, ...localMessages]
@@ -610,7 +660,7 @@ export default function ChatPage() {
     const delta = el.scrollHeight - height;
     el.scrollTop = top + delta;
     preservedScrollRef.current = null;
-  }, [messagesData]);
+  }, [dbMessages]);
 
   const handleScroll = useCallback(() => {
     const el = scrollContainerRef.current;
@@ -654,86 +704,48 @@ useEffect(() => {
     scrollToBottom();
   }
 }, [visibleMessages, isNearBottom, scrollToBottom, isStreaming]);
-  useEffect(() => () => abort(), [abort]);
-
-  const handleSend = async () => {
+  // Demo mode: "sending" a message appends it locally and appends a
+  // canned assistant reply immediately after — no network, no streaming.
+  const replyIndexRef = useRef(0);
+  const handleSend = () => {
     const text = message.trim();
     if ((!text && attachments.length === 0) || isStreaming || isRegenerating) return;
 
-    const tempId = `temp-${generateId()}`;
-    const tempMsg: ChatMessage = {
-      id:              tempId,
-      chat_id:         chatId!,
+    const userMsg: ChatMessage = {
+      id:              `local-${generateId()}`,
+      chat_id:         chatId,
       role:            'user',
       content:         text,
       delivery_status: 'delivered',
       created_at:      new Date().toISOString(),
       attachments:     attachments.length > 0 ? attachments : undefined,
     } as ChatMessage;
-    const searchRequested = forceSearch;
-    setLocalMessages((prev) => [...prev, tempMsg]);
+
+    const reply = CANNED_REPLIES[replyIndexRef.current % CANNED_REPLIES.length];
+    replyIndexRef.current += 1;
+    const assistantMsg: ChatMessage = {
+      id:              `local-${generateId()}`,
+      chat_id:         chatId,
+      role:            'assistant',
+      content:         reply,
+      delivery_status: 'delivered',
+      created_at:      new Date().toISOString(),
+    } as ChatMessage;
+
+    setLocalMessages((prev) => [...prev, userMsg, assistantMsg]);
     setMessage('');
     setForceSearch(false);
     setAttachments([]);
-    setIsStreaming(true);
-    setAwaitingFirstToken(true);
-    setAwaitingWebSearch(searchRequested);
-    stopRequestedRef.current = false;
-    smooth.reset();
-
-    try {
-      await withSendRetry(
-        () =>
-          stream(
-            `/api/chat/${chatId}/message`,
-            {
-              message:      text || '[attachment]',
-              stream:       true,
-              force_search: searchRequested,
-              attachments:  attachments.length > 0 ? attachments : undefined,
-            },
-            {
-              onChunk: (chunk) => {
-                if (stopRequestedRef.current) return;
-                setAwaitingFirstToken(false);
-                setAwaitingWebSearch(false);
-                smooth.push(chunk);
-              },
-              onDone:  (_messageId: string, _citations?: string[]) => { if (!stopRequestedRef.current) smooth.finish(); },
-              onError: (errMsg) => {
-                if (stopRequestedRef.current) return;
-                smooth.reset();
-                setIsStreaming(false);
-                setAwaitingFirstToken(false);
-                setAwaitingWebSearch(false);
-                showToast(errMsg || 'Message failed.', 'error');
-              },
-            },
-          ),
-        (attemptNumber) => showToast(`Connection dropped, retrying (${attemptNumber}/${SEND_RETRY_ATTEMPTS})…`, 'warning'),
-      );
-    } catch {
-      if (stopRequestedRef.current) return;
-      smooth.reset();
-      setIsStreaming(false);
-      setAwaitingFirstToken(false);
-      setAwaitingWebSearch(false);
-      showToast('Could not reach the server. Check your connection and try again.', 'error');
-    }
   };
 
   const handleStop = useCallback(() => {
     stopRequestedRef.current = true;
-    abort();
-    smooth.finish();
     setIsStreaming(false);
     setIsRegenerating(false);
     setRegeneratingMessageId(null);
     setAwaitingFirstToken(false);
     setAwaitingWebSearch(false);
-    if (chatId) queryClient.invalidateQueries({ queryKey: queryKeys.chat(chatId) });
-    setLocalMessages([]);
-  }, [abort, smooth, chatId]);
+  }, []);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -743,16 +755,15 @@ useEffect(() => {
   };
 
   const runSearch = useCallback((query: string) => {
-    if (!chatId || !query.trim()) {
+    const q = query.trim().toLowerCase();
+    if (!q) {
       setSearchResults(null);
       return;
     }
-    setIsSearching(true);
-    chatApi.searchMessages(chatId, query.trim())
-      .then((r) => setSearchResults(r.data.messages))
-      .catch(() => showToast('Search failed. Try again.', 'error'))
-      .finally(() => setIsSearching(false));
-  }, [chatId, showToast]);
+    setSearchResults(
+      visibleMessages.filter((m) => m.content?.toLowerCase().includes(q)),
+    );
+  }, [visibleMessages]);
 
   const handleSearchInputChange = (value: string) => {
     setSearchQuery(value);
@@ -783,36 +794,24 @@ useEffect(() => {
     closeSearch();
   };
 
-  const handleDeleteChat = async () => {
-    if (!chatId) return;
+  const handleDeleteChat = () => {
     const confirmed = window.confirm('Delete this chat? This can\u2019t be undone from here.');
     if (!confirmed) return;
     setIsDeleting(true);
-    try {
-      await chatApi.delete(chatId);
-      // Invalidate the chats list (not the deleted chat's own key) so the
-      // sidebar / list page reflects the removal immediately.
-      queryClient.invalidateQueries({ queryKey: queryKeys.chats() });
+    setTimeout(() => {
+      setIsDeleting(false);
       showToast('Chat deleted.', 'success');
       navigate('/chat');
-    } catch {
-      showToast('Could not delete chat. Please try again.', 'error');
-    } finally {
-      setIsDeleting(false);
-    }
+    }, 300);
   };
 
-  const handleNewChat = async () => {
+  const handleNewChat = () => {
     if (isCreatingChat) return;
     setIsCreatingChat(true);
-    try {
-      const { data } = await chatApi.create({ chat_type: 'general', chat_mode: 'general' });
-      navigate(`/chat/${data.chat.id}`);
-    } catch {
-      showToast('Could not start a new chat. Please try again.', 'error');
-    } finally {
+    setTimeout(() => {
       setIsCreatingChat(false);
-    }
+      navigate(`/chat/${DEMO_CHAT.id}`);
+    }, 300);
   };
 
   // FIX: regenerate now accepts an optional force_search override so a
@@ -820,63 +819,32 @@ useEffect(() => {
   // Reuses the composer's existing `forceSearch` toggle by default (if the
   // person left "Search" on before clicking Regenerate, the regenerated
   // reply searches too) — callers can also pass an explicit value.
-  const handleRegenerate = async (forceSearchOverride?: boolean) => {
-    if (!chatId || isStreaming || isRegenerating) return;
+  const handleRegenerate = (_forceSearchOverride?: boolean) => {
+    if (isStreaming || isRegenerating) return;
     const lastAssistant = [...visibleMessages].reverse().find((m) => m.role === 'assistant');
     if (!lastAssistant) return;
 
-    const searchRequested = forceSearchOverride ?? forceSearch;
+    const reply = CANNED_REPLIES[replyIndexRef.current % CANNED_REPLIES.length];
+    replyIndexRef.current += 1;
+    const newMsg: ChatMessage = {
+      ...lastAssistant,
+      id: `local-${generateId()}`,
+      content: reply,
+      created_at: new Date().toISOString(),
+      citations: undefined,
+    } as ChatMessage;
 
-    setIsRegenerating(true);
-    setRegeneratingMessageId(lastAssistant.id);
-    setAwaitingFirstToken(true);
-    setAwaitingWebSearch(searchRequested);
-    stopRequestedRef.current = false;
-    smooth.reset();
-
-    try {
-      await withSendRetry(
-        () =>
-          stream(
-            `/api/chat/${chatId}/regenerate`,
-            { stream: true, force_search: searchRequested },
-            {
-              onChunk: (chunk) => {
-                if (stopRequestedRef.current) return;
-                setAwaitingFirstToken(false);
-                setAwaitingWebSearch(false);
-                smooth.push(chunk);
-              },
-              onDone:  (_messageId: string, _citations?: string[]) => { if (!stopRequestedRef.current) smooth.finish(); },
-              onError: (errMsg) => {
-                if (stopRequestedRef.current) return;
-                smooth.reset();
-                setIsRegenerating(false);
-                setRegeneratingMessageId(null);
-                setAwaitingFirstToken(false);
-                setAwaitingWebSearch(false);
-                showToast(errMsg || 'Could not regenerate that response.', 'error');
-              },
-            },
-          ),
-        (attemptNumber) => showToast(`Connection dropped, retrying (${attemptNumber}/${SEND_RETRY_ATTEMPTS})…`, 'warning'),
-      );
-    } catch {
-      if (stopRequestedRef.current) return;
-      smooth.reset();
-      setIsRegenerating(false);
-      setRegeneratingMessageId(null);
-      setAwaitingFirstToken(false);
-      setAwaitingWebSearch(false);
-      showToast('Could not reach the server. Check your connection and try again.', 'error');
+    setLocalMessages((prev) => [...prev.filter((m) => m.id !== lastAssistant.id), newMsg]);
+    if (dbMessages.some((m) => m.id === lastAssistant.id)) {
+      setDbMessages((prev) => prev.filter((m) => m.id !== lastAssistant.id));
     }
   };
 
   const handleStartEdit = (msg: ChatMessage) => setEditingMessageId(msg.id);
   const handleCancelEdit = () => setEditingMessageId(null);
 
-  const handleSaveEdit = async (msg: ChatMessage, newText: string) => {
-    if (!chatId || isStreaming || isRegenerating || isSavingEdit) return;
+  const handleSaveEdit = (msg: ChatMessage, newText: string) => {
+    if (isStreaming || isRegenerating || isSavingEdit) return;
     const trimmed = newText.trim();
     if (!trimmed) return;
 
@@ -884,64 +852,28 @@ useEffect(() => {
       .reverse()
       .find((m) => m.role === 'assistant' && new Date(m.created_at) > new Date(msg.created_at));
 
-    queryClient.setQueryData(queryKeys.chat(chatId), (old: any) => {
-      if (!old?.pages) return old;
-      return {
-        ...old,
-        pages: old.pages.map((page: ChatMessagesResponse) => ({
-          ...page,
-          messages: page.messages.map((m: ChatMessage) => (m.id === msg.id ? { ...m, content: trimmed } : m)),
-        })),
-      };
-    });
+    const updateContent = (m: ChatMessage) => (m.id === msg.id ? { ...m, content: trimmed } : m);
+    setDbMessages((prev) => prev.map(updateContent));
+    setLocalMessages((prev) => prev.map(updateContent));
 
     setEditingMessageId(null);
-    setIsSavingEdit(true);
-    setIsRegenerating(true);
-    setRegeneratingMessageId(staleReply?.id ?? null);
-    setAwaitingFirstToken(true);
-    stopRequestedRef.current = false;
-    smooth.reset();
 
-    try {
-      await withSendRetry(
-        () =>
-          stream(
-            `/api/chat/${chatId}/message/${msg.id}`,
-            { message: trimmed, stream: true },
-            {
-              onChunk: (chunk) => {
-                if (stopRequestedRef.current) return;
-                setAwaitingFirstToken(false);
-                smooth.push(chunk);
-              },
-              onDone:  (_messageId: string, _citations?: string[]) => { if (!stopRequestedRef.current) smooth.finish(); },
-              onError: (errMsg) => {
-                if (stopRequestedRef.current) return;
-                smooth.reset();
-                setIsRegenerating(false);
-                setRegeneratingMessageId(null);
-                setAwaitingFirstToken(false);
-                setIsSavingEdit(false);
-                showToast(errMsg || 'Could not save your edit. Please try again.', 'error');
-              },
-            },
-          ),
-        (attemptNumber) => showToast(`Connection dropped, retrying (${attemptNumber}/${SEND_RETRY_ATTEMPTS})…`, 'warning'),
-      );
-    } catch {
-      if (stopRequestedRef.current) return;
-      smooth.reset();
-      setIsRegenerating(false);
-      setRegeneratingMessageId(null);
-      setAwaitingFirstToken(false);
-      showToast('Could not reach the server. Check your connection and try again.', 'error');
-    } finally {
-      setIsSavingEdit(false);
+    if (staleReply) {
+      const reply = CANNED_REPLIES[replyIndexRef.current % CANNED_REPLIES.length];
+      replyIndexRef.current += 1;
+      const newMsg: ChatMessage = {
+        ...staleReply,
+        id: `local-${generateId()}`,
+        content: reply,
+        created_at: new Date().toISOString(),
+        citations: undefined,
+      } as ChatMessage;
+      setLocalMessages((prev) => [...prev.filter((m) => m.id !== staleReply.id), newMsg]);
+      setDbMessages((prev) => prev.filter((m) => m.id !== staleReply.id));
     }
   };
 
-  const handleFileSelect = async (files: FileList | null) => {
+  const handleFileSelect = (files: FileList | null) => {
     if (!files) return;
     const fileList = Array.from(files);
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -958,40 +890,44 @@ useEffect(() => {
         showToast('Maximum 10 attachments per message.', 'warning');
         break;
       }
-      setUploadingFile(true);
-      try {
-        const { data: res } = await uploadApi.upload(file, chatId);
-        setAttachments((prev) => [...prev, {
-          name: res.file.filename,
-          type: res.file.type,
-          url:  res.file.url,
-        }]);
-      } catch {
-        showToast(`Could not upload ${file.name}.`, 'error');
-      } finally {
-        setUploadingFile(false);
-      }
+      // Demo mode: attach immediately using a local object URL, no upload.
+      setAttachments((prev) => [...prev, {
+        name: file.name,
+        type: file.type,
+        url:  URL.createObjectURL(file),
+      }]);
     }
   };
 
-  // ── NEW: conversation export (Markdown / print-to-PDF) ───────
-  const handleExport = async (format: 'markdown' | 'pdf') => {
-    if (!chatId || isExporting) return;
+  // Builds the same markdown shape the backend would have produced,
+  // straight from the local message list — no network round trip.
+  const buildExportMarkdown = () => {
+    const lines: string[] = [`# ${chat?.title ?? 'Chat'}`, ''];
+    for (const m of visibleMessages) {
+      lines.push(`### ${m.role === 'user' ? 'You' : 'Clutch AI'}`);
+      lines.push(m.content ?? '');
+      if (m.citations?.length) {
+        lines.push('**Sources:**');
+        for (const c of m.citations) lines.push(`- ${c}`);
+      }
+      lines.push('---');
+    }
+    return lines.join('\n');
+  };
+
+  // ── conversation export (Markdown / print-to-PDF), fully local ──
+  const handleExport = (format: 'markdown' | 'pdf') => {
     setShowExportMenu(false);
     setIsExporting(format);
-    try {
-      const { data } = await chatApi.export(chatId);
-      if (format === 'markdown') {
-        downloadTextFile(data.filename, data.content, 'text/markdown;charset=utf-8');
-      } else {
-        const opened = openPrintableExport(chat?.title || data.filename, data.content);
-        if (!opened) showToast('Could not open the print window. Check your pop-up blocker.', 'error');
-      }
-    } catch {
-      showToast('Could not export this chat. Please try again.', 'error');
-    } finally {
-      setIsExporting(null);
+    const markdown = buildExportMarkdown();
+    const filename = `${(chat?.title ?? 'chat').toLowerCase().replace(/[^a-z0-9]+/g, '-')}.md`;
+    if (format === 'markdown') {
+      downloadTextFile(filename, markdown, 'text/markdown;charset=utf-8');
+    } else {
+      const opened = openPrintableExport(chat?.title || filename, markdown);
+      if (!opened) showToast('Could not open the print window. Check your pop-up blocker.', 'error');
     }
+    setIsExporting(null);
   };
 
   useEffect(() => {
@@ -1177,13 +1113,7 @@ useEffect(() => {
       <div className="relative flex-1 min-h-0">
         <div ref={scrollContainerRef} className="h-full overflow-y-auto px-4 py-4">
           <div className="max-w-4xl ml-0 mr-auto w-full space-y-4">
-          {isLoading ? (
-            Array.from({ length: 4 }).map((_, i) => (
-              <div key={i} className={cn('flex', i % 2 === 0 ? 'justify-start' : 'justify-end')}>
-                <Skeleton className={cn('h-12', i % 2 === 0 ? 'w-64' : 'w-48')} rounded="lg" />
-              </div>
-            ))
-          ) : displayMessages.length === 0 ? (
+          {displayMessages.length === 0 ? (
             <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4 pb-8">
               <div className="w-10 h-10 rounded-md bg-brand-50 border border-surface-border flex items-center justify-center">
                 <MessageCircle size={18} className="text-brand" />
@@ -1245,9 +1175,7 @@ useEffect(() => {
                 });
               })()}
               {(isStreaming || isRegenerating) && (
-                awaitingFirstToken
-                  ? <ThinkingIndicator label={awaitingWebSearch ? 'Searching the web…' : undefined} />
-                  : <ChatBubble streamContent={smooth.displayed} isStreaming />
+                <ThinkingIndicator label={awaitingWebSearch ? 'Searching the web…' : undefined} />
               )}
             </>
           )}
@@ -1314,7 +1242,7 @@ useEffect(() => {
                   title="Attach file"
                   className="p-1.5 rounded-full text-text-muted hover:text-brand hover:bg-brand-50 transition-colors"
                 >
-                  {uploadingFile ? <Spinner size="sm" /> : <Paperclip size={15} />}
+                  <Paperclip size={15} />
                 </button>
                 <input
                   ref={fileInputRef}

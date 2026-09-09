@@ -1,78 +1,63 @@
 // FILE: src/pages/settings/SettingsPage.tsx
-// Profile update + account danger zone
-// PUT /api/auth/me, DELETE /api/auth/account
+// Demo build — static local data, no API calls
 import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { useMutation } from '@tanstack/react-query';
-import { authApi }     from '@/api/auth';
-import { queryClient } from '@/lib/queryClient';
-import { queryKeys }   from '@/lib/queryKeys';
-import { useAuth }     from '@/hooks/useAuth';
-import { useToast }    from '@/hooks/useToast';
 import { updateProfileSchema, type UpdateProfileSchema } from '@/lib/schemas';
 import { Button }      from '@/components/ui/Button';
 import { Input, Select, Textarea } from '@/components/ui/Input';
 import { Modal }       from '@/components/ui/Modal';
-import { Badge }       from '@/components/ui/Badge';
-import { PLATFORM_LABELS } from '@/lib/constants';
-import { ChevronRight, Shield, Bell, Mic2, Brain, Users, Trash2 } from 'lucide-react';
+import { ChevronRight, Bell, Mic2, Brain, Users, Trash2 } from 'lucide-react';
 
 const SETTINGS_NAV = [
   { path: '/settings/voice',         label: 'Voice profile',     icon: <Mic2  size={16} />, desc: 'Customize your AI outreach style'  },
   { path: '/settings/memory',        label: 'AI Memory',         icon: <Brain size={16} />, desc: 'Facts Clutch remembers about you'   },
   { path: '/settings/notifications', label: 'Notifications',     icon: <Bell  size={16} />, desc: 'Push & email preferences'           },
-  { path: '/settings/members',       label: 'Team members',      icon: <Users size={16} />, desc: 'Invite & manage workspace members', adminOnly: true },
+  { path: '/settings/members',       label: 'Team members',      icon: <Users size={16} />, desc: 'Invite & manage workspace members'  },
 ];
 
+const DEMO_PROFILE: UpdateProfileSchema = {
+  name:                'Priya Anand',
+  business_name:       'Northwind Analytics',
+  product_description:
+    'Northwind Analytics is a marketing attribution platform for B2B SaaS companies. We connect ad spend, CRM, and product usage data into a single pipeline so revenue teams can see which channels actually drive pipeline and close-won deals — not just clicks.',
+  target_audience:
+    'Series A–B B2B SaaS companies with 20–200 employees and an existing paid acquisition motion. Primary buyers are VP Marketing and RevOps leads.',
+  website:             'https://northwindanalytics.io',
+  role:                'founder',
+  industry:            'saas',
+  experience_level:    'intermediate',
+  bio:
+    'Second-time founder. Previously led growth at a Series C fintech startup. Based in Austin, TX. Focused on building Northwind into the default attribution layer for mid-market SaaS.',
+};
+
 export default function SettingsPage() {
-  const navigate       = useNavigate();
-  const { user, logout } = useAuth();
-  const { showToast }  = useToast();
-  const [deleteOpen,   setDeleteOpen]  = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState('');
+  const [savedJustNow, setSavedJustNow] = useState(false);
 
   const { register, handleSubmit, formState: { errors, isDirty, isSubmitting } } =
     useForm<UpdateProfileSchema>({
       resolver:      zodResolver(updateProfileSchema),
-      defaultValues: {
-        name:               user?.name               ?? '',
-        business_name:      user?.business_name      ?? '',
-        product_description:user?.product_description?? '',
-        target_audience:    user?.target_audience    ?? '',
-        website:            user?.website            ?? '',
-        role:               user?.role               ?? '',
-        industry:           user?.industry           ?? '',
-        experience_level:   user?.experience_level   ?? '',
-        bio:                user?.bio                ?? '',
-      },
+      defaultValues: DEMO_PROFILE,
     });
 
-  const updateMutation = useMutation({
-    mutationFn: (d: UpdateProfileSchema) => authApi.updateMe(d),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.me });
-      showToast('Profile saved.', 'success');
-    },
-    onError: () => showToast('Could not save profile.', 'error'),
-  });
-
-  const deleteMutation = useMutation({
-    mutationFn: () => authApi.deleteAccount(),
-    onSuccess: async () => {
-      await logout();
-      navigate('/login');
-    },
-    onError: () => showToast('Could not delete account.', 'error'),
-  });
+  const onSubmit = (_d: UpdateProfileSchema) => {
+    setSavedJustNow(true);
+    setTimeout(() => setSavedJustNow(false), 2000);
+  };
 
   return (
     <div className="page-container max-w-2xl space-y-6">
-      <h1 className="text-xl font-bold text-text-primary">Settings</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-xl font-bold text-text-primary">Settings</h1>
+        {savedJustNow && (
+          <span className="text-xs text-success font-medium">✓ Profile saved</span>
+        )}
+      </div>
 
       {/* Profile form */}
-      <form onSubmit={handleSubmit((d) => updateMutation.mutate(d))} className="space-y-4">
+      <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
         <div className="bg-white border border-surface-border rounded-lg p-5 space-y-4">
           <p className="text-sm font-semibold text-text-primary">Profile</p>
           <Input label="Name" {...register('name')} error={errors.name?.message} />
@@ -137,7 +122,7 @@ export default function SettingsPage() {
               size="sm"
               type="submit"
               disabled={!isDirty}
-              isLoading={updateMutation.isPending || isSubmitting}
+              isLoading={isSubmitting}
             >
               Save changes
             </Button>
@@ -150,7 +135,7 @@ export default function SettingsPage() {
         {SETTINGS_NAV.map((item) => (
           <button
             key={item.path}
-            onClick={() => navigate(item.path)}
+            type="button"
             className="w-full flex items-center gap-3 px-4 py-3 hover:bg-surface-hover border-b border-surface-border last:border-0 transition-colors text-left"
           >
             <span className="text-text-muted">{item.icon}</span>
@@ -198,8 +183,7 @@ export default function SettingsPage() {
               variant="danger"
               size="sm"
               disabled={deleteConfirm !== 'DELETE'}
-              isLoading={deleteMutation.isPending}
-              onClick={() => deleteMutation.mutate()}
+              onClick={() => { setDeleteOpen(false); setDeleteConfirm(''); }}
             >
               Delete permanently
             </Button>

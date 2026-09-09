@@ -1,22 +1,15 @@
 // FILE: src/pages/settings/NotificationsSettingsPage.tsx
-// Debounced save of PUT /api/user/notification-preferences
-import React, { useState, useEffect } from 'react';
-import { useMutation } from '@tanstack/react-query';
-import { userApi }  from '@/api/user';
-import { useAuth }  from '@/hooks/useAuth';
-import { useToast } from '@/hooks/useToast';
-import { useDebounce } from '@/hooks/useDebounce';
-import { Toggle }   from '@/components/ui/Input';
-import { Spinner }  from '@/components/common/index';
-import type { NotificationPreferences } from '@/api/types';
+// Demo build — static local state, no API calls
+import React, { useState } from 'react';
+import { Toggle } from '@/components/ui/Input';
 
 const PREF_GROUPS = [
   {
     title: 'Outreach',
     prefs: [
-      { key: 'new_opportunities',  label: 'New opportunities discovered'  },
-      { key: 'feedback_reminders', label: 'Feedback reminders for sent deals'},
-      { key: 'follow_up_reminders',label: 'Follow-up reminders'            },
+      { key: 'new_opportunities',  label: 'New opportunities discovered'   },
+      { key: 'feedback_reminders', label: 'Feedback reminders for sent deals' },
+      { key: 'follow_up_reminders',label: 'Follow-up reminders'             },
     ],
   },
   {
@@ -44,35 +37,24 @@ const PREF_GROUPS = [
   },
 ] as const;
 
+const DEFAULT_PREFS: Record<string, boolean> = {
+  new_opportunities: true,
+  feedback_reminders: true,
+  follow_up_reminders: true,
+  practice_reminders: false,
+  skill_badge_earned: true,
+  meeting_prep_ready: true,
+  debrief_reminders: true,
+  commitment_due: true,
+  weekly_check_in: true,
+  growth_tips: false,
+  ai_insight: true,
+};
+
 export default function NotificationsSettingsPage() {
-  const { user, refreshUser } = useAuth();
-  const { showToast } = useToast();
-
-  const defaultPrefs = user?.notification_preferences ?? {};
-  const [localPrefs, setLocalPrefs] = useState<Partial<NotificationPreferences>>(defaultPrefs);
-  const [savedStatus, setSavedStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
-
-  const debouncedPrefs = useDebounce(localPrefs, 900);
-
-  const saveMutation = useMutation({
-    mutationFn: (prefs: Partial<NotificationPreferences>) =>
-      userApi.updatePreferences(prefs),
-    onSuccess: () => {
-      refreshUser();
-      setSavedStatus('saved');
-      setTimeout(() => setSavedStatus('idle'), 2000);
-    },
-    onError: () => showToast('Could not save preferences.', 'error'),
-  });
-
-  // Auto-save on debounced change (skip initial mount)
-  const isFirstRender = React.useRef(true);
-  useEffect(() => {
-    if (isFirstRender.current) { isFirstRender.current = false; return; }
-    setSavedStatus('saving');
-    saveMutation.mutate(debouncedPrefs);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [debouncedPrefs]);
+  const [emailDigestEnabled, setEmailDigestEnabled] = useState(true);
+  const [localPrefs, setLocalPrefs] = useState<Record<string, boolean>>(DEFAULT_PREFS);
+  const [savedStatus] = useState<'idle' | 'saving' | 'saved'>('saved');
 
   const toggle = (key: string, value: boolean) => {
     setLocalPrefs((prev) => ({ ...prev, [key]: value }));
@@ -83,8 +65,7 @@ export default function NotificationsSettingsPage() {
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold text-text-primary">Notifications</h1>
         <div className="flex items-center gap-1.5 text-xs text-text-muted">
-          {savedStatus === 'saving' && <><Spinner size="xs" /> Saving…</>}
-          {savedStatus === 'saved'  && <span className="text-success">✓ Saved</span>}
+          {savedStatus === 'saved' && <span className="text-success">✓ Saved</span>}
         </div>
       </div>
 
@@ -95,8 +76,8 @@ export default function NotificationsSettingsPage() {
           <p className="text-xs text-text-muted mt-0.5">Weekly summary of your activity and insights.</p>
         </div>
         <Toggle
-          checked={!!user?.email_digest_enabled}
-          onChange={(v) => toggle('email_digest_enabled', v)}
+          checked={emailDigestEnabled}
+          onChange={setEmailDigestEnabled}
         />
       </div>
 
@@ -110,7 +91,7 @@ export default function NotificationsSettingsPage() {
             <div key={p.key} className="flex items-center justify-between px-4 py-3 border-b border-surface-border last:border-0">
               <p className="text-sm text-text-primary">{p.label}</p>
               <Toggle
-                checked={!!(localPrefs as any)[p.key]}
+                checked={!!localPrefs[p.key]}
                 onChange={(v) => toggle(p.key, v)}
               />
             </div>

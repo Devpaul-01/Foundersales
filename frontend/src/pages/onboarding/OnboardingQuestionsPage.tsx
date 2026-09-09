@@ -1,66 +1,56 @@
-import React, { useState, useEffect } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
-import { useQuery, useMutation } from '@tanstack/react-query';
-import { onboardingApi } from '@/api/onboarding';
-import { useAuth } from '@/hooks/useAuth';
+import React, { useState } from 'react';
 import { Button } from '@/components/ui/Button';
 import { Textarea } from '@/components/ui/Input';
-import { Skeleton } from '@/components/ui/Skeleton';
 import { InlineAlert } from '@/components/common/index';
-import { AppError } from '@/api/types';
 import { motion } from 'framer-motion';
 import { SLIDE_UP } from '@/lib/animations';
 
+const BURST_NUM = 2;
+const TOTAL_BURSTS = 3;
+
+const DEMO_QUESTIONS = [
+  {
+    id: 'q1',
+    question: 'Walk us through how a typical customer discovers they have this problem.',
+    answer:
+      "Usually it's a Friday afternoon — a stakeholder asks for updated numbers 'by Monday morning' and whoever owns reporting realizes they're about to spend hours manually pulling data from four different tools instead of enjoying their weekend.",
+  },
+  {
+    id: 'q2',
+    question: "What's the moment a prospect goes from 'interested' to 'ready to buy'?",
+    answer:
+      'It usually clicks during the live dashboard audit — when they see their actual data populate a report in real time and realize they never have to build that deck by hand again.',
+  },
+  {
+    id: 'q3',
+    question: 'What do competitors get wrong that you get right?',
+    answer:
+      "Most BI tools assume clean data is already sitting in a warehouse. We built the messy first mile — pulling from scattered tools and cleaning it — which is the part that actually eats people's time.",
+  },
+];
+
 export default function OnboardingQuestionsPage() {
-  const { burst } = useParams<{ burst: string }>();
-  const burstNum = parseInt(burst ?? '1', 10);
-  const navigate = useNavigate();
-  const { refreshUser } = useAuth();
-  const [answers, setAnswers] = useState<Record<string, string>>({});
-  const [serverError, setServerError] = useState('');
+  const burstNum = BURST_NUM;
+  const [answers, setAnswers] = useState<Record<string, string>>(
+    Object.fromEntries(DEMO_QUESTIONS.map((q) => [q.id, q.answer])),
+  );
+  const [serverError] = useState('');
   const [showCelebration, setShowCelebration] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const { data, isLoading } = useQuery({
-    queryKey: ['onboarding', 'questions', burstNum],
-    queryFn: () => onboardingApi.getQuestions().then((r) => r.data),
-  });
-
-  useEffect(() => {
-    setAnswers({});
-  }, [burstNum]);
-
-  const submitMutation = useMutation({
-    mutationFn: () =>
-      onboardingApi.submitAnswers({ answers, burst: burstNum }).then((r) => r.data),
-
-    onSuccess: async (result) => {
-      if ('voice_profile' in result && result.voice_profile) {
-        // FINAL BURST COMPLETE
-        setShowCelebration(true);
-        
-        // Refresh user state BEFORE navigation
-        // This ensures the route guard sees onboarding_completed=true
-        await refreshUser();
-        
-        // Small delay for celebration animation, then navigate
-        setTimeout(() => {
-          navigate('/onboarding/preview', { replace: true });
-        }, 2000);
-        
-      } else if ('step' in result) {
-        // PARTIAL BURST COMPLETE
-        // Navigate to next burst (step is the completed one, so +1)
-        navigate(`/onboarding/q/${result.step + 1}`);
-      }
-    },
-
-    onError: (err) => {
-      setServerError(err instanceof AppError ? err.message : 'Submission failed.');
-    },
-  });
-
-  const questions = data?.questions ?? [];
+  const questions = DEMO_QUESTIONS;
   const allAnswered = questions.every((q) => (answers[q.id] ?? '').trim().length > 0);
+
+  const handleSubmit = () => {
+    setIsSubmitting(true);
+    setTimeout(() => {
+      setIsSubmitting(false);
+      if (burstNum === TOTAL_BURSTS) {
+        setShowCelebration(true);
+      }
+      // Static demo — no navigation/network side effects otherwise.
+    }, 600);
+  };
 
   // Celebration screen
   if (showCelebration) {
@@ -86,54 +76,47 @@ export default function OnboardingQuestionsPage() {
           Help us understand your approach
         </h1>
         <p className="text-sm text-text-muted mt-1">
-          Round {burstNum} of 3 — these answers shape your Clutch AI coaching.
+          Round {burstNum} of {TOTAL_BURSTS} — these answers shape your Clutch AI coaching.
         </p>
       </div>
 
       {serverError && (
-        <InlineAlert type="error" message={serverError} onDismiss={() => setServerError('')} />
+        <InlineAlert type="error" message={serverError} />
       )}
 
       <div className="space-y-4">
-        {isLoading
-          ? Array.from({ length: 3 }).map((_, i) => (
-              <div key={i} className="bg-white rounded-lg border border-surface-border p-5 space-y-3">
-                <Skeleton className="h-4 w-3/4" />
-                <Skeleton className="h-20 w-full" />
-              </div>
-            ))
-          : questions.map((q, i) => (
-              <motion.div
-                key={q.id}
-                custom={i}
-                variants={SLIDE_UP}
-                initial="initial"
-                animate="animate"
-                className="bg-white rounded-lg border border-surface-border p-5"
-              >
-                <label className="block text-sm font-medium text-text-primary mb-2">
-                  {i + 1}. {q.question}
-                </label>
-                <Textarea
-                  placeholder="Your answer…"
-                  rows={3}
-                  value={answers[q.id] ?? ''}
-                  onChange={(e) =>
-                    setAnswers((prev) => ({ ...prev, [q.id]: e.target.value }))
-                  }
-                />
-              </motion.div>
-            ))}
+        {questions.map((q, i) => (
+          <motion.div
+            key={q.id}
+            custom={i}
+            variants={SLIDE_UP}
+            initial="initial"
+            animate="animate"
+            className="bg-white rounded-lg border border-surface-border p-5"
+          >
+            <label className="block text-sm font-medium text-text-primary mb-2">
+              {i + 1}. {q.question}
+            </label>
+            <Textarea
+              placeholder="Your answer…"
+              rows={3}
+              value={answers[q.id] ?? ''}
+              onChange={(e) =>
+                setAnswers((prev) => ({ ...prev, [q.id]: e.target.value }))
+              }
+            />
+          </motion.div>
+        ))}
       </div>
 
       <Button
         fullWidth
         size="md"
-        disabled={!allAnswered || isLoading}
-        isLoading={submitMutation.isPending}
-        onClick={() => submitMutation.mutate()}
+        disabled={!allAnswered}
+        isLoading={isSubmitting}
+        onClick={handleSubmit}
       >
-        {burstNum === 3 ? 'Generate my sales profile →' : 'Continue →'}
+        {burstNum === TOTAL_BURSTS ? 'Generate my sales profile →' : 'Continue →'}
       </Button>
     </div>
   );

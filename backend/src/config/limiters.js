@@ -85,18 +85,35 @@ const hours   = (n) => n * 60 * 60 * 1000;
 const byUserOrIp = (req) => req.user?.id || req.ip;
 const byIp       = (req) => req.ip;
 
+// Test-env bypass — when true, every limiter built via buildLimiter()
+// becomes a full no-op (skip always returns true) regardless of any
+// per-limiter `skip` passed in. This exists so integration/e2e tests can
+// hammer endpoints without tripping real limits or needing a live Redis
+// store's counters reset between runs. Deliberately checked once at
+// module-eval time (not per-request) since NODE_ENV doesn't change at
+// runtime in practice, and it keeps every limiter's hot path identical
+// to production when NOT in test.
+const IS_TEST_ENV = process.env.NODE_ENV === 'test';
+
 /**
  * Builds a single rate limiter backed by its own namespaced Redis store.
  * `namespace` is REQUIRED and must be unique across the whole app — this
  * is what config/rateLimitStore.js uses to partition the Redis keyspace
  * (prefix: `ratelimit:<namespace>:`). There is no default; every call
  * site must think about and name its own namespace.
+ *
+ * In NODE_ENV=test, the limiter is still constructed (same store, same
+ * options) but its `skip` always returns true, so it never blocks or
+ * even decrements a counter — this overrides any `skip` passed in by
+ * the caller, since "are we in test" must win over route-specific skip
+ * logic like authLimiter's /refresh exemption.
  */
 async function buildLimiter({ namespace, windowMs, max, message, keyGenerator = byUserOrIp, skip }) {
   if (!namespace || typeof namespace !== 'string') {
     throw new Error('buildLimiter: a unique string `namespace` is required (no default is provided on purpose).');
   }
   const store = await createRateLimitStore(namespace);
+  const effectiveSkip = IS_TEST_ENV ? () => true : skip;
   return rateLimit({
     windowMs,
     max,
@@ -105,7 +122,7 @@ async function buildLimiter({ namespace, windowMs, max, message, keyGenerator = 
     keyGenerator,
     message: { error: 'RATE_LIMIT_EXCEEDED', message },
     store,
-    ...(skip ? { skip } : {}),
+    ...(effectiveSkip ? { skip: effectiveSkip } : {}),
   });
 }
 

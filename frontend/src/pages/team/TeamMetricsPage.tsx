@@ -1,17 +1,9 @@
 // FILE: src/pages/team/TeamMetricsPage.tsx
-// GET /api/metrics/workspace/team-overview   (manager+)
-// GET /api/metrics/workspace/leaderboard     (manager+)
-// GET /api/metrics/workspace/coaching-queue  (manager+)
-// GET /api/metrics/workspace/team-velocity   (manager+)
-// GET /api/metrics/workspace/activity-feed   (manager+)
+// DEMO BUILD — all data is hardcoded locally for screenshots. No network calls.
 import React, { useState } from 'react';
-import { useQuery }        from '@tanstack/react-query';
-import { metricsApi }      from '@/api/metrics';
-import { queryKeys }       from '@/lib/queryKeys';
 import { Avatar }          from '@/components/ui/Avatar';
 import { Badge }           from '@/components/ui/Badge';
-import { Tabs }            from '@/components/ui/Tabs';
-import { Skeleton }        from '@/components/ui/Skeleton';
+import { Tabs }             from '@/components/ui/Tabs';
 import { InlineAlert }     from '@/components/common/index';
 import { cn }              from '@/lib/utils';
 
@@ -51,10 +43,6 @@ function SectionHeader({ label }: { label: string }) {
   );
 }
 
-function EmptyState({ message }: { message: string }) {
-  return <div className="p-8 text-center text-sm text-text-muted">{message}</div>;
-}
-
 function CardShell({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
     <div className={cn('bg-white border border-surface-border rounded-lg overflow-hidden', className)}>
@@ -65,11 +53,11 @@ function CardShell({ children, className }: { children: React.ReactNode; classNa
 
 // ─── Flag labels for coaching queue ───────────────────────────
 const FLAG_META: Record<string, { label: string; color: string }> = {
-  no_outreach_7d:        { label: 'No outreach',    color: 'bg-amber-100 text-amber-700' },
-  no_practice_7d:        { label: 'No practice',    color: 'bg-blue-100  text-blue-700'  },
-  score_declining:       { label: 'Score ↓',        color: 'bg-red-100   text-red-700'   },
-  low_skill_score:       { label: 'Low skill',      color: 'bg-red-100   text-red-700'   },
-  low_relationship_health:{ label: 'Cold pipeline', color: 'bg-purple-100 text-purple-700'},
+  no_outreach_7d:          { label: 'No outreach',    color: 'bg-amber-100 text-amber-700' },
+  no_practice_7d:          { label: 'No practice',    color: 'bg-blue-100  text-blue-700'  },
+  score_declining:         { label: 'Score ↓',        color: 'bg-red-100   text-red-700'   },
+  low_skill_score:         { label: 'Low skill',      color: 'bg-red-100   text-red-700'   },
+  low_relationship_health: { label: 'Cold pipeline',  color: 'bg-purple-100 text-purple-700'},
 };
 
 // ─── Activity event labels ─────────────────────────────────────
@@ -97,62 +85,165 @@ function timeAgo(iso: string): string {
   return `${Math.floor(h / 24)}d ago`;
 }
 
+function daysAgoIso(days: number, hours = 0): string {
+  const d = new Date();
+  d.setDate(d.getDate() - days);
+  d.setHours(d.getHours() - hours);
+  return d.toISOString();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Hardcoded demo data
+// ═══════════════════════════════════════════════════════════════
+const OVERVIEW_DATA = {
+  members: [
+    { user_id: 'u1', name: 'Priya Natarajan', last_active: '2h ago',  avg_skill_score: 8.4, outreach_sent_this_week: 61, sessions_this_week: 5, goal_completion_pct: 92, weakest_axis: 'negotiation' },
+    { user_id: 'u2', name: 'Marcus Webb',     last_active: '1h ago',  avg_skill_score: 7.9, outreach_sent_this_week: 54, sessions_this_week: 4, goal_completion_pct: 88, weakest_axis: 'objection_handling' },
+    { user_id: 'u3', name: 'Elena Torres',    last_active: '4h ago',  avg_skill_score: 7.5, outreach_sent_this_week: 47, sessions_this_week: 3, goal_completion_pct: 74, weakest_axis: 'discovery' },
+    { user_id: 'u4', name: 'Jordan Kim',      last_active: '30m ago', avg_skill_score: 6.8, outreach_sent_this_week: 39, sessions_this_week: 2, goal_completion_pct: 65, weakest_axis: 'closing' },
+    { user_id: 'u5', name: 'Sofia Alvarez',   last_active: '1d ago',  avg_skill_score: 6.2, outreach_sent_this_week: 22, sessions_this_week: 1, goal_completion_pct: 48, weakest_axis: 'discovery' },
+    { user_id: 'u6', name: 'Devon Marsh',     last_active: '3d ago',  avg_skill_score: 5.4, outreach_sent_this_week: 8,  sessions_this_week: 0, goal_completion_pct: 31, weakest_axis: 'objection_handling' },
+    { user_id: 'u7', name: 'Aisha Bello',     last_active: '6h ago',  avg_skill_score: 8.1, outreach_sent_this_week: 58, sessions_this_week: 6, goal_completion_pct: 95, weakest_axis: 'negotiation' },
+    { user_id: 'u8', name: 'Ryan O\u2019Connell', last_active: '2d ago', avg_skill_score: 6.0, outreach_sent_this_week: 19, sessions_this_week: 1, goal_completion_pct: 52, weakest_axis: 'closing' },
+  ],
+  team_avg_score: 7.04,
+  team_weakest_axis: 'objection_handling',
+  members_not_practiced_this_week: [{ user_id: 'u6', name: 'Devon Marsh' }],
+  team_objections: {
+    common_patterns: [
+      { type: 'price_too_high',        count: 34 },
+      { type: 'no_budget',             count: 27 },
+      { type: 'need_to_check_with_team', count: 21 },
+      { type: 'happy_with_current_vendor', count: 16 },
+      { type: 'bad_timing',            count: 11 },
+    ],
+    top: [{ occurrence_count: 34 }],
+  },
+  team_signals: {
+    top_signals: [
+      { type: 'pricing_page_visit',  count: 41 },
+      { type: 'demo_requested',      count: 23 },
+      { type: 'case_study_download', count: 17 },
+    ],
+  },
+};
+
+const LEADERBOARD_DATA = {
+  leaderboard: [
+    { user_id: 'u7', name: 'Aisha Bello',        role: 'senior rep', score: 94, sent_30d: 231, positive_rate: 0.27, closed_won: 9, skill_score: 8.1 },
+    { user_id: 'u1', name: 'Priya Natarajan',    role: 'senior rep', score: 91, sent_30d: 248, positive_rate: 0.24, closed_won: 8, skill_score: 8.4 },
+    { user_id: 'u2', name: 'Marcus Webb',        role: 'rep',        score: 83, sent_30d: 219, positive_rate: 0.22, closed_won: 6, skill_score: 7.9 },
+    { user_id: 'u3', name: 'Elena Torres',       role: 'rep',        score: 76, sent_30d: 190, positive_rate: 0.19, closed_won: 5, skill_score: 7.5 },
+    { user_id: 'u4', name: 'Jordan Kim',         role: 'rep',        score: 64, sent_30d: 156, positive_rate: 0.16, closed_won: 3, skill_score: 6.8 },
+    { user_id: 'u5', name: 'Sofia Alvarez',      role: 'associate',  score: 51, sent_30d: 98,  positive_rate: 0.13, closed_won: 2, skill_score: 6.2 },
+    { user_id: 'u8', name: 'Ryan O\u2019Connell', role: 'associate', score: 47, sent_30d: 84,  positive_rate: 0.11, closed_won: 1, skill_score: 6.0 },
+    { user_id: 'u6', name: 'Devon Marsh',        role: 'associate',  score: 29, sent_30d: 41,  positive_rate: 0.07, closed_won: 0, skill_score: 5.4 },
+  ],
+};
+
+const COACHING_QUEUE_DATA = {
+  queue: [
+    {
+      user_id: 'u6', name: 'Devon Marsh', needs_coaching: true, top_weakness: 'objection_handling',
+      flags: ['no_outreach_7d', 'no_practice_7d', 'score_declining'],
+      skill_score: 5.4, score_delta: -0.6, avg_relationship_health: 34,
+    },
+    {
+      user_id: 'u8', name: 'Ryan O\u2019Connell', needs_coaching: true, top_weakness: 'closing',
+      flags: ['low_skill_score', 'low_relationship_health'],
+      skill_score: 6.0, score_delta: -0.2, avg_relationship_health: 41,
+    },
+    {
+      user_id: 'u5', name: 'Sofia Alvarez', needs_coaching: false, top_weakness: 'discovery',
+      flags: ['no_practice_7d'],
+      skill_score: 6.2, score_delta: 0.1, avg_relationship_health: 58,
+    },
+    {
+      user_id: 'u4', name: 'Jordan Kim', needs_coaching: false, top_weakness: 'closing',
+      flags: ['score_declining'],
+      skill_score: 6.8, score_delta: -0.3, avg_relationship_health: 63,
+    },
+  ],
+};
+
+const VELOCITY_DATA = {
+  has_data: true,
+  current_week: daysAgoIso(3),
+  previous_week: daysAgoIso(10),
+  team_composite_current: 7.34,
+  team_composite_previous: 6.98,
+  team_composite_delta: 0.36,
+  active_members_current: 8,
+  active_members_previous: 7,
+  trend: 'improving',
+};
+
+const ACTIVITY_FEED_DATA = {
+  feed: [
+    { user_name: 'Aisha Bello',     event_type: 'deal_closed_won',    created_at: daysAgoIso(0, 0.5), metadata: { deal_value: '$18,400', account: 'Northwind Logistics' } },
+    { user_name: 'Priya Natarajan', event_type: 'practice_completed', created_at: daysAgoIso(0, 1),   metadata: { scenario: 'Cold call — enterprise', score: '8.7' } },
+    { user_name: 'Marcus Webb',     event_type: 'message_sent',       created_at: daysAgoIso(0, 1.5), metadata: { channel: 'email', sequence: 'Q3 outbound' } },
+    { user_name: 'Jordan Kim',      event_type: 'goal_achieved',      created_at: daysAgoIso(0, 2),   metadata: { goal: 'Weekly outreach target' } },
+    { user_name: 'Elena Torres',    event_type: 'check_in_submitted', created_at: daysAgoIso(0, 3),   metadata: { mood: 'confident' } },
+    { user_name: 'Sofia Alvarez',   event_type: 'prospect_added',     created_at: daysAgoIso(0, 4),   metadata: { company: 'Braxton Retail Group' } },
+    { user_name: 'Devon Marsh',     event_type: 'deal_closed_lost',   created_at: daysAgoIso(0, 5),   metadata: { reason: 'price_too_high' } },
+    { user_name: 'Aisha Bello',     event_type: 'skill_score_updated', created_at: daysAgoIso(0, 6),  metadata: { axis: 'negotiation', delta: '+0.4' } },
+    { user_name: 'Ryan O\u2019Connell', event_type: 'message_sent',   created_at: daysAgoIso(1, 1),   metadata: { channel: 'linkedin', sequence: 'Warm re-engage' } },
+    { user_name: 'Priya Natarajan', event_type: 'deal_closed_won',    created_at: daysAgoIso(1, 3),   metadata: { deal_value: '$9,200', account: 'Fernbrook Studio' } },
+    { user_name: 'Marcus Webb',     event_type: 'practice_completed', created_at: daysAgoIso(1, 5),   metadata: { scenario: 'Objection: budget', score: '7.9' } },
+    { user_name: 'Jordan Kim',      event_type: 'prospect_added',     created_at: daysAgoIso(1, 7),   metadata: { company: 'Halden Manufacturing' } },
+    { user_name: 'Elena Torres',    event_type: 'message_sent',       created_at: daysAgoIso(2, 0.5), metadata: { channel: 'email', sequence: 'Renewal outreach' } },
+    { user_name: 'Sofia Alvarez',   event_type: 'check_in_submitted', created_at: daysAgoIso(2, 2),   metadata: { mood: 'stretched thin' } },
+    { user_name: 'Aisha Bello',     event_type: 'goal_achieved',      created_at: daysAgoIso(2, 4),   metadata: { goal: 'Monthly demo target' } },
+    { user_name: 'Devon Marsh',     event_type: 'message_sent',       created_at: daysAgoIso(2, 6),   metadata: { channel: 'email', sequence: 'Cold outbound' } },
+    { user_name: 'Ryan O\u2019Connell', event_type: 'practice_completed', created_at: daysAgoIso(3, 1), metadata: { scenario: 'Discovery call', score: '6.4' } },
+    { user_name: 'Priya Natarajan', event_type: 'skill_score_updated', created_at: daysAgoIso(3, 3),  metadata: { axis: 'closing', delta: '+0.2' } },
+    { user_name: 'Marcus Webb',     event_type: 'prospect_added',     created_at: daysAgoIso(3, 5),   metadata: { company: 'Ostrow Financial' } },
+    { user_name: 'Jordan Kim',      event_type: 'deal_closed_lost',   created_at: daysAgoIso(4, 1),   metadata: { reason: 'bad_timing' } },
+  ],
+};
+
 // ═══════════════════════════════════════════════════════════════
 // Tab: Overview
 // ═══════════════════════════════════════════════════════════════
 function OverviewTab() {
-  const { data, isLoading } = useQuery({
-    queryKey: queryKeys.workspaceTeamOverview,
-    queryFn:  () => metricsApi.getWorkspaceTeamOverview().then(r => r.data),
-    staleTime: 5 * 60_000,
-  });
+  const { members, team_avg_score, team_weakest_axis, members_not_practiced_this_week, team_objections, team_signals } = OVERVIEW_DATA;
 
-  if (isLoading) return <OverviewSkeleton />;
-  if (!data?.members?.length) return <InlineAlert type="info" message="No active members found in this workspace." />;
-
-  const { members, team_avg_score, team_weakest_axis, members_not_practiced_this_week, team_objections, team_signals } = data;
-
-  const totalOutreach = members.reduce((s: number, m: any) => s + (m.outreach_sent_this_week ?? 0), 0);
-  const totalSessions = members.reduce((s: number, m: any) => s + (m.sessions_this_week ?? 0), 0);
+  const totalOutreach = members.reduce((s, m) => s + (m.outreach_sent_this_week ?? 0), 0);
+  const totalSessions = members.reduce((s, m) => s + (m.sessions_this_week ?? 0), 0);
   const needsCoaching = members_not_practiced_this_week?.length ?? 0;
 
   return (
     <div className="space-y-4">
       {/* KPI strip */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <KpiCard label="Team skill score" value={team_avg_score != null ? team_avg_score.toFixed(1) : '—'} sub="avg composite" />
+        <KpiCard label="Team skill score" value={team_avg_score.toFixed(1)} sub="avg composite" />
         <KpiCard label="Outreach this week" value={String(totalOutreach)} sub="messages sent" />
         <KpiCard label="Practice sessions" value={String(totalSessions)} sub="7-day total" />
         <KpiCard label="No practice 7d" value={String(needsCoaching)} sub="members" highlight={needsCoaching > 0} />
       </div>
 
       {/* Weak axis + signal strip */}
-      {(team_weakest_axis || team_signals?.top_signals?.length > 0) && (
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          {team_weakest_axis && (
-            <CardShell>
-              <div className="p-4 space-y-1">
-                <p className="text-xs text-text-muted font-semibold uppercase tracking-wide">Team weak spot</p>
-                <p className="text-sm font-semibold text-text-primary capitalize">{team_weakest_axis.replace(/_/g, ' ')}</p>
-                <p className="text-xs text-text-secondary">Most common weakest axis across reps — target this in coaching.</p>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <CardShell>
+          <div className="p-4 space-y-1">
+            <p className="text-xs text-text-muted font-semibold uppercase tracking-wide">Team weak spot</p>
+            <p className="text-sm font-semibold text-text-primary capitalize">{team_weakest_axis.replace(/_/g, ' ')}</p>
+            <p className="text-xs text-text-secondary">Most common weakest axis across reps — target this in coaching.</p>
+          </div>
+        </CardShell>
+        <CardShell>
+          <div className="p-4 space-y-2">
+            <p className="text-xs text-text-muted font-semibold uppercase tracking-wide">Buying signals (7d)</p>
+            {team_signals.top_signals.slice(0, 3).map((s) => (
+              <div key={s.type} className="flex items-center justify-between">
+                <span className="text-xs text-text-secondary capitalize">{s.type.replace(/_/g, ' ')}</span>
+                <span className="text-xs font-semibold text-success">{s.count}×</span>
               </div>
-            </CardShell>
-          )}
-          {team_signals?.top_signals?.length > 0 && (
-            <CardShell>
-              <div className="p-4 space-y-2">
-                <p className="text-xs text-text-muted font-semibold uppercase tracking-wide">Buying signals (7d)</p>
-                {team_signals.top_signals.slice(0, 3).map((s: any) => (
-                  <div key={s.type} className="flex items-center justify-between">
-                    <span className="text-xs text-text-secondary capitalize">{s.type.replace(/_/g, ' ')}</span>
-                    <span className="text-xs font-semibold text-success">{s.count}×</span>
-                  </div>
-                ))}
-              </div>
-            </CardShell>
-          )}
-        </div>
-      )}
+            ))}
+          </div>
+        </CardShell>
+      </div>
 
       {/* Member table */}
       <CardShell>
@@ -170,7 +261,7 @@ function OverviewTab() {
               </tr>
             </thead>
             <tbody>
-              {members.map((m: any) => (
+              {members.map((m) => (
                 <tr key={m.user_id} className="border-b border-surface-border last:border-0 hover:bg-surface-base/50 transition-colors">
                   <td className="px-4 py-2.5">
                     <div className="flex items-center gap-2">
@@ -211,38 +302,25 @@ function OverviewTab() {
       </CardShell>
 
       {/* Team objection patterns */}
-      {team_objections?.common_patterns?.length > 0 && (
-        <CardShell>
-          <SectionHeader label="Team objection patterns" />
-          {team_objections.common_patterns.map((o: any) => (
-            <div key={o.type} className="flex items-center gap-3 px-4 py-3 border-b border-surface-border last:border-0">
-              <div className="flex-1">
-                <p className="text-sm text-text-primary capitalize">{o.type.replace(/_/g, ' ')}</p>
-              </div>
-              <div className="flex items-center gap-2 shrink-0">
-                <div className="w-20 h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-danger rounded-full"
-                    style={{ width: `${Math.min(100, (o.count / (team_objections.top?.[0]?.occurrence_count || 1)) * 100)}%` }}
-                  />
-                </div>
-                <span className="text-xs text-text-muted w-6 text-right font-mono">{o.count}×</span>
-              </div>
+      <CardShell>
+        <SectionHeader label="Team objection patterns" />
+        {team_objections.common_patterns.map((o) => (
+          <div key={o.type} className="flex items-center gap-3 px-4 py-3 border-b border-surface-border last:border-0">
+            <div className="flex-1">
+              <p className="text-sm text-text-primary capitalize">{o.type.replace(/_/g, ' ')}</p>
             </div>
-          ))}
-        </CardShell>
-      )}
-    </div>
-  );
-}
-
-function OverviewSkeleton() {
-  return (
-    <div className="space-y-4">
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-20" rounded="lg" />)}
-      </div>
-      <Skeleton className="h-48" rounded="lg" />
+            <div className="flex items-center gap-2 shrink-0">
+              <div className="w-20 h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-danger rounded-full"
+                  style={{ width: `${Math.min(100, (o.count / (team_objections.top?.[0]?.occurrence_count || 1)) * 100)}%` }}
+                />
+              </div>
+              <span className="text-xs text-text-muted w-6 text-right font-mono">{o.count}×</span>
+            </div>
+          </div>
+        ))}
+      </CardShell>
     </div>
   );
 }
@@ -251,23 +329,14 @@ function OverviewSkeleton() {
 // Tab: Leaderboard
 // ═══════════════════════════════════════════════════════════════
 function LeaderboardTab() {
-  const { data, isLoading } = useQuery({
-    queryKey: queryKeys.workspaceLeaderboard,
-    queryFn:  () => metricsApi.getWorkspaceLeaderboard().then(r => r.data),
-    staleTime: 5 * 60_000,
-  });
-
-  if (isLoading) return <Skeleton className="h-64" rounded="lg" />;
-  if (!data?.leaderboard?.length) return <InlineAlert type="info" message="No leaderboard data yet." />;
-
-  const { leaderboard } = data;
+  const { leaderboard } = LEADERBOARD_DATA;
   const topScore = leaderboard[0]?.score ?? 1;
 
   return (
     <CardShell>
       <SectionHeader label={`${leaderboard.length} members ranked`} />
       <div className="divide-y divide-surface-border">
-        {leaderboard.map((m: any, i: number) => {
+        {leaderboard.map((m, i) => {
           const ratePct = Math.round((m.positive_rate ?? 0) * 100);
           const rankColor = i === 0 ? 'text-amber-500' : i === 1 ? 'text-slate-400' : i === 2 ? 'text-amber-700' : 'text-text-muted';
           return (
@@ -335,22 +404,8 @@ function LeaderboardTab() {
 // Tab: Coaching queue
 // ═══════════════════════════════════════════════════════════════
 function CoachingQueueTab() {
-  const { data, isLoading } = useQuery({
-    queryKey: queryKeys.workspaceCoachingQueue,
-    queryFn:  () => metricsApi.getWorkspaceCoachingQueue().then(r => r.data),
-    staleTime: 5 * 60_000,
-  });
-
-  if (isLoading) return (
-    <div className="space-y-3">
-      {Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-24" rounded="lg" />)}
-    </div>
-  );
-
-  if (!data?.queue?.length) return <InlineAlert type="success" message="No coaching flags raised — team is on track." />;
-
-  const { queue } = data;
-  const urgentCount  = queue.filter((m: any) => m.needs_coaching).length;
+  const { queue } = COACHING_QUEUE_DATA;
+  const urgentCount = queue.filter((m) => m.needs_coaching).length;
 
   return (
     <div className="space-y-3">
@@ -361,7 +416,7 @@ function CoachingQueueTab() {
         />
       )}
 
-      {queue.map((m: any) => (
+      {queue.map((m) => (
         <CardShell key={m.user_id}>
           <div className="p-4 space-y-3">
             {/* Header row */}
@@ -384,7 +439,7 @@ function CoachingQueueTab() {
 
             {/* Flags */}
             <div className="flex flex-wrap gap-1.5">
-              {m.flags.map((f: string) => {
+              {m.flags.map((f) => {
                 const meta = FLAG_META[f] ?? { label: f.replace(/_/g, ' '), color: 'bg-slate-100 text-slate-600' };
                 return (
                   <span key={f} className={cn('inline-flex items-center px-2 py-0.5 rounded text-xs font-medium', meta.color)}>
@@ -402,7 +457,7 @@ function CoachingQueueTab() {
                   <ScorePill value={m.skill_score} />
                   {m.score_delta != null && (
                     <p className={cn('text-xs', m.score_delta < 0 ? 'text-danger' : 'text-success')}>
-                      {m.score_delta > 0 ? '+' : ''}{m.score_delta?.toFixed(1)} wk
+                      {m.score_delta > 0 ? '+' : ''}{m.score_delta.toFixed(1)} wk
                     </p>
                   )}
                 </div>
@@ -427,16 +482,7 @@ function CoachingQueueTab() {
 // Tab: Velocity
 // ═══════════════════════════════════════════════════════════════
 function VelocityTab() {
-  const { data, isLoading } = useQuery({
-    queryKey: queryKeys.workspaceTeamVelocity,
-    queryFn:  () => metricsApi.getWorkspaceTeamVelocity().then(r => r.data),
-    staleTime: 10 * 60_000,
-  });
-
-  if (isLoading) return <Skeleton className="h-56" rounded="lg" />;
-  if (!data?.has_data) return <InlineAlert type="info" message="Not enough weekly data yet — check back once more members have sessions across two weeks." />;
-
-  const { current_week, previous_week, team_composite_current, team_composite_previous, team_composite_delta, active_members_current, active_members_previous, trend } = data;
+  const { current_week, previous_week, team_composite_current, team_composite_previous, team_composite_delta, active_members_current, active_members_previous, trend } = VELOCITY_DATA;
 
   const trendColor = trend === 'improving' ? 'text-success' : trend === 'declining' ? 'text-danger' : 'text-text-muted';
   const trendIcon  = trend === 'improving' ? '↑' : trend === 'declining' ? '↓' : '→';
@@ -454,7 +500,7 @@ function VelocityTab() {
           <p className="text-xs text-text-muted uppercase tracking-wide font-semibold">Week-over-week team skill change</p>
           <div className="flex items-center justify-center gap-2">
             <span className={cn('text-4xl font-bold tabular-nums', trendColor)}>
-              {trendIcon}{team_composite_delta != null ? Math.abs(team_composite_delta).toFixed(2) : '—'}
+              {trendIcon}{Math.abs(team_composite_delta).toFixed(2)}
             </span>
           </div>
           <p className="text-sm text-text-secondary capitalize">
@@ -471,7 +517,7 @@ function VelocityTab() {
               Current week <span className="font-normal normal-case ml-1 text-text-muted">{formatWeek(current_week)}</span>
             </p>
             <p className="text-2xl font-bold text-text-primary tabular-nums">
-              {team_composite_current?.toFixed(2) ?? '—'}
+              {team_composite_current.toFixed(2)}
             </p>
             <p className="text-xs text-text-secondary">{active_members_current} active member{active_members_current !== 1 ? 's' : ''}</p>
           </div>
@@ -482,7 +528,7 @@ function VelocityTab() {
               Previous week <span className="font-normal normal-case ml-1 text-text-muted">{formatWeek(previous_week)}</span>
             </p>
             <p className="text-2xl font-bold text-text-secondary tabular-nums">
-              {team_composite_previous?.toFixed(2) ?? '—'}
+              {team_composite_previous.toFixed(2)}
             </p>
             <p className="text-xs text-text-secondary">{active_members_previous} active member{active_members_previous !== 1 ? 's' : ''}</p>
           </div>
@@ -497,12 +543,12 @@ function VelocityTab() {
             { label: `Current (${formatWeek(current_week)})`, val: team_composite_current, color: 'bg-primary' },
             { label: `Previous (${formatWeek(previous_week)})`, val: team_composite_previous, color: 'bg-slate-300' },
           ].map(row => {
-            const pct = row.val != null ? Math.min(100, (row.val / 10) * 100) : 0;
+            const pct = Math.min(100, (row.val / 10) * 100);
             return (
               <div key={row.label} className="space-y-1">
                 <div className="flex items-center justify-between">
                   <p className="text-xs text-text-secondary">{row.label}</p>
-                  <p className="text-xs font-mono text-text-primary">{row.val?.toFixed(2) ?? '—'}</p>
+                  <p className="text-xs font-mono text-text-primary">{row.val.toFixed(2)}</p>
                 </div>
                 <div className="h-2 bg-surface-base rounded-full overflow-hidden">
                   <div className={cn('h-full rounded-full', row.color)} style={{ width: `${pct}%` }} />
@@ -520,27 +566,13 @@ function VelocityTab() {
 // Tab: Activity feed
 // ═══════════════════════════════════════════════════════════════
 function ActivityFeedTab() {
-  const { data, isLoading } = useQuery({
-    queryKey: queryKeys.workspaceActivityFeed,
-    queryFn:  () => metricsApi.getWorkspaceActivityFeed().then(r => r.data),
-    staleTime: 2 * 60_000,
-  });
-
-  if (isLoading) return (
-    <div className="space-y-2">
-      {Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} className="h-14" rounded="lg" />)}
-    </div>
-  );
-
-  if (!data?.feed?.length) return <InlineAlert type="info" message="No recent team activity to show." />;
-
-  const { feed } = data;
+  const { feed } = ACTIVITY_FEED_DATA;
 
   return (
     <CardShell>
       <SectionHeader label="Last 30 events" />
       <div className="divide-y divide-surface-border">
-        {feed.map((event: any, i: number) => (
+        {feed.map((event, i) => (
           <div key={i} className="flex items-start gap-3 px-4 py-3 hover:bg-surface-base/50 transition-colors">
             <Avatar name={event.user_name} size="xs" className="mt-0.5 shrink-0" />
             <div className="flex-1 min-w-0">

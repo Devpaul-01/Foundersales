@@ -1,79 +1,99 @@
 // ============================================================
 // FILE: src/pages/opportunities/OpportunityDetailPage.tsx
-// Matches opportunities-13.txt:
-// - Auto-marks viewed on load (server does this on GET)
-// - Lazy intel fetch on explicit user click
-// - Feedback modal with deal_value, scheduled_call
-// - Manager can assign
-// - "Assigned to me" badge when opportunity was assigned (not owned)
+// DEMO BUILD — all data is hardcoded locally for screenshots.
+// No network requests, no react-query, no loading states.
+// Intel is revealed instantly on click (still lazy from a UX
+// standpoint, just no fetch behind it).
 // ============================================================
 import React, { useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
-import { useQuery, useMutation } from '@tanstack/react-query';
+import { useNavigate } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { opportunitiesApi } from '@/api/opportunities';
-import { feedbackApi }      from '@/api/feedback';
-import { chatApi }          from '@/api/chat';
-import { queryClient }      from '@/lib/queryClient';
-import { queryKeys }        from '@/lib/queryKeys';
-import { useRole }          from '@/hooks/useRole';
-import { useAuth }          from '@/hooks/useAuth';
 import { useToast }         from '@/hooks/useToast';
-import { useNotificationContext } from '@/contexts/NotificationContext';
 import { feedbackSchema, type FeedbackSchema } from '@/lib/schemas';
 import { Button }      from '@/components/ui/Button';
 import { Input }       from '@/components/ui/Input';
 import { Textarea }    from '@/components/ui/Input';
-import { Badge, PlatformBadge, ScoreBadge } from '@/components/ui/Badge';
+import { Badge, PlatformBadge } from '@/components/ui/Badge';
 import { Modal }       from '@/components/ui/Modal';
-import { Skeleton, SkeletonText } from '@/components/ui/Skeleton';
-import { CopyButton, InlineAlert, PageLoader } from '@/components/common/index';
-import { AppError }    from '@/api/types';
-import { formatRelativeDate, cn } from '@/lib/utils';
-import { ROUTES, STATUS_LABELS, MEETING_OUTCOME_LABELS } from '@/lib/constants';
+import { CopyButton, InlineAlert } from '@/components/common/index';
+import { cn } from '@/lib/utils';
 import {
   ArrowLeft, Zap, MessageCircle,
-  Search, AlertCircle, ExternalLink, Calendar,
+  Search, ExternalLink, Calendar,
 } from 'lucide-react';
 
+// ── Demo data ─────────────────────────────────────────────────────────────────
+
+const CURRENT_USER_ID = 'usr_amara_okafor';
+
+const OPPORTUNITY = {
+  id: 'opp_1001',
+  platform: 'linkedin',
+  target_name: 'Priya Ramanathan',
+  target_context:
+    'VP of Growth at Meridian Pay, a Series B fintech (~140 employees). Posted publicly about struggling to scale outbound without adding headcount, and mentioned in the comments she\'s actively evaluating "AI SDR" tools this quarter. Her team currently runs outreach through a mix of Apollo and manual LinkedIn messages, which she described as "held together with duct tape."',
+  source_url: 'https://linkedin.com/in/priya-ramanathan',
+  composite_score: 8.6,
+  fit_score: 9,
+  timing_score: 9,
+  intent_score: 8,
+  status: 'viewed' as const,
+  created_at: '2026-09-07T08:40:00Z',
+  assigned_to: CURRENT_USER_ID,
+  user_id: 'usr_dara_kim',
+  prepared_message:
+    "Hi Priya — saw your post about scaling outbound without adding headcount. We help growth teams like yours automate the research + first-touch so reps spend their time on qualified conversations, not prospecting busywork. Worth a quick look?",
+};
+
+const INTEL = {
+  cached: true,
+  intel: {
+    pain_points: [
+      'Outbound is bottlenecked on manual research — reps spend ~40% of their time finding and qualifying prospects instead of talking to them.',
+      'Current stack (Apollo + manual LinkedIn) has no shared scoring model, so reps are chasing different definitions of "qualified."',
+      'Team grew from 4 to 11 reps in the last two quarters without a proportional increase in pipeline, putting pressure on CAC.',
+    ],
+    talking_points: [
+      'Meridian Pay\'s recent Series B (announced in Q2) makes this a natural moment to invest in scalable outbound infrastructure.',
+      'Priya has publicly praised data-driven growth loops in past posts — lead with the scoring methodology, not just automation.',
+      'Their ICP overlaps closely with three of our existing fintech customers — worth referencing as social proof.',
+    ],
+    risks: [
+      'She explicitly called out "another tool that promises the world and does nothing" in a recent comment — skepticism toward AI SDR claims runs high.',
+      'Procurement at Series B fintechs typically involves security review; be ready with SOC 2 documentation early.',
+    ],
+    confidence: 'high' as const,
+  },
+  outreach: {
+    opening_line: "Saw your post about scaling outbound without adding headcount — that duct-tape feeling is exactly what we built Clutch to fix.",
+    message_suggestion:
+      "Hi Priya — saw your post about scaling outbound without adding headcount, and the comment about your stack feeling held together with duct tape hit close to home. We work with a few fintech growth teams around Meridian Pay's size who had the same scoring-consistency problem across reps. Would it be worth 15 minutes to see if it's relevant for where you're at post-Series B?",
+    follow_up_hook: "If she doesn't respond in 4 days: reference the specific fintech customer overlap and offer a 2-minute Loom instead of a call.",
+    tone: 'Consultative',
+    personalization_angle: 'Recent Series B + explicit public frustration with current outbound stack',
+  },
+  research: {
+    citations: [
+      'https://linkedin.com/in/priya-ramanathan/posts/scaling-outbound-2026',
+      'https://meridianpay.com/newsroom/series-b-announcement',
+      'https://linkedin.com/company/meridian-pay/about',
+    ],
+  },
+  reason: null as string | null,
+};
+
+// ── Page ─────────────────────────────────────────────────────────────────────
+
 export default function OpportunityDetailPage() {
-  const { id }        = useParams<{ id: string }>();
   const navigate      = useNavigate();
-  const { isManager } = useRole();
-  const { user }      = useAuth();
   const { showToast } = useToast();
-  const { refreshCounts } = useNotificationContext();
+  const isManager = true; // demo: show manager-only controls where relevant
   const [intelRequested, setIntelRequested] = useState(false);
   const [feedbackOpen,   setFeedbackOpen]   = useState(false);
 
+  const opp = OPPORTUNITY;
 
-  // ── Data ─────────────────────────────────────────────────
-  const { data: oppData, isLoading } = useQuery({
-    queryKey: queryKeys.opportunity(id!),
-    queryFn:  () => opportunitiesApi.getById(id!).then((r) => r.data.opportunity),
-    enabled:  !!id,
-  });
-
-  // Intel — only fetched when user clicks "Analyze"
-  const { data: intelData, isLoading: intelLoading } = useQuery({
-    queryKey: queryKeys.opportunityIntel(id!),
-    queryFn:  () => opportunitiesApi.getIntel(id!).then((r) => r.data),
-    enabled:  !!id && intelRequested,
-    staleTime: Infinity,
-  });
-
-  // ── Mutations ─────────────────────────────────────────────
-  const chatMutation = useMutation({
-    mutationFn: () =>
-      chatApi.create({ chat_type: 'opportunity', opportunity_id: id }).then((r) => r.data.chat),
-    onSuccess: (chat) => navigate(`/chat/${chat.id}`),
-    onError: () => showToast('Could not open chat.', 'error'),
-  });
-
-  // Feedback form
-  // outcome lives in the form (not separate state) so the schema can validate it
-  // and the mutation receives it as part of `data` without manual injection.
   const { register, handleSubmit, reset, watch, setValue, formState: { errors, isSubmitting } } =
     useForm<FeedbackSchema>({
       resolver:      zodResolver(feedbackSchema),
@@ -83,40 +103,27 @@ export default function OpportunityDetailPage() {
   const outcomeSelected = watch('outcome');   // drives selector UI + conditional fields
   const scheduledCall   = watch('scheduled_call');
 
-  const feedbackMutation = useMutation({
-    mutationFn: (data: FeedbackSchema) =>
-      feedbackApi.submit({ ...data, opportunity_id: id! }),
-    onSuccess: (_, variables) => {
-      queryClient.invalidateQueries({ queryKey: ['opportunities'] });
-      queryClient.invalidateQueries({ queryKey: queryKeys.pipeline() });
-      queryClient.invalidateQueries({ queryKey: queryKeys.feedbackPending });
-      queryClient.invalidateQueries({ queryKey: queryKeys.dashboard });
-      refreshCounts();
-      showToast(
-        variables.outcome === 'positive' ? '🎉 Prospect moved to Pipeline!' : 'Feedback recorded.',
-        'success',
-      );
-      setFeedbackOpen(false);
-      reset();
-    },
-    onError: () => showToast('Could not save feedback.', 'error'),
-  });
+  const onSubmitFeedback = (data: FeedbackSchema) => {
+    showToast(
+      data.outcome === 'positive' ? '🎉 Prospect moved to Pipeline!' : 'Feedback recorded.',
+      'success',
+    );
+    setFeedbackOpen(false);
+    reset();
+  };
 
-  if (isLoading) return <PageLoader />;
-  if (!oppData) return (
-    <div className="page-container">
-      <InlineAlert type="error" message="Opportunity not found." />
-    </div>
-  );
+  const handleOpenChat = () => {
+    showToast('Opening chat…', 'info');
+    navigate('/chat/demo-chat-1001');
+  };
 
-  const opp = oppData;
   const canAnalyze = !!opp.target_name;
 
   // True when this opp was assigned to me by someone else (I'm not the creator)
   const isAssignedToMe =
     !!opp.assigned_to &&
-    opp.assigned_to === user?.id &&
-    opp.user_id !== user?.id;
+    opp.assigned_to === CURRENT_USER_ID &&
+    opp.user_id !== CURRENT_USER_ID;
 
   return (
     <div className="page-container max-w-3xl space-y-5">
@@ -195,8 +202,7 @@ export default function OpportunityDetailPage() {
             <Button
               size="sm"
               leftIcon={<MessageCircle size={13} />}
-              isLoading={chatMutation.isPending}
-              onClick={() => chatMutation.mutate()}
+              onClick={handleOpenChat}
             >
               Open in Chat
             </Button>
@@ -227,32 +233,27 @@ export default function OpportunityDetailPage() {
         )}
       </div>
 
-      {/* Intel panel — lazy */}
+      {/* Intel panel */}
       {intelRequested && (
         <div className="bg-white border border-surface-border rounded-lg p-5 space-y-4">
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-semibold text-text-primary flex items-center gap-2">
               <Search size={14} className="text-brand" /> Clutch AI intel
             </h2>
-            {intelData?.cached && (
+            {INTEL.cached && (
               <Badge variant="gray" size="xs">Cached</Badge>
             )}
           </div>
 
-          {intelLoading ? (
-            <div className="space-y-2">
-              <p className="text-xs text-text-muted animate-pulse">Analysing prospect…</p>
-              <SkeletonText lines={3} />
-            </div>
-          ) : intelData?.intel ? (
+          {INTEL.intel ? (
             <div className="space-y-5">
 
               {/* ── Research block ───────────────────────────────────── */}
               <div className="space-y-4">
                 {[
-                  { label: '🎯 Pain points',    items: intelData.intel.pain_points },
-                  { label: '💬 Talking points', items: intelData.intel.talking_points },
-                  { label: '⚠️ Risks',          items: intelData.intel.risks },
+                  { label: '🎯 Pain points',    items: INTEL.intel.pain_points },
+                  { label: '💬 Talking points', items: INTEL.intel.talking_points },
+                  { label: '⚠️ Risks',          items: INTEL.intel.risks },
                 ].map((section) => (
                   <div key={section.label}>
                     <p className="text-xs font-semibold text-text-primary mb-1.5">{section.label}</p>
@@ -270,67 +271,67 @@ export default function OpportunityDetailPage() {
                   <span className="text-xs text-text-muted">Confidence:</span>
                   <Badge
                     variant={
-                      intelData.intel.confidence === 'high'   ? 'green' :
-                      intelData.intel.confidence === 'medium' ? 'amber' : 'gray'
+                      INTEL.intel.confidence === 'high'   ? 'green' :
+                      INTEL.intel.confidence === 'medium' ? 'amber' : 'gray'
                     }
                     size="xs"
                   >
-                    {intelData.intel.confidence}
+                    {INTEL.intel.confidence}
                   </Badge>
                 </div>
               </div>
 
               {/* ── Outreach block ───────────────────────────────────── */}
-              {intelData.outreach && (
+              {INTEL.outreach && (
                 <div className="border-t border-surface-border pt-4 space-y-3">
                   <p className="text-xs font-semibold text-text-primary flex items-center gap-1.5">
                     <Zap size={12} className="text-brand" /> Outreach details
                   </p>
 
-                  {intelData.outreach.opening_line && (
+                  {INTEL.outreach.opening_line && (
                     <div className="space-y-1">
                       <p className="text-xs text-text-muted font-medium">Opening line</p>
                       <div className="flex items-start justify-between gap-2 bg-surface-base rounded-md p-2.5 border border-surface-border">
                         <p className="text-sm text-text-primary leading-relaxed">
-                          {intelData.outreach.opening_line}
+                          {INTEL.outreach.opening_line}
                         </p>
-                        <CopyButton text={intelData.outreach.opening_line} />
+                        <CopyButton text={INTEL.outreach.opening_line} />
                       </div>
                     </div>
                   )}
 
-                  {intelData.outreach.message_suggestion && (
+                  {INTEL.outreach.message_suggestion && (
                     <div className="space-y-1">
                       <p className="text-xs text-text-muted font-medium">Suggested message</p>
                       <div className="flex items-start justify-between gap-2 bg-surface-base rounded-md p-2.5 border border-surface-border">
                         <p className="text-sm text-text-primary leading-relaxed whitespace-pre-wrap">
-                          {intelData.outreach.message_suggestion}
+                          {INTEL.outreach.message_suggestion}
                         </p>
-                        <CopyButton text={intelData.outreach.message_suggestion} />
+                        <CopyButton text={INTEL.outreach.message_suggestion} />
                       </div>
                     </div>
                   )}
 
-                  {intelData.outreach.follow_up_hook && (
+                  {INTEL.outreach.follow_up_hook && (
                     <div className="space-y-1">
                       <p className="text-xs text-text-muted font-medium">Follow-up hook</p>
                       <p className="text-sm text-text-secondary bg-surface-base rounded-md p-2.5 border border-surface-border">
-                        {intelData.outreach.follow_up_hook}
+                        {INTEL.outreach.follow_up_hook}
                       </p>
                     </div>
                   )}
 
                   <div className="flex flex-wrap gap-3">
-                    {intelData.outreach.tone && (
+                    {INTEL.outreach.tone && (
                       <div className="flex items-center gap-1.5">
                         <span className="text-xs text-text-muted">Tone:</span>
-                        <Badge variant="gray" size="xs">{intelData.outreach.tone}</Badge>
+                        <Badge variant="gray" size="xs">{INTEL.outreach.tone}</Badge>
                       </div>
                     )}
-                    {intelData.outreach.personalization_angle && (
+                    {INTEL.outreach.personalization_angle && (
                       <div className="flex items-center gap-1.5">
                         <span className="text-xs text-text-muted">Angle:</span>
-                        <span className="text-xs text-text-secondary">{intelData.outreach.personalization_angle}</span>
+                        <span className="text-xs text-text-secondary">{INTEL.outreach.personalization_angle}</span>
                       </div>
                     )}
                   </div>
@@ -338,11 +339,11 @@ export default function OpportunityDetailPage() {
               )}
 
               {/* ── Citations ────────────────────────────────────────── */}
-              {(intelData.research?.citations?.length ?? 0) > 0 && (
+              {(INTEL.research?.citations?.length ?? 0) > 0 && (
                 <div className="border-t border-surface-border pt-3 space-y-1">
                   <p className="text-xs text-text-muted font-medium">Sources</p>
                   <ul className="space-y-0.5">
-                    {intelData.research!.citations.map((url, i) => (
+                    {INTEL.research!.citations.map((url, i) => (
                       <li key={i}>
                         <a
                           href={url}
@@ -363,11 +364,7 @@ export default function OpportunityDetailPage() {
           ) : (
             <InlineAlert
               type="info"
-              message={
-                intelData?.reason === 'no_named_entity'
-                  ? 'Intel requires a specific person or company name in the prospect context.'
-                  : 'No intel available for this prospect.'
-              }
+              message="No intel available for this prospect."
             />
           )}
         </div>
@@ -380,7 +377,7 @@ export default function OpportunityDetailPage() {
         title="Log outcome feedback"
         size="sm"
       >
-        <form onSubmit={handleSubmit((d) => feedbackMutation.mutate(d))} className="space-y-4">
+        <form onSubmit={handleSubmit(onSubmitFeedback)} className="space-y-4">
 
           {/* ── Outcome selector — setValue keeps form + UI in sync ── */}
           <div>
@@ -468,9 +465,6 @@ export default function OpportunityDetailPage() {
           )}
 
           {/* ── Is final toggle ───────────────────────────────── */}
-          {/* When off: saves feedback without updating performance stats
-              or triggering conversation analysis — useful while the outcome
-              is still in flux (e.g. pending → waiting for reply). */}
           <div className="flex items-center justify-between rounded-md border border-surface-border px-3 py-2.5">
             <div>
               <p className="text-sm font-medium text-text-primary">Mark as final</p>
@@ -499,7 +493,7 @@ export default function OpportunityDetailPage() {
             >
               Cancel
             </Button>
-            <Button size="sm" type="submit" isLoading={feedbackMutation.isPending || isSubmitting}>
+            <Button size="sm" type="submit" isLoading={isSubmitting}>
               Save feedback
             </Button>
           </div>

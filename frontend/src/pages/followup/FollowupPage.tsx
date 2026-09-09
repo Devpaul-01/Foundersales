@@ -1,29 +1,116 @@
 // ============================================================
-// FILE: src/pages/followup/FollowupPage_CORRECTED.tsx
+// FILE: src/pages/followup/FollowupPage.tsx
 //
-// CORRECTIONS vs original:
-//  - Uses Opportunity type (not fabricated Followup type)
-//  - GET /api/followup returns { opportunities: Opportunity[] }
-//  - Actions: POST /api/followup/:id/sent  (not /done)
-//             POST /api/followup/:id/dismiss (not /snooze)
-//  - No pagination — backend returns all at once
-//  - Matches followup.txt exactly
+// DEMO / SCREENSHOT BUILD
+//  - All data is hardcoded locally — no API calls, no react-query,
+//    no network requests, no loading states.
+//  - Mark sent / Dismiss update local component state only.
+//  - Preserves the original design and interaction behavior.
 // ============================================================
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useQuery, useMutation } from '@tanstack/react-query';
-import { followupApi }  from '@/api/followup';
-import { queryClient }  from '@/lib/queryClient';
-import { queryKeys }    from '@/lib/queryKeys';
-import { useToast }     from '@/hooks/useToast';
 import { Button }       from '@/components/ui/Button';
 import { Badge, PlatformBadge } from '@/components/ui/Badge';
 import { Modal }        from '@/components/ui/Modal';
-import { Skeleton }     from '@/components/ui/Skeleton';
 import { EmptyState }   from '@/components/common/index';
-import { formatRelativeDate, cn } from '@/lib/utils';
+import { cn } from '@/lib/utils';
 import { Bell, Send, X, ChevronRight, Clock, Copy, Check } from 'lucide-react';
-import type { Opportunity } from '@/api/types';
+
+// ── Local types (mirrors Opportunity shape used by this page) ──
+type Opportunity = {
+  id: string;
+  target_name: string;
+  platform: 'linkedin' | 'twitter' | 'email' | 'instagram';
+  stage: string;
+  follow_up_count: number | null;
+  follow_up_sent_at: string | null;
+  marked_sent_at: string | null;
+  follow_up_message: string | null;
+};
+
+// ── Hardcoded demo data ──────────────────────────────────────
+const now = Date.now();
+const daysAgo = (n: number) => new Date(now - n * 86_400_000).toISOString();
+
+const INITIAL_OPPORTUNITIES: Opportunity[] = [
+  {
+    id: 'opp_1',
+    target_name: 'Marisol Ferreira',
+    platform: 'linkedin',
+    stage: 'Discovery call booked',
+    follow_up_count: 2,
+    follow_up_sent_at: daysAgo(11),
+    marked_sent_at: null,
+    follow_up_message:
+      "Hi Marisol — following up on our chat last week about your team's onboarding flow. I put together a quick loom walking through how Clutch could slot into your current stack, happy to send it over if useful. Also wanted to flag we just shipped the Salesforce sync you asked about, so the integration piece is no longer a blocker on our end. Let me know if it's still worth grabbing 15 minutes this week or if timing's shifted.",
+  },
+  {
+    id: 'opp_2',
+    target_name: 'Devon Park',
+    platform: 'email',
+    stage: 'Proposal sent',
+    follow_up_count: 1,
+    follow_up_sent_at: daysAgo(9),
+    marked_sent_at: null,
+    follow_up_message:
+      "Hey Devon, wanted to check in on the proposal I sent over on the 28th. No pressure at all — just making sure it didn't get buried. Happy to hop on a quick call if it'd help to walk through pricing or answer any questions from your team.",
+  },
+  {
+    id: 'opp_3',
+    target_name: 'Priya Nadarajah',
+    platform: 'twitter',
+    stage: 'Warm lead',
+    follow_up_count: 0,
+    follow_up_sent_at: daysAgo(2),
+    marked_sent_at: null,
+    follow_up_message:
+      'Loved your thread on scaling outbound without losing the personal touch — curious how you\'re handling follow-up cadence on your end right now. We built something at Clutch that might be a fit, mind if I send a couple details?',
+  },
+  {
+    id: 'opp_4',
+    target_name: 'Grant Whitfield',
+    platform: 'linkedin',
+    stage: 'Intro made',
+    follow_up_count: 3,
+    follow_up_sent_at: daysAgo(15),
+    marked_sent_at: null,
+    follow_up_message:
+      "Grant, it's been a couple weeks since we last connected — totally understand if priorities have shifted. If a Q4 evaluation is still on the table I'd love to get 20 minutes on the calendar, otherwise I'll check back in the new year.",
+  },
+  {
+    id: 'opp_5',
+    target_name: 'Anna Kowalski',
+    platform: 'email',
+    stage: 'Demo completed',
+    follow_up_count: 1,
+    follow_up_sent_at: null,
+    marked_sent_at: daysAgo(4),
+    follow_up_message:
+      'Thanks again for the time yesterday, Anna! Sharing the recap doc we discussed along with the pricing tiers for your team size. Let me know if the security questionnaire is something your IT team needs before moving forward.',
+  },
+  {
+    id: 'opp_6',
+    target_name: 'Malik Osei',
+    platform: 'instagram',
+    stage: 'Cold outreach',
+    follow_up_count: 0,
+    follow_up_sent_at: daysAgo(1),
+    marked_sent_at: null,
+    follow_up_message:
+      "Hey Malik — really enjoyed your post on creator monetization pitfalls. Think there could be an interesting overlap with what we're building at Clutch. Open to a quick chat sometime this month?",
+  },
+  {
+    id: 'opp_7',
+    target_name: 'Sophie Lindqvist',
+    platform: 'linkedin',
+    stage: 'Contract review',
+    follow_up_count: 4,
+    follow_up_sent_at: daysAgo(8),
+    marked_sent_at: null,
+    follow_up_message:
+      "Hi Sophie, checking in on the redlines legal sent back last Thursday. Happy to jump on a call with both teams if it'll speed things up — otherwise just let me know a rough timeline and I'll plan around it.",
+  },
+];
 
 // ── Follow-up card ────────────────────────────────────────────
 function FollowupCard({
@@ -173,41 +260,33 @@ function FollowupCard({
 
 // ── Main page ─────────────────────────────────────────────────
 export default function FollowupPage() {
-  const { showToast } = useToast();
+  // Local state seeded with hardcoded demo data — no fetching, no query cache.
+  const [opps, setOpps] = useState<Opportunity[]>(INITIAL_OPPORTUNITIES);
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'info' | 'error' } | null>(null);
 
-  // GET /api/followup → { opportunities: Opportunity[] }
-  const { data, isLoading } = useQuery({
-    queryKey: queryKeys.followups(),
-    queryFn:  () => followupApi.list().then((r) => r.data.opportunities),
-    staleTime: 60_000,
-  });
+  const showToast = (message: string, type: 'success' | 'info' | 'error') => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 2200);
+  };
 
-  const sentMutation = useMutation({
-    mutationFn: (id: string) => followupApi.markSent(id),
-    onSuccess: (res) => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.followups() });
-      queryClient.invalidateQueries({ queryKey: queryKeys.pipeline() });
-      queryClient.invalidateQueries({ queryKey: ['followup', 'unviewed-count'] });
-      const count = (res.data as any)?.follow_up_count;
-      showToast(
-        count != null ? `Follow-up #${count} marked sent.` : 'Marked as sent.',
-        'success',
+  const handleSent = (id: string) => {
+    setOpps((prev) => {
+      const target = prev.find((o) => o.id === id);
+      const nextCount = (target?.follow_up_count ?? 0) + 1;
+      showToast(`Follow-up #${nextCount} marked sent.`, 'success');
+      return prev.map((o) =>
+        o.id === id
+          ? { ...o, follow_up_count: nextCount, marked_sent_at: new Date().toISOString(), follow_up_sent_at: null }
+          : o,
       );
-    },
-    onError: () => showToast('Could not mark as sent.', 'error'),
-  });
+    });
+  };
 
-  const dismissMutation = useMutation({
-    mutationFn: (id: string) => followupApi.dismiss(id),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.followups() });
-      queryClient.invalidateQueries({ queryKey: ['followup', 'unviewed-count'] });
-      showToast('Follow-up dismissed.', 'info');
-    },
-    onError: () => showToast('Could not dismiss.', 'error'),
-  });
+  const handleDismiss = (id: string) => {
+    setOpps((prev) => prev.filter((o) => o.id !== id));
+    showToast('Follow-up dismissed.', 'info');
+  };
 
-  const opps = data ?? [];
   const overdueCount = opps.filter((o) => {
     const sent = o.follow_up_sent_at ?? o.marked_sent_at;
     if (!sent) return false;
@@ -231,13 +310,7 @@ export default function FollowupPage() {
         </p>
       )}
 
-      {isLoading ? (
-        <div className="space-y-3">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <Skeleton key={i} className="h-32" rounded="xl" />
-          ))}
-        </div>
-      ) : opps.length === 0 ? (
+      {opps.length === 0 ? (
         <EmptyState
           icon={<Bell size={28} />}
           headline="All caught up!"
@@ -249,10 +322,24 @@ export default function FollowupPage() {
             <FollowupCard
               key={opp.id}
               opp={opp}
-              onSent={(id) => sentMutation.mutate(id)}
-              onDismiss={(id) => dismissMutation.mutate(id)}
+              onSent={handleSent}
+              onDismiss={handleDismiss}
             />
           ))}
+        </div>
+      )}
+
+      {/* Lightweight local toast, replaces useToast hook for this offline demo */}
+      {toast && (
+        <div
+          className={cn(
+            'fixed bottom-5 left-1/2 -translate-x-1/2 px-4 py-2 rounded-lg text-sm font-medium shadow-lg z-50',
+            toast.type === 'success' && 'bg-success text-white',
+            toast.type === 'info'    && 'bg-text-primary text-white',
+            toast.type === 'error'   && 'bg-danger text-white',
+          )}
+        >
+          {toast.message}
         </div>
       )}
     </div>

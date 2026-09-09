@@ -1,54 +1,335 @@
 // ============================================================
-// FILE: src/pages/calendar/CalendarPage.tsx — IMPLEMENTATION PASS
+// FILE: src/pages/calendar/CalendarPage.tsx — DEMO/STATIC BUILD
 //
-// CHANGES:
-//  - Cursor-based pagination (infinite scroll / "load more") replacing
-//    the previous single-page, no-pagination fetch.
-//  - EventCard is now a semantic <button>, keyboard-focusable, with a
-//    coherent aria-label (previously a <div onClick>, unreachable by
-//    keyboard and announced as a plain container to screen readers).
-//  - "Today" anchor button added to date navigation.
-//  - Empty state differentiates "no events ever" vs. "no events in this
-//    date range" (previously identical copy for both cases).
-//  - Search bar added (event_type/outcome/text filters).
-//  - Keyboard shortcuts: n (new event), t (today), / (focus search).
-//  - Dead `view: 'list' | 'month'` state removed — the 'month' branch was
-//    never implemented anywhere; a real month/week grid is deliberately
-//    out of scope for this pass per the product's calendar-as-enrichment-
-//    layer strategy (see IMPLEMENTATION_SUMMARY.md follow-up notes).
+// NOTE: This is a frontend-only demo build for screenshots.
+// All data is hardcoded locally. There are NO network calls,
+// no react-query, no mutations, and no loading/skeleton states.
+// Design and interactive behavior (search/filter, date paging,
+// modal, keyboard shortcuts) are preserved and operate entirely
+// on the local, in-memory dataset below.
 // ============================================================
-import React, { useState, useEffect, useCallback } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
-import { useQuery, useMutation, useInfiniteQuery } from '@tanstack/react-query';
-import { useForm } from 'react-hook-form';
-import { zodResolver } from '@hookform/resolvers/zod';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { format, addDays, subDays, parseISO } from 'date-fns';
-import { calendarApi }  from '@/api/calendar';
-import { queryClient }  from '@/lib/queryClient';
-import { queryKeys }    from '@/lib/queryKeys';
-import { useToast }     from '@/hooks/useToast';
-import { useRealtimeChannel } from '@/hooks/useRealtime';
-import { useCalendarShortcuts } from '@/hooks/useCalendarShortcuts';
-import { useDebounce } from '@/hooks/useDebounce';
-import { createCalendarEventSchema, type CreateCalendarEventSchema } from '@/lib/schemas';
-import { Button }       from '@/components/ui/Button';
-import { Input, Textarea, Select } from '@/components/ui/Input';
-import { Badge }        from '@/components/ui/Badge';
-import { Modal }        from '@/components/ui/Modal';
-import { Skeleton }     from '@/components/ui/Skeleton';
-import { EmptyState, InlineAlert } from '@/components/common/index';
-import type { CalendarEvent } from '@/api/types';
-import { EVENT_TYPE_LABELS, MEETING_OUTCOME_COLORS, MEETING_OUTCOME_LABELS } from '@/lib/constants';
-import { formatShortDate, formatTime, cn } from '@/lib/utils';
 import {
   Calendar, Plus, ChevronLeft, ChevronRight,
   AlertTriangle, CheckSquare, Search as SearchIcon,
 } from 'lucide-react';
 
-// ── Event card — semantic, keyboard-accessible ──────────────────────────
-function EventCard({ event }: { event: CalendarEvent }) {
-  const navigate = useNavigate();
-  const isPast = new Date(event.event_date) < new Date();
+// ── Local UI primitives (kept structurally identical to design-system usage) ──
+function cn(...args: Array<string | false | null | undefined>) {
+  return args.filter(Boolean).join(' ');
+}
+
+function Badge({ children, variant = 'gray', size = 'sm' }: { children: React.ReactNode; variant?: 'gray' | 'green' | 'red'; size?: 'xs' | 'sm' }) {
+  const variants: Record<string, string> = {
+    gray: 'bg-slate-100 text-slate-600',
+    green: 'bg-emerald-50 text-emerald-700',
+    red: 'bg-red-50 text-red-700',
+  };
+  const sizes: Record<string, string> = { xs: 'text-[11px] px-1.5 py-0.5', sm: 'text-xs px-2 py-0.5' };
+  return (
+    <span className={cn('inline-flex items-center rounded-full font-medium', variants[variant], sizes[size])}>
+      {children}
+    </span>
+  );
+}
+
+function Button({
+  children, variant = 'primary', size = 'sm', leftIcon, className, onClick, type = 'button',
+}: {
+  children: React.ReactNode;
+  variant?: 'primary' | 'secondary' | 'outline' | 'ghost';
+  size?: 'xs' | 'sm';
+  leftIcon?: React.ReactNode;
+  className?: string;
+  onClick?: () => void;
+  type?: 'button' | 'submit';
+}) {
+  const variants: Record<string, string> = {
+    primary: 'bg-slate-900 text-white hover:bg-slate-800',
+    secondary: 'bg-slate-100 text-slate-700 hover:bg-slate-200',
+    outline: 'border border-slate-300 text-slate-700 hover:bg-slate-50',
+    ghost: 'text-slate-600 hover:bg-slate-100',
+  };
+  const sizes: Record<string, string> = { xs: 'text-xs px-2 py-1', sm: 'text-sm px-3 py-1.5' };
+  return (
+    <button
+      type={type}
+      onClick={onClick}
+      className={cn(
+        'inline-flex items-center justify-center gap-1.5 rounded-lg font-medium transition-colors',
+        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-900 focus-visible:ring-offset-2',
+        variants[variant], sizes[size], className,
+      )}
+    >
+      {leftIcon}
+      {children}
+    </button>
+  );
+}
+
+function Input({ className, ...props }: React.InputHTMLAttributes<HTMLInputElement> & { className?: string }) {
+  return (
+    <input
+      {...props}
+      className={cn(
+        'w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900',
+        'placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-900/10 focus:border-slate-300',
+        className,
+      )}
+    />
+  );
+}
+
+function Select({ value, onChange, options }: { value: string; onChange: (e: React.ChangeEvent<HTMLSelectElement>) => void; options: { value: string; label: string }[] }) {
+  return (
+    <select
+      value={value}
+      onChange={onChange}
+      className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-slate-900/10"
+    >
+      {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+    </select>
+  );
+}
+
+function Modal({ isOpen, onClose, title, size = 'md', children }: { isOpen: boolean; onClose: () => void; title: string; size?: 'md'; children: React.ReactNode }) {
+  if (!isOpen) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-slate-900/40" onClick={onClose} />
+      <div className="relative bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[85vh] overflow-y-auto p-6">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-base font-semibold text-slate-900">{title}</h2>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// ── Static demo data & constants ─────────────────────────────────────────
+type EventType = 'discovery' | 'demo' | 'follow_up' | 'negotiation' | 'internal';
+type Outcome = 'strong_interest' | 'moving_forward' | 'neutral' | 'stalled' | 'lost';
+
+const EVENT_TYPE_LABELS: Record<EventType, string> = {
+  discovery: 'Discovery call',
+  demo: 'Product demo',
+  follow_up: 'Follow-up',
+  negotiation: 'Negotiation',
+  internal: 'Internal',
+};
+
+const MEETING_OUTCOME_LABELS: Record<Outcome, string> = {
+  strong_interest: 'Strong interest',
+  moving_forward: 'Moving forward',
+  neutral: 'Neutral',
+  stalled: 'Stalled',
+  lost: 'Lost',
+};
+
+const MEETING_OUTCOME_COLORS: Record<Outcome, string> = {
+  strong_interest: '#059669',
+  moving_forward: '#2563eb',
+  neutral: '#64748b',
+  stalled: '#d97706',
+  lost: '#dc2626',
+};
+
+function formatShortDate(iso: string) {
+  return format(parseISO(iso), 'MMM d');
+}
+function formatTime(iso: string) {
+  return format(parseISO(iso), 'h:mm a');
+}
+
+interface CalendarEvent {
+  id: string;
+  title: string;
+  event_type: EventType;
+  event_date: string; // yyyy-MM-dd
+  start_time?: string; // full ISO
+  end_time?: string;
+  attendee_name?: string;
+  prep_generated: boolean;
+  prep_failed?: boolean;
+  debrief_needed?: boolean;
+  outcome?: Outcome;
+  health_score?: number;
+}
+
+const today = new Date();
+const iso = (d: Date) => format(d, 'yyyy-MM-dd');
+const isoTime = (d: Date, h: number, m: number) => {
+  const dt = new Date(d);
+  dt.setHours(h, m, 0, 0);
+  return dt.toISOString();
+};
+
+const DEMO_EVENTS: CalendarEvent[] = [
+  {
+    id: 'evt-1001',
+    title: 'Intro call — Northwind Logistics',
+    event_type: 'discovery',
+    event_date: iso(subDays(today, 6)),
+    start_time: isoTime(subDays(today, 6), 10, 0),
+    end_time: isoTime(subDays(today, 6), 10, 30),
+    attendee_name: 'Priya Anand',
+    prep_generated: true,
+    debrief_needed: false,
+    outcome: 'moving_forward',
+    health_score: 78,
+  },
+  {
+    id: 'evt-1002',
+    title: 'Product walkthrough — Solace Health',
+    event_type: 'demo',
+    event_date: iso(subDays(today, 4)),
+    start_time: isoTime(subDays(today, 4), 14, 0),
+    end_time: isoTime(subDays(today, 4), 14, 45),
+    attendee_name: 'Marcus Delgado',
+    prep_generated: true,
+    debrief_needed: true,
+    outcome: 'strong_interest',
+    health_score: 91,
+  },
+  {
+    id: 'evt-1003',
+    title: 'Pricing follow-up — Kestrel Robotics',
+    event_type: 'follow_up',
+    event_date: iso(subDays(today, 2)),
+    start_time: isoTime(subDays(today, 2), 9, 30),
+    end_time: isoTime(subDays(today, 2), 9, 50),
+    attendee_name: 'Lena Ortiz',
+    prep_generated: true,
+    debrief_needed: true,
+    outcome: 'neutral',
+    health_score: 52,
+  },
+  {
+    id: 'evt-1004',
+    title: 'Weekly pipeline sync',
+    event_type: 'internal',
+    event_date: iso(subDays(today, 1)),
+    start_time: isoTime(subDays(today, 1), 16, 0),
+    end_time: isoTime(subDays(today, 1), 16, 30),
+    prep_generated: true,
+    debrief_needed: false,
+  },
+  {
+    id: 'evt-1005',
+    title: 'Discovery — Bramwell & Ives Legal',
+    event_type: 'discovery',
+    event_date: iso(today),
+    start_time: isoTime(today, 11, 0),
+    end_time: isoTime(today, 11, 30),
+    attendee_name: 'Sophie Bramwell',
+    prep_generated: true,
+    debrief_needed: false,
+    health_score: 64,
+  },
+  {
+    id: 'evt-1006',
+    title: 'Renewal check-in — Atlas Freight Co.',
+    event_type: 'follow_up',
+    event_date: iso(today),
+    start_time: isoTime(today, 15, 15),
+    end_time: isoTime(today, 15, 45),
+    attendee_name: 'Dominic Farrow',
+    prep_generated: false,
+    prep_failed: false,
+    debrief_needed: false,
+  },
+  {
+    id: 'evt-1007',
+    title: 'Contract negotiation — Solace Health',
+    event_type: 'negotiation',
+    event_date: iso(addDays(today, 1)),
+    start_time: isoTime(addDays(today, 1), 13, 0),
+    end_time: isoTime(addDays(today, 1), 13, 30),
+    attendee_name: 'Marcus Delgado',
+    prep_generated: true,
+    debrief_needed: false,
+    health_score: 88,
+  },
+  {
+    id: 'evt-1008',
+    title: 'Demo — Ferro & Stone Manufacturing',
+    event_type: 'demo',
+    event_date: iso(addDays(today, 2)),
+    start_time: isoTime(addDays(today, 2), 10, 30),
+    end_time: isoTime(addDays(today, 2), 11, 15),
+    attendee_name: 'Grace Whitfield',
+    prep_generated: true,
+    debrief_needed: false,
+    health_score: 70,
+  },
+  {
+    id: 'evt-1009',
+    title: 'Discovery call — Vantage Insurance Group',
+    event_type: 'discovery',
+    event_date: iso(addDays(today, 3)),
+    start_time: isoTime(addDays(today, 3), 9, 0),
+    end_time: isoTime(addDays(today, 3), 9, 30),
+    attendee_name: 'Owen Castellano',
+    prep_generated: false,
+    prep_failed: true,
+    debrief_needed: false,
+  },
+  {
+    id: 'evt-1010',
+    title: 'Founder sync — board prep',
+    event_type: 'internal',
+    event_date: iso(addDays(today, 5)),
+    start_time: isoTime(addDays(today, 5), 8, 30),
+    end_time: isoTime(addDays(today, 5), 9, 0),
+    prep_generated: true,
+    debrief_needed: false,
+  },
+  {
+    id: 'evt-1011',
+    title: 'Second demo — Kestrel Robotics',
+    event_type: 'demo',
+    event_date: iso(addDays(today, 8)),
+    start_time: isoTime(addDays(today, 8), 14, 30),
+    end_time: isoTime(addDays(today, 8), 15, 15),
+    attendee_name: 'Lena Ortiz',
+    prep_generated: true,
+    debrief_needed: false,
+    health_score: 60,
+  },
+  {
+    id: 'evt-1012',
+    title: 'Discovery — Meridian Analytics',
+    event_type: 'discovery',
+    event_date: iso(addDays(today, 11)),
+    start_time: isoTime(addDays(today, 11), 11, 30),
+    end_time: isoTime(addDays(today, 11), 12, 0),
+    attendee_name: 'Tobias Reinholt',
+    prep_generated: false,
+    debrief_needed: false,
+  },
+  {
+    id: 'evt-1013',
+    title: 'Follow-up — Northwind Logistics',
+    event_type: 'follow_up',
+    event_date: iso(addDays(today, 14)),
+    start_time: isoTime(addDays(today, 14), 10, 0),
+    end_time: isoTime(addDays(today, 14), 10, 20),
+    attendee_name: 'Priya Anand',
+    prep_generated: false,
+    debrief_needed: false,
+  },
+];
+
+const TOTAL_EVENTS_ALL_TIME = 47;
+const DEBRIEFS_NEEDED = DEMO_EVENTS.filter((e) => e.debrief_needed).length; // 2
+const OVERDUE_COMMITMENTS = 3;
+
+// ── Event card ────────────────────────────────────────────────────────────
+function EventCard({ event, onOpen }: { event: CalendarEvent; onOpen: (id: string) => void }) {
+  const isPast = new Date(event.event_date) < new Date(new Date().toDateString());
 
   const ariaLabel = [
     event.title,
@@ -62,34 +343,34 @@ function EventCard({ event }: { event: CalendarEvent }) {
   return (
     <button
       type="button"
-      onClick={() => navigate(`/calendar/${event.id}`)}
+      onClick={() => onOpen(event.id)}
       aria-label={ariaLabel}
       className={cn(
-        'w-full text-left bg-white border border-surface-border rounded-lg p-4',
-        'hover:shadow-card-md hover:border-slate-300 transition-all',
-        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2',
+        'w-full text-left bg-white border border-slate-200 rounded-lg p-4',
+        'hover:shadow-md hover:border-slate-300 transition-all',
+        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-900 focus-visible:ring-offset-2',
         isPast && !event.debrief_needed && 'opacity-70',
       )}
     >
       <div className="flex items-start justify-between gap-3">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <p className="text-sm font-semibold text-text-primary truncate">{event.title}</p>
+            <p className="text-sm font-semibold text-slate-900 truncate">{event.title}</p>
             {event.debrief_needed && (
-              <span className="w-2 h-2 rounded-full bg-danger shrink-0" aria-hidden="true" />
+              <span className="w-2 h-2 rounded-full bg-red-500 shrink-0" aria-hidden="true" />
             )}
           </div>
           <div className="flex items-center gap-2 mt-1 flex-wrap">
             <Badge variant="gray" size="xs">{EVENT_TYPE_LABELS[event.event_type]}</Badge>
             {event.attendee_name && (
-              <span className="text-xs text-text-muted">with {event.attendee_name}</span>
+              <span className="text-xs text-slate-500">with {event.attendee_name}</span>
             )}
           </div>
         </div>
         <div className="shrink-0 text-right">
-          <p className="text-xs text-text-muted">{formatShortDate(event.event_date)}</p>
+          <p className="text-xs text-slate-500">{formatShortDate(event.event_date)}</p>
           {event.start_time && (
-            <p className="text-xs text-text-muted">{formatTime(event.start_time)}</p>
+            <p className="text-xs text-slate-500">{formatTime(event.start_time)}</p>
           )}
         </div>
       </div>
@@ -100,7 +381,7 @@ function EventCard({ event }: { event: CalendarEvent }) {
         ) : event.prep_generated ? (
           <Badge variant="green" size="xs">✓ Prep ready</Badge>
         ) : (
-          <Badge variant="gray" size="xs"><span className="animate-pulse">Preparing…</span></Badge>
+          <Badge variant="gray" size="xs">Preparing…</Badge>
         )}
         {event.outcome && (
           <span className="text-xs font-medium" style={{ color: MEETING_OUTCOME_COLORS[event.outcome] }}>
@@ -110,7 +391,7 @@ function EventCard({ event }: { event: CalendarEvent }) {
         {event.health_score != null && (
           <span className={cn(
             'text-xs font-mono ml-auto',
-            event.health_score >= 70 ? 'text-success' : event.health_score >= 40 ? 'text-warning' : 'text-danger',
+            event.health_score >= 70 ? 'text-emerald-600' : event.health_score >= 40 ? 'text-amber-600' : 'text-red-600',
           )}>
             ❤️ {event.health_score}
           </span>
@@ -120,29 +401,32 @@ function EventCard({ event }: { event: CalendarEvent }) {
   );
 }
 
-// ── Search bar ───────────────────────────────────────────────────────────
+// ── Search bar (filters the static dataset locally) ──────────────────────
 function CalendarSearchBar({ onResults, onClear }: { onResults: (events: CalendarEvent[]) => void; onClear: () => void }) {
   const [q, setQ] = useState('');
   const [eventType, setEventType] = useState('');
   const [outcome, setOutcome] = useState('');
-  const debouncedQ = useDebounce(q, 300);
-  const isActive = !!debouncedQ || !!eventType || !!outcome;
-
-  const { data } = useQuery({
-    queryKey: ['calendar-search', debouncedQ, eventType, outcome],
-    queryFn: () => calendarApi.search({ q: debouncedQ || undefined, event_type: eventType || undefined, outcome: outcome || undefined, limit: 50 }).then((r) => r.data.events),
-    enabled: isActive,
-  });
+  const isActive = !!q || !!eventType || !!outcome;
 
   useEffect(() => {
-    if (isActive && data) onResults(data);
-    else if (!isActive) onClear();
-  }, [isActive, data]);
+    if (!isActive) {
+      onClear();
+      return;
+    }
+    const filtered = DEMO_EVENTS.filter((e) => {
+      const matchesQ = !q || e.title.toLowerCase().includes(q.toLowerCase()) || e.attendee_name?.toLowerCase().includes(q.toLowerCase());
+      const matchesType = !eventType || e.event_type === eventType;
+      const matchesOutcome = !outcome || e.outcome === outcome;
+      return matchesQ && matchesType && matchesOutcome;
+    });
+    onResults(filtered);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [q, eventType, outcome]);
 
   return (
     <div className="flex flex-wrap gap-2">
       <div className="relative flex-1 min-w-[180px]">
-        <SearchIcon size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-muted" />
+        <SearchIcon size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
         <Input id="calendar-search-input" placeholder="Search meetings…" className="pl-8" value={q} onChange={(e) => setQ(e.target.value)} />
       </div>
       <Select value={eventType} onChange={(e) => setEventType(e.target.value)} options={[{ value: '', label: 'All types' }, ...Object.entries(EVENT_TYPE_LABELS).map(([v, l]) => ({ value: v, label: l }))]} />
@@ -151,92 +435,81 @@ function CalendarSearchBar({ onResults, onClear }: { onResults: (events: Calenda
   );
 }
 
-// ── Create event modal ────────────────────────────────────────
-function CreateEventModal({
-  open, onClose, opportunityId, defaultTimezone,
-}: {
-  open:            boolean;
-  onClose:         () => void;
-  opportunityId?:  string | null;
-  defaultTimezone: string;
-}) {
-  const { showToast } = useToast();
-  const [newEventId,  setNewEventId]  = useState<string | null>(null);
+// ── Create event modal (local state only, no submission side effects) ───
+function CreateEventModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const [title, setTitle] = useState('');
+  const [eventDate, setEventDate] = useState(iso(today));
+  const [eventType, setEventType] = useState<EventType>('discovery');
+  const [startTime, setStartTime] = useState('10:00');
+  const [endTime, setEndTime] = useState('10:30');
+  const [attendeeName, setAttendeeName] = useState('');
+  const [attendeeContext, setAttendeeContext] = useState('');
+  const [notes, setNotes] = useState('');
+  const [createProspect, setCreateProspect] = useState(false);
 
-  const { register, handleSubmit, reset, formState: { errors, isSubmitting } } =
-    useForm<CreateCalendarEventSchema>({ resolver: zodResolver(createCalendarEventSchema) });
-
-  useRealtimeChannel({
-    channelName: `event:${newEventId ?? 'none'}`,
-    table:       'user_events',
-    event:       'UPDATE',
-    filter:      newEventId ? `id=eq.${newEventId}` : undefined,
-    enabled:     !!newEventId,
-    onPayload: (payload) => {
-      const updated = payload.new as { prep_generated?: boolean };
-      if (updated.prep_generated) {
-        queryClient.invalidateQueries({ queryKey: queryKeys.calendarEvent(newEventId!) });
-        queryClient.invalidateQueries({ queryKey: queryKeys.calendar() });
-        showToast('📝 Meeting prep is ready!', 'success');
-      }
-    },
-  });
-
-  // Combines the raw "HH:MM" form field with event_date + the resolved
-  // timezone into a full ISO 8601 datetime BEFORE it reaches the API —
-  // closes the previous bug where a bare "14:30" was sent straight into
-  // a timestamptz column.
-  const combineDateTime = (dateStr: string, timeStr: string | null | undefined, timezone: string): string | null => {
-    if (!timeStr) return null;
-    const local = new Date(`${dateStr}T${timeStr}:00`);
-    // Simple local-offset conversion; swap for date-fns-tz's zonedTimeToUtc
-    // if per-IANA-zone correctness (DST edge cases) matters more than
-    // avoiding a new dependency — flagged as a follow-up in the summary.
-    return local.toISOString();
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    onClose();
   };
-
-  const createMutation = useMutation({
-    mutationFn: (data: CreateCalendarEventSchema) =>
-      calendarApi.create({
-        ...data,
-        start_time: combineDateTime(data.event_date, data.start_time, defaultTimezone),
-        end_time: combineDateTime(data.event_date, data.end_time, defaultTimezone),
-        event_timezone: defaultTimezone,
-        opportunity_id: opportunityId ?? null,
-      }).then((r) => r.data.event),
-    onSuccess: (event) => {
-      setNewEventId(event.id);
-      queryClient.invalidateQueries({ queryKey: queryKeys.calendar() });
-      queryClient.invalidateQueries({ queryKey: queryKeys.calendarAlerts });
-      showToast('Event created! AI is preparing your brief.', 'success');
-      reset();
-      onClose();
-    },
-    onError: () => showToast('Could not create event.', 'error'),
-  });
 
   return (
     <Modal isOpen={open} onClose={onClose} title="New calendar event" size="md">
-      <form onSubmit={handleSubmit((d) => createMutation.mutate(d))} className="space-y-4">
-        <Input label="Title" placeholder="Meeting with Jane" required error={errors.title?.message} {...register('title')} />
-        <div className="grid grid-cols-2 gap-3">
-          <Input label="Date" type="date" required error={errors.event_date?.message} {...register('event_date')} />
-          <Select label="Type" options={Object.entries(EVENT_TYPE_LABELS).map(([v, l]) => ({ value: v, label: l }))} {...register('event_type')} />
+      <form onSubmit={handleSubmit} className="space-y-4">
+        <div>
+          <label className="block text-xs font-medium text-slate-600 mb-1">Title</label>
+          <Input placeholder="Meeting with Jane" required value={title} onChange={(e) => setTitle(e.target.value)} />
         </div>
         <div className="grid grid-cols-2 gap-3">
-          <Input label="Start time" type="time" {...register('start_time')} />
-          <Input label="End time"   type="time" {...register('end_time')}   />
+          <div>
+            <label className="block text-xs font-medium text-slate-600 mb-1">Date</label>
+            <Input type="date" required value={eventDate} onChange={(e) => setEventDate(e.target.value)} />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-slate-600 mb-1">Type</label>
+            <Select value={eventType} onChange={(e) => setEventType(e.target.value as EventType)} options={Object.entries(EVENT_TYPE_LABELS).map(([v, l]) => ({ value: v, label: l }))} />
+          </div>
         </div>
-        <Input label="Attendee name" placeholder="Jane Smith" {...register('attendee_name')} />
-        <Textarea label="Attendee context" placeholder="Who they are, what they do — helps Foundersales prepare better…" rows={3} maxLength={2000} showCount {...register('attendee_context')} />
-        <Textarea label="Notes (optional)" rows={2} {...register('notes')} />
-        <label className="flex items-center gap-2 text-sm text-text-secondary">
-          <input type="checkbox" {...register('create_prospect')} />
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs font-medium text-slate-600 mb-1">Start time</label>
+            <Input type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-slate-600 mb-1">End time</label>
+            <Input type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)} />
+          </div>
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-slate-600 mb-1">Attendee name</label>
+          <Input placeholder="Jane Smith" value={attendeeName} onChange={(e) => setAttendeeName(e.target.value)} />
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-slate-600 mb-1">Attendee context</label>
+          <textarea
+            placeholder="Who they are, what they do — helps Foundersales prepare better…"
+            rows={3}
+            maxLength={2000}
+            value={attendeeContext}
+            onChange={(e) => setAttendeeContext(e.target.value)}
+            className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-900/10"
+          />
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-slate-600 mb-1">Notes (optional)</label>
+          <textarea
+            rows={2}
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-900/10"
+          />
+        </div>
+        <label className="flex items-center gap-2 text-sm text-slate-600">
+          <input type="checkbox" checked={createProspect} onChange={(e) => setCreateProspect(e.target.checked)} />
           Add as a CRM prospect
         </label>
         <div className="flex justify-end gap-2 pt-2">
           <Button variant="secondary" size="sm" type="button" onClick={onClose}>Cancel</Button>
-          <Button size="sm" type="submit" isLoading={createMutation.isPending || isSubmitting}>Create event</Button>
+          <Button size="sm" type="submit">Create event</Button>
         </div>
       </form>
     </Modal>
@@ -245,74 +518,62 @@ function CreateEventModal({
 
 // ── Main page ─────────────────────────────────────────────────
 export default function CalendarPage() {
-  const navigate    = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
-  const [createOpen,setCreateOpen]= useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
   const [searchResults, setSearchResults] = useState<CalendarEvent[] | null>(null);
-  const [fromDate,  setFromDate]  = useState(() => format(subDays(new Date(), 7), 'yyyy-MM-dd'));
-  const [toDate, setToDate] = useState(() => format(addDays(new Date(), 30), 'yyyy-MM-dd'));
-
-  const defaultTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-
-  const opportunityId = searchParams.get('opportunityId');
-  useEffect(() => {
-    if (opportunityId) {
-      setCreateOpen(true);
-      setSearchParams((prev) => { prev.delete('opportunityId'); return prev; }, { replace: true });
-    }
-  }, [opportunityId]);
-
-  // Cursor-based pagination via useInfiniteQuery.
-  const {
-    data: pagesData, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage,
-  } = useInfiniteQuery({
-    queryKey: queryKeys.calendar({ from: fromDate, to: toDate }),
-    queryFn: ({ pageParam }) => calendarApi.list({ from: fromDate, to: toDate, cursor: pageParam, limit: 30 }).then((r) => r.data),
-    initialPageParam: undefined as string | undefined,
-    getNextPageParam: (lastPage) => lastPage.pagination.has_more ? lastPage.pagination.next_cursor ?? undefined : undefined,
-    staleTime: 2 * 60_000,
-  });
-
-  const { data: totalEventsCount } = useQuery({
-    queryKey: ['calendar', 'total-count'],
-    queryFn: () => calendarApi.list({ limit: 1 }).then((r) => r.data.events.length),
-    staleTime: 5 * 60_000,
-  });
-
-  const { data: alertsData } = useQuery({
-    queryKey: queryKeys.calendarAlerts,
-    queryFn:  () => calendarApi.getAlerts().then((r) => r.data),
-    staleTime: 2 * 60_000,
-  });
-
-  const events = searchResults ?? (pagesData?.pages.flatMap((p) => p.events) ?? []);
-  const debriefCount  = alertsData?.debriefs_needed_total ?? alertsData?.debriefs_needed.length ?? 0;
-  const overdueCount  = alertsData?.overdue_commitments.length ?? 0;
+  const [fromDate, setFromDate] = useState(() => format(subDays(today, 7), 'yyyy-MM-dd'));
+  const [toDate, setToDate] = useState(() => format(addDays(today, 30), 'yyyy-MM-dd'));
 
   const goToToday = useCallback(() => {
-    setFromDate(format(subDays(new Date(), 7), 'yyyy-MM-dd'));
-    setToDate(format(addDays(new Date(), 30), 'yyyy-MM-dd'));
+    setFromDate(format(subDays(today, 7), 'yyyy-MM-dd'));
+    setToDate(format(addDays(today, 30), 'yyyy-MM-dd'));
   }, []);
 
   const navigatePrev = () => {
     setFromDate((d) => format(subDays(parseISO(d), 14), 'yyyy-MM-dd'));
-    setToDate((d)   => format(subDays(parseISO(d), 14), 'yyyy-MM-dd'));
+    setToDate((d) => format(subDays(parseISO(d), 14), 'yyyy-MM-dd'));
   };
   const navigateNext = () => {
     setFromDate((d) => format(addDays(parseISO(d), 14), 'yyyy-MM-dd'));
-    setToDate((d)   => format(addDays(parseISO(d), 14), 'yyyy-MM-dd'));
+    setToDate((d) => format(addDays(parseISO(d), 14), 'yyyy-MM-dd'));
   };
 
-  useCalendarShortcuts({
-    onNew: () => setCreateOpen(true),
-    onToday: goToToday,
-    onSearch: () => document.getElementById('calendar-search-input')?.focus(),
-  });
+  // Simple client-side "navigation" stub for the demo build — logs instead
+  // of routing, since react-router is intentionally not wired up here.
+  const openEvent = (eventIdArg: string) => {
+    // eslint-disable-next-line no-console
+    console.log(`Navigate to /calendar/${eventIdArg}`);
+  };
+
+  // Keyboard shortcuts preserved: n (new event), t (today), / (focus search)
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') return;
+      if (e.key === 'n') setCreateOpen(true);
+      else if (e.key === 't') goToToday();
+      else if (e.key === '/') {
+        e.preventDefault();
+        document.getElementById('calendar-search-input')?.focus();
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [goToToday]);
+
+  const eventsInRange = useMemo(() => {
+    return DEMO_EVENTS
+      .filter((e) => e.event_date >= fromDate && e.event_date <= toDate)
+      .sort((a, b) => a.event_date.localeCompare(b.event_date) || (a.start_time ?? '').localeCompare(b.start_time ?? ''));
+  }, [fromDate, toDate]);
+
+  const events = searchResults ?? eventsInRange;
+  const debriefCount = DEBRIEFS_NEEDED;
+  const overdueCount = OVERDUE_COMMITMENTS;
 
   return (
-    <div className="page-container space-y-5">
+    <div className="page-container space-y-5 max-w-3xl mx-auto p-6">
       <div className="flex items-center justify-between gap-4">
-        <h1 className="text-xl font-bold text-text-primary">Calendar</h1>
+        <h1 className="text-xl font-bold text-slate-900">Calendar</h1>
         <Button leftIcon={<Plus size={14} />} onClick={() => setCreateOpen(true)}>Add event</Button>
       </div>
 
@@ -332,49 +593,44 @@ export default function CalendarPage() {
           <p className="text-sm text-red-700 flex-1">
             {overdueCount} overdue commitment{overdueCount > 1 ? 's' : ''}.
           </p>
-          <Button variant="outline" size="xs" onClick={() => navigate('/commitments')}>View</Button>
+          <Button variant="outline" size="xs" onClick={() => console.log('Navigate to /commitments')}>View</Button>
         </div>
       )}
 
       {!searchResults && (
-        <div className="flex items-center justify-between bg-white border border-surface-border rounded-lg px-4 py-2.5">
-          <button onClick={navigatePrev} className="p-2.5 text-text-muted hover:text-text-primary transition-colors" aria-label="Previous period">
+        <div className="flex items-center justify-between bg-white border border-slate-200 rounded-lg px-4 py-2.5">
+          <button onClick={navigatePrev} className="p-2.5 text-slate-500 hover:text-slate-900 transition-colors" aria-label="Previous period">
             <ChevronLeft size={16} />
           </button>
           <div className="flex items-center gap-3">
-            <span className="text-sm font-medium text-text-primary">
+            <span className="text-sm font-medium text-slate-900">
               {format(parseISO(fromDate), 'MMM d')} – {format(parseISO(toDate), 'MMM d, yyyy')}
             </span>
-            <button onClick={goToToday} className="text-xs font-medium text-brand hover:underline">Today</button>
+            <button onClick={goToToday} className="text-xs font-medium text-slate-900 hover:underline">Today</button>
           </div>
-          <button onClick={navigateNext} className="p-2.5 text-text-muted hover:text-text-primary transition-colors" aria-label="Next period">
+          <button onClick={navigateNext} className="p-2.5 text-slate-500 hover:text-slate-900 transition-colors" aria-label="Next period">
             <ChevronRight size={16} />
           </button>
         </div>
       )}
 
-      {isLoading && !searchResults ? (
-        <div className="space-y-3">
-          {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-24 w-full" rounded="lg" />)}
+      {events.length === 0 ? (
+        <div className="flex flex-col items-center justify-center text-center py-14 bg-white border border-slate-200 rounded-lg">
+          <div className="text-slate-300 mb-3"><Calendar size={28} /></div>
+          <p className="text-sm font-semibold text-slate-700">No results found</p>
+          <p className="text-sm text-slate-500 mt-1">Try adjusting your search or filters.</p>
         </div>
-      ) : events.length === 0 ? (
-        totalEventsCount === 0 ? (
-          <EmptyState icon={<Calendar size={28} />} headline="No events scheduled" subline="Add a meeting to get AI-powered prep and coaching." action={{ label: 'Add event', onClick: () => setCreateOpen(true) }} />
-        ) : (
-          <EmptyState icon={<Calendar size={28} />} headline="Nothing in this date range" subline="Try a different range, or jump back to today." action={{ label: 'Back to today', onClick: goToToday }} />
-        )
       ) : (
         <div className="space-y-3">
-          {events.map((event) => <EventCard key={event.id} event={event} />)}
-          {!searchResults && hasNextPage && (
-            <Button variant="secondary" size="sm" className="w-full" isLoading={isFetchingNextPage} onClick={() => fetchNextPage()}>
-              Load more
-            </Button>
-          )}
+          {events.map((event) => <EventCard key={event.id} event={event} onOpen={openEvent} />)}
         </div>
       )}
 
-      <CreateEventModal open={createOpen} onClose={() => setCreateOpen(false)} opportunityId={opportunityId} defaultTimezone={defaultTimezone} />
+      <p className="text-xs text-slate-400 text-center pt-2">
+        {TOTAL_EVENTS_ALL_TIME} total events on your calendar
+      </p>
+
+      <CreateEventModal open={createOpen} onClose={() => setCreateOpen(false)} />
     </div>
   );
 }

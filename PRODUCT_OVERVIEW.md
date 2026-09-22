@@ -1,470 +1,371 @@
-# PRODUCT_OVERVIEW.md
-### The Complete Product Reference for FounderSales
+# Product Overview
 
-> **Purpose:** Not an API reference or an architecture document — the definitive explanation of what FounderSales does, why each feature exists, and how a person actually experiences it, end to end.
+### FounderSales — what it does, how it's built, and where it's headed
 
----
-
-## Table of Contents
-
-1. [Executive Summary](#1-executive-summary)
-2. [Core Concepts](#2-core-concepts)
-3. [Identity, Workspaces & Membership](#3-identity-workspaces--membership)
-4. [Onboarding — Building a Voice Profile](#4-onboarding--building-a-voice-profile)
-5. [Opportunity Discovery](#5-opportunity-discovery)
-6. [Pipeline Management](#6-pipeline-management)
-7. [Feedback & Message Analysis](#7-feedback--message-analysis)
-8. [Practice — AI Roleplay Simulation](#8-practice--ai-roleplay-simulation)
-9. [Calendar Intelligence](#9-calendar-intelligence)
-10. [Prospect Relationship Tracking](#10-prospect-relationship-tracking)
-11. [Growth & Daily Coaching](#11-growth--daily-coaching)
-12. [Insights & Metrics](#12-insights--metrics)
-13. [AI Chat Coach](#13-ai-chat-coach)
-14. [Goals & Commitments](#14-goals--commitments)
-15. [Notifications](#15-notifications)
-16. [File & Voice Uploads](#16-file--voice-uploads)
-17. [Team Features (Manager+)](#17-team-features-manager)
-18. [Business Rules Reference](#18-business-rules-reference)
-19. [Complete User Flows](#19-complete-user-flows)
-20. [Appendix — Glossary](#20-appendix--glossary)
+> This document is a functional tour of the product as it exists today, illustrated with real screenshots from the running app. It's the longest document in this repo on purpose — the goal is to let someone unfamiliar with FounderSales actually see the breadth of it, not read a bullet list of feature names.
 
 ---
 
-## 1. Executive Summary
+## 1. What This Is
 
-Most sales tools assume you already know how to sell and just need somewhere to track it. FounderSales assumes the opposite starting point: a founder, freelancer, or early-stage seller who has a product worth selling but hasn't necessarily done outbound sales before, and needs a system that actively teaches them while it works alongside them — not just a CRM with a chatbot bolted on.
+FounderSales is a sales coaching and outreach platform built around one idea: a founder or early-stage seller who has never done cold outreach before shouldn't have to figure it out with a blank CRM and a chatbot bolted on. Instead, everything the product generates for them — the leads it surfaces, the messages it drafts, the buyer it simulates in practice mode, the meeting prep it writes — should draw from the *same* underlying understanding of who they are and what they're selling.
 
-The product is organized around one idea: everything FounderSales generates for a user — the opportunities it surfaces, the messages it drafts, the buyer it simulates in practice mode, the meeting prep it writes — draws from the *same* underlying representation of who that person is and what they're selling. That representation isn't a form field. It's a synthesized **voice profile**, built during onboarding from a structured interview and continuously informed by what actually happens afterward: which messages get replies, which practice sessions reveal a real weakness, which meetings go well.
+That understanding is a **voice profile**, built during onboarding and continuously informed by what actually happens afterward: which messages get replies, which practice sessions reveal a real weakness, which meetings go well.
 
-The AI layer that does this work is branded to the user as **Clutch** — FounderSales' AI sales companion. Wherever this document says "the AI," it's the same underlying system the product presents to users as Clutch.
+## 2. Product Status
 
-Four pillars make up the product surface:
+**This is an actively developed solo project**, not a finished commercial product. I'm building it with the intent of eventually growing it into a real company once it's further along — but right now it's a working platform with a genuinely deep feature set, some rough edges, and a few areas that are visibly still being wired up (a background job with no handler, a schema-only feature waiting on its routes, no billing system at all). Where something below is still being refined rather than fully finished, I've said so directly instead of glossing over it.
 
-- **Discovery & Outreach** — finding real conversations happening online where FounderSales' product would genuinely help, and drafting a message that doesn't read like a template.
-- **Practice** — a realistic simulated buyer with a persistent personality, hidden motivations, and a private internal monologue, so a user can rehearse a hard conversation before having it for real.
-- **Calendar Intelligence** — meeting prep, prospect research, and post-meeting debriefs that turn a scheduled call into something the user walks into prepared and walks out of with a clear next step.
-- **Coaching** — daily check-ins, growth cards, pattern detection across real outreach history, and a skill-scoring system that blends real-world results with practice performance onto one comparable scale.
+What follows is organized by product domain, in roughly the order a new user would encounter it.
 
 ---
 
-## 2. Core Concepts
+## 3. Getting a New User Started: Onboarding & Workspaces
 
-| Concept | What it is | Real-world analogy |
-|---|---|---|
-| **Workspace** | A tenant boundary — a company, a personal sales practice, or a team. A person can belong to several. | The "org" a person is currently operating inside. |
-| **Workspace Profile** | The AI's synthesized understanding of this person's product, audience, and voice — one per (user, workspace) pair, not one per user globally. | A sales rep's onboarding file, but AI-written and continuously updated. |
-| **Opportunity** | A real, specific place online where someone is expressing the problem this product solves — a Reddit post, a LinkedIn comment, a forum thread. | A qualified lead, sourced rather than manually found. |
-| **Practice Session** | A simulated conversation with an AI-generated buyer persona, scored across multiple skill axes. | A sales roleplay with a coach playing the prospect. |
-| **Prospect** | A real person the user is building a relationship with — distinct from an Opportunity, which is the *source* that may or may not become a tracked Prospect. | A contact in a CRM, but auto-deduplicated. |
-| **Growth Card** | A single, dismissible, prioritized coaching artifact — a tip, a challenge, a detected pattern, a weekly plan. | A personalized "today's focus" notification. |
+### 3.1 Workspaces
 
-**How they connect:**
+A workspace is the tenant boundary — a company, a personal sales practice, or a team. One account can belong to several (your own company, a company you're advising), each with its own voice profile, opportunities, and practice history. New users pick a workspace or create one before doing anything else.
 
-```
-User (one account)
- │
- ├── Workspace A ("My SaaS")
- │     ├── Workspace Profile (voice, ICP, differentiator — specific to this workspace)
- │     ├── Opportunities (discovered, scored, drafted)
- │     ├── Pipeline (opportunities that got a reply → stages → won/lost)
- │     ├── Practice Sessions (scored, contribute to skill_progression)
- │     ├── Prospects (real people, deduplicated, health-scored)
- │     │     └── Calendar Events (meetings, prep, debriefs, voice memos)
- │     ├── Growth Cards (daily tips, weekly plans, detected patterns)
- │     └── Chats (AI coach conversations, meeting-notes mode, growth-card discussions)
- │
- └── Workspace B ("Advising a friend's startup")
-       └── (entirely separate profile, opportunities, practice history)
-```
+<p align="center"><img src="assets/workspaces-picker.png" width="640" alt="Workspace picker showing four workspaces with role and plan badges"></p>
 
----
+Creating a workspace is a two-field form (name + auto-generated URL slug) backed by `POST /api/workspaces`, which runs an atomic Postgres RPC (`create_workspace_for_user`) — workspace row, owning membership, and an empty profile all get created in one transaction, so there's no possible state where a workspace exists with no owner.
 
-## 3. Identity, Workspaces & Membership
+<p align="center"><img src="assets/workspaces-create-modal.png" width="500" alt="Create workspace modal with name and slug fields"></p>
 
-### Why it exists
-A person needs one account but often more than one distinct selling context — their own company and a company they're advising have completely different products, audiences, and voices, and shouldn't share a practice history or a voice profile.
+Switching workspaces invalidates the cached membership context for both the old and new workspace immediately, rather than waiting out the 30-second cache window the rest of the app uses for workspace resolution.
 
-### Sign-up and identity
-Email/password (Supabase Auth) or Google OAuth. Both paths converge on the same profile-creation logic (`create_workspace_for_user` RPC) — a new account gets a workspace, a founding owner membership, and an empty profile created atomically, so there's no possible intermediate state where a user exists with no workspace to operate inside. `has_password` is tracked explicitly via user metadata (not inferred from identity presence), because Supabase auto-creates an email identity for Google-OAuth users too — identity presence alone can't distinguish "this user has a password" from "this user only ever used Google."
+### 3.2 Onboarding
 
-### Roles
-Four ranked roles: `owner > admin > manager > member`. Role checks (`requirePermission(minRole)`) compare rank, not exact match, so a route requiring `'manager'` is satisfied by a manager, admin, or owner. The workspace **owner** is a distinct concept from admin — there's exactly one owner per workspace, it can't be changed by demotion (only by an explicit `transfer_workspace_ownership` RPC call), and an owner cannot remove themselves or leave without transferring ownership first.
+Onboarding is a five-step wizard, and every step is backed by a real endpoint — this isn't a static form:
 
-### Invitations
-Admin-generated, cryptographically random 32-byte tokens (SHA-256 hashed before storage — the plaintext token is never persisted), 7-day expiry, single-use. Accepting an invite creates the membership *and* seeds the new member's workspace profile from the workspace owner's own profile as a starting template (preferred platforms, product description, voice profile) — specifically so a newly-invited team member isn't dropped into onboarding from zero when the workspace already has an established voice.
+1. **Your Info** — a single rich step (name, business name, website, location, product description, target audience, primary goal, role, industry, experience level, business stage, where you find customers, a short bio) submitted to `POST /api/onboarding/basic`.
+2. **Q&A — Round 1 of 3** — three AI-generated questions about the product itself (what customers love most, when people decide to buy, which channel has worked). If the product description from step 1 was too thin, the question generator detects that and swaps one question to ask directly what the person is building, instead of asking a redundant "what does your product do."
+3. **Q&A — Round 2 of 3** — three questions about the customer: the real trigger moment, what makes them hesitate, what finally convinces them. Deliberately asks for concrete situations ("missed deadline," "Friday reporting scramble") rather than abstract psychology.
+4. **Q&A — Round 3 of 3** — three questions about how the person actually sells: how they write to customers, what lands in a demo, what they do when someone goes quiet. Answering this round is what triggers voice-profile synthesis server-side.
+5. **Preview** — a live-generated outreach message plus a compact summary of the synthesized voice profile, rendered from the exact `voice_profile` object the burst-3 answer call returned.
 
-### Multi-workspace switching
-`POST /api/user/switch-workspace` changes `active_workspace_id` and explicitly invalidates cached membership context for both the old and new workspace, so a switch is immediately effective rather than waiting out the 30-second cache window described in `ARCHITECTURE.md` §5.2.
+<p align="center"><img src="assets/onboarding-wizard-step1-your-info.png" width="500" alt="Onboarding step 1: personal info, product description, target audience"></p>
+<p align="center"><img src="assets/onboarding-wizard-step2-qa.png" width="500" alt="Onboarding Q&A round: three AI-generated questions about approach"></p>
+
+Each burst's questions are generated fresh by AI and **persisted** (`workspace_profiles.onboarding_questions`), so a user who leaves mid-onboarding and comes back sees the exact same questions rather than a newly regenerated set.
+
+<p align="center"><img src="assets/onboarding-wizard-step5-preview.png" width="500" alt="Onboarding preview step showing generated voice profile tags and a sample outreach message"></p>
+
+The preview step is deliberate — it's the first tangible proof to a new user that the system learned something specific about them, rather than asking them to trust an abstract profile they can't see in action yet.
+
+Right after onboarding completes, three background jobs fire: memory seeding (extracting 8–10 standalone facts from the onboarding transcript into long-term AI memory), archetype detection (classifying the user as seller/builder/freelancer/creator/professional/learner, which shapes growth-card tone), and an immediate opportunity-discovery refresh, so a new user sees real discovered opportunities within moments rather than waiting for the next scheduled scan.
+
+There's a second, lighter onboarding path too — a post-invite quickstart for users joining an existing team, asking only for a name, experience level, and primary goal (with suggested-goal chips) rather than the full wizard, since an invited member inherits the workspace owner's voice profile as a starting template.
+
+<p align="center"><img src="assets/onboarding-post-signup-quickstart.png" width="500" alt="Lightweight post-signup quickstart for invited team members"></p>
 
 ---
 
-## 4. Onboarding — Building a Voice Profile
+## 4. The Home Dashboard
 
-### Why it exists
-A generic AI sales assistant gives generic advice. Everything downstream in this product — opportunity scoring, message drafting, the practice buyer's reactions, calendar prep — is only as good as the system's understanding of *this specific person's* product, audience, and how they naturally talk. Onboarding is where that understanding gets built.
+The landing screen after login. It's a status board, not a feature in its own right — momentum score with a breakdown by category (outreach/engagement/followups/consistency), 30-day sent/reply-rate/pipeline/win-rate cards, a 30-day activity chart, a growth feed of AI-generated insight/tip/milestone/challenge cards, active goal progress, and quick-start prompts into the AI chat.
 
-### The three-burst interview
+<p align="center"><img src="assets/home-dashboard.png" width="700" alt="Home dashboard with momentum score, activity chart, and growth feed"></p>
 
-Onboarding is not one long form. It's three short, sequential bursts of AI-generated questions, each building on the last:
-
-1. **Basic info** (`POST /api/onboarding/basic`) — business name, product description, target audience, role, industry, experience level, preferred platforms, business stage, primary goal. This is the only structured-input step; everything after it is conversational.
-2. **Burst 1 — The Product** (`generateBurst1Questions`) — three AI-generated questions probing what customers love most, when people actually decide to buy, and which channel has produced the best response so far. If the basic-info product description is too thin or absent, one of the three questions instead asks directly what the person is building — the system detects this and adapts the burst rather than asking a redundant "what does your product do" when it already has an answer.
-3. **Burst 2 — The Customer** (`generateNextBurst`, burst 2) — the real trigger moment that makes someone start looking for a solution, what makes them hesitate, and what finally convinces them to buy. Deliberately asks for concrete situations ("missed deadline," "Friday reporting scramble") rather than abstract psychology, because most users answer real-life questions more specifically than strategic ones.
-4. **Burst 3 — How They Sell** (`generateNextBurst`, burst 3) — how they actually write to customers, what they say in a demo that lands, and what they do when someone goes quiet.
-
-Each burst's questions are generated fresh by AI, informed by every answer given so far, and **persisted** (`workspace_profiles.onboarding_questions`) so a user who leaves mid-onboarding and returns sees the exact same questions again rather than a newly regenerated set.
-
-```mermaid
-flowchart LR
-    A[Basic Info] --> B["Burst 1: Product\n3 AI-generated questions"]
-    B --> C["Burst 2: Customer\n3 AI-generated questions"]
-    C --> D["Burst 3: How They Sell\n3 AI-generated questions"]
-    D --> E["buildVoiceProfile()\nsingle synthesis call"]
-    E --> F["Voice Profile persisted\nto workspace_profiles"]
-    F --> G["3 background jobs fire:\nseed_memory, archetype_detect,\nopportunities_refresh"]
-```
-
-### From answers to voice profile
-
-`buildVoiceProfile()` is the synthesis step — one AI call that takes every raw answer from all three bursts and produces a structured profile with explicit instructions to **upgrade, not repeat** the user's own words: a number stays a number, a direct quote stays a quote, but a vague answer gets sharpened into something specific and usable. The resulting profile includes:
-
-- `unique_value_prop`, `icp_trigger`, `target_customer_description`
-- `main_objection` and a ready-to-use `objection_reframe`
-- `best_proof_point` — formatted to preserve real numbers and names
-- `opening_hooks` — three ready-to-use cold-outreach first lines
-- `channel_tone_map` — a distinct tone description per platform (cold email vs. LinkedIn vs. Reddit vs. X)
-- `story_vault` — 2–3 extractable customer stories with quote, outcome, and which channel each fits
-- `avoid_phrases` — a personalized list of spammy/corporate phrases to never use, seeded with generic defaults ("just checking in," "leverage," "excited to announce") plus anything the model infers this person would find inauthentic
-
-This profile isn't static after onboarding — `PUT /api/onboarding/voice-profile` supports direct manual editing (deep-merged against the existing profile, arrays replaced rather than appended), and `POST /api/onboarding/rebuild-voice-profile` regenerates it from scratch against the original onboarding answers if a user wants a fresh synthesis without redoing the interview.
-
-### What fires immediately after
-
-Three background jobs run right after onboarding completes: memory seeding (extracting 8–10 standalone facts from the onboarding transcript into long-term AI memory, so future coaching conversations can reference specifics without re-reading the whole profile every time), archetype detection (classifying the user as seller/builder/freelancer/creator/professional/learner — this shapes which growth-card content and coaching tone they get), and an immediate opportunity-discovery refresh, so a new user sees real discovered opportunities within moments of finishing onboarding rather than waiting for the next 6-hour scheduled scan.
-
-### The "wow moment"
-
-`POST /api/onboarding/sample-message` generates one live outreach message using the just-built voice profile — grounded in a real discovered opportunity if one already exists, or a realistic hypothetical otherwise — specifically as the first tangible proof to a new user that the system actually learned something about them, rather than asking them to trust an abstract profile they can't yet see in action.
+The momentum score itself is computed deterministically (not by AI) from outreach streak, 30-day sent count, positive reply rate, pipeline stage progress, goal completion percentage, and recent practice activity — see [ARCHITECTURE.md](ARCHITECTURE.md) for the exact formula. The narrative text above it ("Nice work landing two replies...") is AI-generated and changes daily.
 
 ---
 
 ## 5. Opportunity Discovery
 
-### Why it exists
-Cold outreach usually starts with "who do I even message?" — this feature answers that by finding real people, in real conversations, expressing the exact problem the user's product solves, rather than requiring the user to manually search.
+**The problem it answers:** cold outreach usually starts with "who do I even message?" This feature finds real people, in real conversations, expressing the exact problem the user's product solves — rather than making the user manually search.
 
-### How it decides whether to search at all
+### How a search decision gets made
 
-Before spending an Exa search credit, `needsRealTimeSearch()` runs a cheap AI pass judging whether a live search right now has a *good chance* of finding anything relevant — checking profile completeness (a thin product description or missing target audience skips straight to a fallback) and whether the ICP trigger and preferred platforms give the search something specific to look for. If the router says no, or the workspace's daily Exa quota (tiered: 5/50/200 by plan) is exhausted, the system falls back to Groq-generated realistic practice examples instead — clearly labeled as practice, never presented as real leads.
-
-### Discovery and scoring
+Before spending an Exa search credit, `needsRealTimeSearch()` runs a cheap AI pass judging whether a live search right now has a good chance of finding anything — checking profile completeness and whether the ICP trigger and preferred platforms give it something specific to search for. If the router says no, or the workspace's daily Exa quota (tiered: 5/50/200 by plan) is exhausted, the system falls back to Groq-generated realistic practice examples instead — clearly labeled `is_example: true`, never presented as real leads.
 
 ```mermaid
 flowchart TB
-    A[Trigger: onboarding, manual refresh,\nor 6-hour scheduled scan] --> B{needsRealTimeSearch?}
-    B -->|no / quota exceeded| C["Groq fallback:\ngenerate realistic practice examples\n(labeled is_example: true)"]
-    B -->|yes| D["Exa neural search\nper preferred platform,\ndomain-scoped queries"]
-    D --> E["scoreOpportunities()\nfit / timing / intent\neach 0-10, one AI call\nfor the whole batch"]
-    E --> F{"composite score\n>= MIN_COMPOSITE_SCORE?"}
+    A[Trigger: onboarding, manual refresh, or 6-hour scan] --> B{needsRealTimeSearch?}
+    B -->|no / quota exceeded| C[Groq fallback: realistic practice examples]
+    B -->|yes| D[Exa neural search per preferred platform]
+    D --> E[scoreOpportunities — fit/timing/intent, one AI call for the batch]
+    E --> F{composite score ≥ threshold?}
     F -->|no| G[Discarded]
-    F -->|yes| H["generateOutreachMessage()\none message per qualifying\nopportunity, using voice profile\n+ what's historically worked"]
-    H --> I["Post-generation check:\ndoes the message contain any\navoid_phrases? If so, regenerate once."]
-    I --> J[(opportunities table\nupsert, dedup on source_url)]
+    F -->|yes| H[generateOutreachMessage per qualifying opportunity]
+    H --> I[Check against avoid_phrases — regenerate once if violated]
+    I --> J[(opportunities table, upsert, dedup on source_url)]
 ```
 
-Every scored opportunity gets its own drafted outreach message before the user ever sees it — the product's premise is "here's who to message and exactly what to say," not "here's a lead, go write something." Message generation additionally factors in the workspace's own `learned_patterns` (see §7) when available, so drafts lean toward whatever message length and style has actually produced replies for this specific user before.
+Every scored opportunity gets its own drafted outreach message before the user sees it — the premise is "here's who to message and exactly what to say," not "here's a lead, go write something."
 
-### Avoid-phrase enforcement
+<p align="center"><img src="assets/opportunities-list.png" width="700" alt="Opportunities feed with fit/timing/intent scores across LinkedIn, Reddit, Product Hunt, Indie Hackers"></p>
 
-After a message is generated, it's checked against the voice profile's `avoid_phrases` list. If a violation is found, the system regenerates once with an explicit instruction naming exactly which forbidden phrases appeared — a real self-correction step, not just a static instruction hoped to be followed the first time.
+### Opportunity detail and AI intel
 
----
+Opening an opportunity shows the drafted message and a deeper "Clutch AI intel" panel — pain points, talking points, and risks synthesized from a live Exa search plus a second parallel Groq call that turns the same research into personalized outreach specifics (opening line, message suggestion, follow-up hook, tone). This intel result is cached on the opportunity row for 7 days so repeat views don't re-trigger both calls.
 
-## 6. Pipeline Management
+<p align="center"><img src="assets/opportunity-detail-ai-intel.png" width="700" alt="Opportunity detail with pain points, talking points, risks, and a generated outreach message"></p>
 
-### Why it exists
-Once an opportunity gets a reply, it stops being a discovery-feed item and becomes a deal to actually manage — stage, value, next steps, assignment.
+Opportunities can also be logged manually — useful for a lead found outside the automated discovery flow (a conference conversation, a warm intro) — with the same fit/timing/intent self-assessment sliders and an optional AI-suggested follow-up message.
 
-### Stages
-`new → contacted → replied → call_demo → closed_won / closed_lost`. Stage advancement is partly automatic: logging positive feedback on a `new` opportunity auto-advances it to `contacted`; positive feedback on `contacted` advances to `replied`. Every other transition (into `call_demo`, `closed_won`, `closed_lost`) is explicit.
-
-### First-sent timestamping
-The first time a deal enters `contacted` or any later stage, `marked_sent_at` is stamped and — deliberately — **never overwritten** afterward, even if the deal cycles through stages multiple times, because it's meant to answer "when did outreach actually start," not "when did the most recent stage change happen."
-
-### Team assignment
-Manager+ can assign any deal in the workspace to any active member (`PUT /:id/assign`), which fires three independent side effects in parallel: a push notification to the assignee, an email via Resend/SMTP, and a `workspace_activity` log entry — each wrapped so a failure in one (e.g. the assignee has no email on file) never blocks the others or the core assignment write.
-
-### Calendar handoff
-Moving a deal into `call_demo` returns a `calendar_prompt` object in the response — a ready-made suggested event title and type — giving the frontend everything it needs to offer "add this call to your calendar" as a one-tap action rather than a separate manual step.
+<p align="center"><img src="assets/opportunity-add-manual.png" width="600" alt="Manual opportunity entry form with self-assessed fit, timing, and intent scores"></p>
 
 ---
 
-## 7. Feedback & Message Analysis
+## 6. Pipeline
 
-### Why it exists
-This is how the system learns what actually works for a specific person, rather than giving generic advice forever. Every logged outcome on a sent message becomes training signal for future message generation, pattern detection, and skill scoring.
+Once an opportunity gets a reply, it stops being a discovery-feed item and becomes a deal to manage. Stages: `new → contacted → replied → call_demo → closed_won / closed_lost`. Stage advancement is partly automatic — logging positive feedback on a `new` opportunity auto-advances it to `contacted`; positive feedback on `contacted` advances it to `replied`. Every later transition is explicit, dragged or moved by the user.
 
-### Logging an outcome
-`POST /api/feedback` accepts an outcome (positive/negative/pending), an optional note, and optional deal value / scheduled-call info. On a *final* positive or negative outcome, this triggers `increment_performance_stats` (an atomic RPC updating the user's running send/positive/negative counters) and enqueues a `conversation_analysis` background job.
+<p align="center"><img src="assets/pipeline-kanban.png" width="700" alt="Pipeline kanban with Contacted, Replied, Call/Demo, and Closed Won columns"></p>
 
-### What conversation analysis actually scores
-The queued job scores the original sent message across six dimensions (hook, clarity, value proposition, personalization, CTA, tone — each 0–10), with word count and a computed self-referential-word ratio (how much of the message is "I/we/our" versus about the recipient) pre-calculated in code and handed to the model as grounding data rather than left for the model to eyeball. On a negative outcome with a note, the note is additionally classified into an objection type — `ghost`/`price`/`timing`/`trust`/`competition`/`fit` — using regex pattern matching against the note text rather than a second AI call, since short free-text objection notes don't need a full model call to categorize reliably.
-
-### Pending confirmations
-`GET /api/feedback/pending` surfaces opportunities marked `viewed` with no feedback logged yet — a single left-join query (`feedback!left(opportunity_id)` filtered to null matches) rather than the original three-round-trip client-side-filter approach it replaced, which meant this endpoint scaled linearly with lead volume before the fix.
+The first time a deal enters `contacted` or beyond, `marked_sent_at` is stamped and deliberately never overwritten afterward, even if the deal cycles through stages multiple times — it's meant to answer "when did outreach actually start," not "when did the most recent stage change happen."
 
 ---
 
-## 8. Practice — AI Roleplay Simulation
+## 7. Practice — AI Roleplay Simulation
 
-### Why it exists
-The best time to make a mistake with a difficult prospect is in a simulation, not on a real call. Practice mode gives a user a persistent, realistic buyer to rehearse against — one with a private internal state the user can't see in real time but gets to review afterward, which is what makes the post-session debrief genuinely instructive rather than just a score.
+**The problem it answers:** the best time to make a mistake with a difficult prospect is in a simulation, not on a real call.
 
 ### Starting a session
-Six weighted scenario types exist — `interested` (25%), `polite_decline` (25%), `ghost` (20%), `skeptical` (15%), `price_objection` (10%), `not_right_time` (5%) — either randomly selected by weight or explicitly chosen. A full buyer persona is generated per session: name, role, company context, specific pain, what they're skeptical about, current tools/alternatives, decision authority, time pressure, and — critically — **hidden motivations the user has to discover through questioning**, not read off the persona directly. Difficulty auto-calibrates from the user's own history (`beginner` under 5 completed sessions, scaling to `expert` past 30 with a sub-30% reply rate), and an optional pressure modifier (aggressive buyer, decision-maker watching, competitor mentioned, compliance concern) can be layered on for a harder variant of the same scenario.
+
+Six weighted scenario types exist — interested (25%), polite decline (25%), ghost (20%), skeptical (15%), price objection (10%), not-right-time (5%) — randomly selected by weight or explicitly chosen, with four optional pressure modifiers (time crunch, budget freeze, competitor pitch, gatekeeper) that shift the buyer's behavior and apply a one-time stat adjustment to their starting interest/trust. Difficulty auto-calibrates from the user's own session history.
+
+<p align="center"><img src="assets/practice-session-setup.png" width="600" alt="New practice session setup with scenario, difficulty, session goal, and pressure modifier"></p>
 
 ### The conversation
-Every reply — see `ARCHITECTURE.md` §6 for the full mechanism — is one bundled AI call returning the in-character reply, the buyer's real private thought (their internal monologue, which may directly contradict the tone of their actual reply), a running interest/trust/confusion state that shifts message-by-message, an outcome classification once the conversation reaches a natural endpoint, and an inline coaching tip. Ghost scenarios have their own quality-gated exception: a strong enough message can make an otherwise-silent buyer respond (see `ARCHITECTURE.md` §6.3).
 
-### After the session ends
-Completing a session (`POST /:sessionId/complete`) triggers badge evaluation (nine possible badges — first session, first rejection survived, ghostbuster, session-count milestones, price-objection handled, advanced-difficulty reached) and three staggered background jobs: multi-axis skill scoring at 2 seconds, message-level coaching annotations at 5 seconds, and a full reusable playbook at 2 hours (see `ARCHITECTURE.md` §5.2 for why the delays differ).
+A full buyer persona gets generated per session — name, role, specific pain, what they're skeptical about, current tools, and critically, **hidden motivations the user has to discover through questioning**, never read off the persona directly.
 
-### Retry
-`POST /:sessionId/retry` starts a fresh session against the *same scenario type* with a newly-generated buyer persona (not the same buyer replayed) — the point is repeated practice at the same kind of hard conversation, not a literal do-over of one specific exchange. If the retry is scored, `generateRetryComparison()` produces a structured before/after diff against the original attempt.
+<p align="center"><img src="assets/practice-live-session.png" width="700" alt="Live practice session with interest/trust/confusion meters and buyer chat"></p>
+
+Every reply the buyer sends is one bundled AI call (`generatePracticeProspectReplyV3`) returning: the in-character reply text, the buyer's real internal monologue (which can openly contradict the tone of the reply), a running interest/trust/confusion state delta, a conversation-outcome classification once the conversation reaches a natural endpoint, a goal-achieved check against whatever the user set as the session goal, and an inline coaching tip — six pieces of structured output from one model call rather than four separate sequential ones.
+
+A "ghost" scenario means the buyer doesn't reply by default — but a genuinely strong message can revive it. Every message in a ghost scenario is scored 0–100 by a separate quality-gate call on specificity, value clarity, personalization, and ask quality; a score of 40+ breaks the silence for one reply, treating the buyer as temporarily "interested." Below 40, the buyer stays silent and the user gets a coaching hint explaining why.
+
+### After the session
+
+Completing a session triggers badge evaluation and three staggered background jobs: multi-axis skill scoring at 2 seconds, message-level coaching annotations at 5 seconds, and a full reusable playbook at 2 hours (delayed deliberately — a playbook the user might discard immediately isn't worth generating right away).
+
+<p align="center"><img src="assets/practice-session-debrief.png" width="700" alt="Post-session debrief with strength score, what worked/what didn't, skill radar, and message-by-message coaching"></p>
+
+Retrying a scenario starts a **genuinely new session against a newly-generated buyer persona** of the same scenario type — never a literal replay of one specific exchange.
 
 ### The internal monologue as a teaching tool
-Post-session, `internal_monologues` are surfaced separately from the transcript — every moment the buyer said one thing but privately thought something meaningfully different is a specific, reviewable teaching moment ("you asked a good question here, but the buyer's private reaction was still skeptical — here's why"), which is a distinctly different kind of feedback than a plain transcript replay would give.
+
+Post-session, internal monologues are surfaced separately from the transcript in a full session replay — every moment the buyer said one thing but privately thought something meaningfully different becomes a specific, reviewable teaching moment.
+
+<p align="center"><img src="assets/practice-session-replay-monologue.png" width="700" alt="Session replay showing the buyer's hidden thoughts alongside each message"></p>
+<p align="center"><img src="assets/practice-session-replay-monologue-2.png" width="700" alt="Session replay continued, showing the buyer's reasoning shift as trust builds"></p>
+
+### The Practice dashboard
+
+Total sessions, reply rate, streak, average score, a skill-axis radar chart (rapport, discovery, objection handling, closing, clarity, persuasion), earned achievements, and full session history.
+
+<p align="center"><img src="assets/practice-dashboard.png" width="700" alt="Practice dashboard with skill radar, achievements, and session history list"></p>
+
+---
+
+## 8. AI Chat Coach
+
+A general-purpose coaching chat, distinct from practice roleplay — this is for talking through a real situation with the same AI that knows the user's business context.
+
+<p align="center"><img src="assets/chat-list.png" width="700" alt="Chat list with conversations tagged by mode: Prep, Meeting notes, Follow-up coach, general"></p>
+
+Four modes exist under the hood (`general`, `prep`, `followup_coach`, `meeting_notes`), each layering different system-prompt instructions onto the same base coaching persona. Every turn re-injects fresh memory facts, active goals, latest check-in mood, and — if the chat was started from a growth card or an opportunity — that context too, rather than relying on a single copy planted at chat creation that would fall out of the model's context window after a few turns.
+
+<p align="center"><img src="assets/chat-thread.png" width="700" alt="Chat thread showing a pipeline summary table generated from live deal data"></p>
+
+Web search inside chat is an explicit toggle (`force_search`), not automatic — search cost stays predictable and the user controls when the AI reaches outside the conversation. Long chats get a rolling AI-written summary once they exceed the live history window, so context isn't silently truncated or resent in full every turn.
 
 ---
 
 ## 9. Calendar Intelligence
 
-### Why it exists
-A meeting a user walks into unprepared is a wasted opportunity; a meeting they walk out of with no clear next step is nearly as wasted. This feature turns a scheduled calendar event into a system-supported process: research before, structured capture during, and a follow-up drafted immediately after.
+**The problem it answers:** a meeting walked into unprepared is a wasted opportunity; a meeting walked out of with no clear next step is nearly as wasted.
+
+<p align="center"><img src="assets/calendar-list.png" width="700" alt="Calendar list with prep status, health scores, and overdue-commitment banners"></p>
+
+Adding an event captures attendee context and can optionally resolve or create a matching prospect record (deduplicated — see §10).
+
+<p align="center"><img src="assets/calendar-add-event.png" width="450" alt="Add event modal with attendee name, context, and type"></p>
 
 ### Before the meeting
-Creating an event with attendee context automatically triggers two background jobs (see `ARCHITECTURE.md` §7): prospect research (an Exa search synthesized into a structured brief by AI, reused across meetings with the same prospect within a 14-day window) and prep generation — an AI-written brief combining that research with the prospect's full relationship history (past meeting outcomes, open commitments the user owes them, prior detected signals) into an opening line, talking points, the single best question to ask, an anticipated objection with a ready response, and pre/post-meeting message templates. Every one of these AI calls is gated by `services/calendarAiGate.js` before it runs — see `ARCHITECTURE.md` §7.1 for the full decision tree.
 
-### During the meeting
-Two capture methods exist, both feeding the exact same downstream pipeline:
+Creating an event with attendee context triggers two background jobs, each gated by `calendarAiGate.js` before any model gets called: prospect research (an Exa search synthesized into a structured brief, reused across meetings with the same prospect within a 14-day window) and prep generation — an AI-written brief combining that research with the prospect's relationship history into an opening line, talking points, the single best question to ask, an anticipated objection with a ready response, and pre/post-meeting message templates.
 
-- **Meeting-notes chat mode** — a dedicated live chat (`chat_mode: 'meeting_notes'`) where the AI acts as a silent partner: confirming what it captured, asking one sharp follow-up question, or flagging something worth noting (a number, a competitor mention, a buying signal) — never lecturing, never breaking into long responses. Typing "done"/"end" triggers a one-sentence outcome summary and closes the session.
-- **Voice memos** — record in-app or upload an existing audio file; both flow through the identical pipeline (transcription via Groq Whisper, then debrief synthesis) distinguished only by a `source` field. See `ARCHITECTURE.md` §6.3 for the job-chain mechanics.
+<p align="center"><img src="assets/calendar-event-prep-tab.png" width="700" alt="Meeting prep tab with opening line, talking points, and a generated follow-up draft"></p>
 
 ### After the meeting
-A debrief (raw notes plus an outcome rating) triggers, in parallel: a structured AI summary (what worked, what to improve, the single most memorable coachable moment, a recommended next step), a **single merged AI call** extracting both commitments and signals from the same notes text (see `ARCHITECTURE.md` §7.2), a prospect relationship-health recompute, and — immediately, not on a delay — three follow-up message variants (brief, substantive, re-engagement) gated by whether a follow-up is even warranted for this outcome (a `dead` outcome with no clear next step skips follow-up generation entirely rather than manufacturing one).
 
-### Relationship health scoring
-Computed deterministically, not by AI: a base score of 50, adjusted by recency of last contact (+20 within 3 days, −30 past 30 days), the last meeting's logged outcome (+20 hot, −30 dead), recent buying signals (+8 each) and risk signals (−10 each), and overdue founder commitments (−12 each), clamped to 0–100. Using arithmetic here rather than an AI judgment call makes the score consistent and explainable — a user can see exactly why a relationship's health moved.
+A debrief (raw notes plus an outcome rating) triggers, in parallel: a structured AI summary, a single merged AI call extracting both commitments and signals from the same notes text, a relationship-health recompute, and — immediately, not on a delay — three follow-up message variants, unless the outcome gate determines a follow-up isn't warranted.
 
-### Prospect deduplication
-Creating an event with an attendee name resolves against existing prospects through a three-layer match (exact email/LinkedIn identifier → normalized-name exact match → fuzzy trigram similarity flagged for human review, never auto-merged) — see `ARCHITECTURE.md` §6.5 and `BACKGROUND_JOBS.md` §6.5 for the full mechanism and why auto-merging fuzzy matches is deliberately never done.
+<p align="center"><img src="assets/calendar-event-commitments-tab.png" width="700" alt="Commitments tab showing founder and prospect action items with due dates and status"></p>
+<p align="center"><img src="assets/calendar-event-signals-tab.png" width="700" alt="Signals tab showing buying, budget, risk, and competitor-mention signals with confidence scores"></p>
 
----
+Voice memos — recorded in-app or uploaded — flow through the exact same transcription → debrief → extraction pipeline as typed notes, distinguished only by a `source` field.
 
-## 10. Prospect Relationship Tracking
+### Relationship health
 
-### Why it exists
-An opportunity is a discovery-feed item; a prospect is a person the user has an ongoing relationship with, worth tracking independent of any single deal or meeting.
-
-### What's tracked per prospect
-Contact info, a relationship health score (§9), an AI-generated narrative summary of the relationship refreshed on a 7-day staleness cutoff, and a merged timeline combining every meeting, chat, and detected signal associated with them — sorted chronologically regardless of source type.
-
-### Merge candidate review
-`GET /api/prospects/merge-candidates` and its resolve endpoint expose the human-review side of the dedup engine described in §9 — a manager or the user can review a flagged pair, merge (which repoints every foreign-key reference from the duplicate onto the canonical record across four tables before deleting the duplicate) or dismiss it as a false match.
+Computed deterministically, not by AI: a base score of 50, adjusted by recency of last contact, the last meeting's outcome, recent buying/risk signals, and overdue founder commitments, clamped to 0–100. Using arithmetic here instead of an AI judgment call keeps the score consistent and explainable.
 
 ---
 
-## 11. Growth & Daily Coaching
+## 10. Prospects
 
-### Why it exists
-Improvement compounds from small, consistent actions more than from occasional deep dives — this is the layer that keeps a user engaged day-to-day rather than only when they remember to check in.
+A prospect is a real person the user has an ongoing relationship with — distinct from an opportunity, which is the discovery-feed item that may or may not become a tracked prospect.
 
-### The daily check-in loop
-Each afternoon, personalized check-in questions are generated referencing whatever the AI coach most recently discussed with this user, plus goal progress. The user's answers (submitted once per day — a second attempt on the same day returns a 409, not a silent overwrite) get a response that explicitly cross-references mood against goal progress: a low mood day gets warmth and one small easy action rather than a task list; a goal that's meaningfully behind schedule with an approaching deadline gets gently surfaced rather than ignored. A running streak is computed from actual check-in history, not a separate counter that can drift from the real data.
+<p align="center"><img src="assets/prospects-list.png" width="700" alt="Prospects list with status badges and source channel tags"></p>
 
-### Growth cards
-Seven card types (tip, strategy, resource, reflection, challenge, community, insight) generated from six distinct sources: daily generation, weekly plans, check-in responses, detected communication patterns, practice-weakness detection, and one-off goal-note coaching moments. Every card carries a priority and expiry, and the feed (`GET /api/growth/feed`) auto-triggers first-time card generation for a genuinely new user with zero cards rather than showing an empty state.
+Creating a prospect resolves through a three-layer dedup match: exact email/LinkedIn identifier, then normalized-name exact match (both auto-reuse silently), then trigram similarity on genuinely different-looking names (**never auto-merged** — flagged into a review queue instead, because auto-merging two different real people who happen to share a name is a real failure mode, not a hypothetical one).
 
-### Persistent weakness detection
-`checkAndGenerateWeaknessCard()` — triggered after every scored practice session — only fires once a weakness is *persistent*: at least 5 recent sessions, an axis averaging below 55/100 across all of them. A single bad session never triggers a card; a real pattern does. A 14-day cooldown per axis prevents the same weakness from generating a new card before the user's had a fair chance to act on the last one.
+<p align="center"><img src="assets/prospect-detail-overview.png" width="700" alt="Prospect detail with AI-generated relationship summary and talking points"></p>
 
----
+The detail view includes an AI-generated narrative summary of the relationship, refreshed on a 7-day staleness cutoff, and a merged timeline combining every meeting, chat, and detected signal associated with them, sorted chronologically regardless of source type.
 
-## 12. Insights & Metrics
-
-### Why it exists
-Raw activity data is only useful once it's been turned into an answer to a real question — "why am I losing," "is practice actually helping," "what's about to go quiet without me noticing." This is genuinely the deepest analytical surface in the product — over 40 distinct endpoints across two files, grouped here by the question each answers rather than listed exhaustively.
-
-### Diagnostic reports
-- **Why You're Losing Sales** (personal and, manager+, workspace-wide) — an AI-synthesized diagnosis comparing winning vs. losing message statistics, detected patterns, and top objections into one prioritized root cause plus an immediate fix.
-- **Coaching Report** — persistent strengths/weaknesses across recent practice sessions plus a prioritized drill plan, distinct from the always-on weakness-card mechanism in that it's a full on-demand report rather than a triggered nudge.
-- **Executive Report** (owner-only) — a monthly AI-written business review synthesizing team pipeline, skill trends, shared weaknesses, and top objections into a single narrative brief.
-
-### Correlation & trend analysis (deterministic, not AI-judged)
-- **Mood vs. performance** — Pearson correlation between daily mood score and same-day positive reply rate, requiring at least 5 active days before surfacing a result rather than drawing a conclusion from noise.
-- **Practice ROI** — compares positive-outcome rate on weeks with practice sessions against weeks without, requiring 3+ weeks in each bucket.
-- **Buyer-state trajectory** — averages interest/trust scores across every practice session by exchange index, identifying the typical point where interest peaks and where it meaningfully drops off afterward.
-- **Prep effectiveness** — compares real-meeting outcome rates between prepped and unprepped meetings.
-- **Skill persistence** — classifies a recurring weakest-skill signal as genuinely "persistent" (3+ consecutive weeks) versus "noisy" (changes too often to be a real pattern, likely a small-sample artifact) — an explicit honesty check against over-interpreting thin data.
-
-### Forward-looking risk detection
-- **Silent pipeline risk** — flags deals that *look* healthy by stage but carry two or more of: recent negative signals, overdue founder commitments, or a low prospect health score — the "about to go cold without anyone noticing" view.
-- **Lost-reason breakdown** — separates *most frequent* loss reason from *most costly* loss reason (by logged deal value), since they're sometimes different things and only one of them tells you where to actually focus.
-
-### Team-level (manager+/owner)
-Leaderboard (weighted composite of outreach volume, reply quality, deals closed, skill level, goal progress), a coaching queue (flags reps hitting two or more risk signals: no outreach in 7 days, no practice in 7 days, declining skill score, low skill score, low average prospect health), team objection divergence (distinguishes a shared, product-level objection everyone's hitting from an individual rep's specific gap worth a 1:1), and a skill matrix across the whole team.
+<p align="center"><img src="assets/prospect-detail-activity.png" width="700" alt="Prospect activity timeline: added, first outreach, intro call, demo, proposal, last contact"></p>
 
 ---
 
-## 13. AI Chat Coach
+## 11. Goals
 
-### Why it exists
-Not every question fits a structured feature — sometimes a user just needs to talk through a situation with the same AI that knows their business context.
+Free-text goals with an optional numeric target, tracked via atomic progress increments rather than read-modify-write from the client, so concurrent updates from multiple tabs can't silently clobber each other.
 
-### Modes
-Four distinct chat modes, each with its own system-prompt instructions layered onto the same base coaching persona: `general` (open-ended coaching), `prep` (meeting preparation, ends by asking what single outcome they need), `followup_coach` (drafts/critiques a specific follow-up message, explicitly forbidding "just checking in" as an opener), and `meeting_notes` (the live capture mode described in §9).
+<p align="center"><img src="assets/goals.png" width="700" alt="Goals page with active, completed, and paused goals and progress bars"></p>
 
-### Context injection
-Every turn re-injects fresh growth-card or opportunity context (if the chat was started from one) rather than relying on a single copy planted at chat creation and left to fall out of the model's context window after a few turns — a fix for a real gap where opportunity context in particular previously had no re-injection mechanism at all. Long chats get a rolling AI-written summary once they exceed the live history window, folding older messages into `chats.summary` rather than either silently truncating them or re-sending the entire history on every turn (see `BACKGROUND_JOBS.md` §6.4).
-
-### Web search
-An explicit toggle (`force_search`), not automatic — a deliberate product decision to keep search cost predictable and give the user control over when the AI reaches outside the conversation, rather than the system silently deciding a search was warranted.
-
-### Export
-Any chat can be exported as Markdown (`GET /:chatId/export`) — deliberately markdown-only, with PDF generation left to the client's own print-to-PDF rather than the backend maintaining a second rendering pipeline for a format the browser already handles.
+Logging a note against a goal gets an AI coaching response *and* an inferred progress delta in the same call — the user doesn't have to separately narrate progress and then manually update a number.
 
 ---
 
-## 14. Goals & Commitments
+## 12. Follow-ups
 
-### Goals
-Free-text goals with an optional numeric target, tracked via atomic progress increments (`increment_goal_progress` RPC) rather than read-modify-write from the client, so concurrent updates from multiple tabs or devices can't silently clobber each other. Logging a note against a goal gets an AI coaching response *and* an inferred progress delta in the same call — the user doesn't have to separately narrate their progress and then manually update a number.
+A dedicated surface for every deal sitting in `contacted`/`replied`/`call_demo` past a per-stage staleness threshold, each with an AI-generated follow-up message ready to copy or mark sent.
 
-### Commitments (from calendar debriefs)
-Promises extracted from meeting notes — "I'll send the proposal by Friday" — tracked with an owner (founder or prospect), a due date, and status (pending/done/overdue/ignored). These feed directly into calendar prep (a founder's outstanding promise to a specific prospect is surfaced in that prospect's next meeting prep) and the daily debrief digest notification.
+<p align="center"><img src="assets/followups.png" width="700" alt="Follow-ups list with generated messages, days-overdue, and follow-up counts"></p>
 
----
-
-## 15. Notifications
-
-### Delivery
-Push-only via Firebase Cloud Messaging — no in-app notification inbox table separate from the push mechanism itself. Failed/expired tokens are detected from FCM's own error codes and proactively cleared from the user record, so a stale token doesn't silently fail forever.
-
-### What triggers a push
-New opportunities discovered, feedback prompts for stale sent messages, practice replies/ghosts, streak milestones, daily tips, check-in prompts, weekly plans, goal nudges, calendar prep/follow-up/voice-memo-summary readiness, meeting reminders, team assignment, and the combined morning/evening growth-coaching decision tree described in §11. Every notification type respects a per-type user preference toggle (`notification_preferences`), and the morning/evening pushes additionally respect a hard daily cap and minimum gap regardless of how many things are simultaneously true (see `BACKGROUND_JOBS.md` §4.2).
+Capped at 2 follow-ups per opportunity, and won't regenerate within 5 days of the last one — this is meant to nudge, not spam.
 
 ---
 
-## 16. File & Voice Uploads
+## 13. Insights & Metrics
 
-### General file uploads
-Images, PDFs, and documents up to 10MB via Cloudinary, with MIME-type validated both client-side (multer `fileFilter`) and against the actual upload. Chat attachments get type-specific preprocessing before reaching the AI: images are base64-encoded for vision-capable models specifically (not sent as raw binary to every model — see `ARCHITECTURE.md` §4.4), PDFs get text-extracted via `pdf-parse`, and both are capped by an aggregate 16,000-character budget across all attachments in a single message so a large attachment can't silently balloon the prompt sent to the AI.
+This is the deepest analytical surface in the product — deliberately split into two related but distinct areas.
 
-### Voice memos
-Up to 20 minutes, 25MB (matching Groq Whisper's own ceiling), a fixed set of common audio MIME types. Both recording in-app and uploading an existing file converge on the identical pipeline — see §9 and `ARCHITECTURE.md` §6.3 for the transcription → enrichment chain.
+### 13.1 Insights — narrative, AI-synthesized
 
----
+**Patterns** — plain-language, evidence-cited observations pulled from `communication_patterns` (detected weekly by the pattern-detection job), each with a concrete suggested action and a trend direction.
 
-## 17. Team Features (Manager+)
+<p align="center"><img src="assets/insights-patterns.png" width="700" alt="Insights patterns tab with talk-to-listen ratio, deal-stall timing, and referral close-rate observations"></p>
 
-- **Team pipeline view** — every deal in the workspace regardless of owner, gated behind a manager-role check on the same endpoint that serves the individual view.
-- **Team calendar view** — every member's events in a date range with per-member debrief-completion counts.
-- **Assignment** — reassigning deals to any active member with automatic notification.
-- **Workspace activity feed** — a chronological log of consequential events (opportunity created, deal closed, goal reached, member joined, deal assigned, nudge sent), manager-gated since it surfaces every member's individual actions.
-- **Nudges** — a manager can send a direct message-as-push-notification to a specific member, logged to the activity feed.
-- **Analytics** — a 30-day per-member breakdown (opportunities, sent messages, positive outcomes, execution/positive rates, current skill composite and delta, top weakness/strength) across the whole team in one call.
+**Why you're losing** — an AI-synthesized diagnosis comparing loss reasons, with a written analysis connecting the top loss driver to a secondary factor (e.g., "price too high" losses that also lacked a senior stakeholder).
 
----
+<p align="center"><img src="assets/insights-why-losing.png" width="700" alt="Loss-reason bar chart with a written root-cause analysis below it"></p>
 
-## 18. Business Rules Reference
+**Skill trend** — skill scores charted over time by axis, with 30-day deltas per axis.
 
-**Ownership & workspace integrity**
-- A workspace cannot exist without an owning member (atomic creation).
-- The workspace owner cannot be demoted, removed, or leave without first transferring ownership.
-- Only an active member of a workspace matching the caller's own membership can access workspace-scoped resources.
+<p align="center"><img src="assets/insights-skill-trend.png" width="700" alt="Skill trend line chart across discovery, objection handling, negotiation, closing, active listening"></p>
 
-**Practice & scoring**
-- Difficulty auto-calibrates from session history; a brand-new user always starts at `beginner`.
-- A ghost scenario can still be broken by a message scoring 40+ on the quality gate — silence is never unconditional.
-- Completed practice sessions cannot be deleted (they feed skill-progression aggregation); only incomplete sessions can be cancelled.
-- A retry starts a genuinely new session against a new buyer persona of the same scenario type — never a replay of the original conversation.
+### 13.2 Metrics — structured numbers, mostly deterministic
 
-**Calendar & prospects**
-- Prospect research is reused across meetings with the same prospect within 14 days rather than re-run per meeting.
-- Prospect merging is never fully automatic — fuzzy name matches are always flagged for human review, never silently combined.
-- A follow-up is not generated for a `dead` meeting outcome that already has a clear next-step recommendation captured elsewhere.
+A tabbed dashboard: Overview (momentum, sent/response/pipeline/win-rate, 30-day activity), Pipeline (funnel + stage distribution + at-risk/strongest-relationship lists), Skills (a 7-day radar plus a separate practice-specific skill-axis set), Practice (by-scenario breakdown, recommended drills, badges), Analyses (score dimensions, priority improvements, common failure patterns, an objection library with response/practice scores), Calendar (needs-prep/needs-debrief queues, meeting performance), and AI Insights (a handful of AI-generated action nudges).
 
-**Feedback & analysis**
-- Conversation analysis only runs on a *final* logged outcome, not on a `pending` placeholder.
-- The same opportunity's feedback is upserted, not duplicated, on repeated submission (`onConflict: 'opportunity_id'`).
+<p align="center"><img src="assets/metrics-overview.png" width="700" alt="Metrics overview tab with momentum breakdown and pipeline/response stats"></p>
+<p align="center"><img src="assets/metrics-pipeline.png" width="700" alt="Metrics pipeline tab with funnel chart, stage distribution, and at-risk deals"></p>
+<p align="center"><img src="assets/metrics-skills.png" width="700" alt="Metrics skills tab with a 7-day radar and practice skill axes"></p>
+<p align="center"><img src="assets/metrics-practice.png" width="700" alt="Metrics practice tab with by-scenario scores and recommended drills"></p>
+<p align="center"><img src="assets/metrics-analyses.png" width="700" alt="Metrics analyses tab with score dimensions, priority improvements, and an objection library"></p>
+<p align="center"><img src="assets/metrics-calendar.png" width="700" alt="Metrics calendar tab with needs-prep and needs-debrief queues"></p>
+<p align="center"><img src="assets/metrics-ai-insights.png" width="700" alt="Metrics AI insights tab with send-timing and CTA-focused nudges"></p>
 
-**Growth & coaching**
-- A weakness card requires persistence (5+ sessions, sustained sub-55 average) — one bad session is never sufficient.
-- At most 2 pushes per user per UTC day from the growth-coaching system, with a minimum 6-hour gap between them, regardless of how many things are simultaneously true.
-- A daily check-in can only be submitted once per calendar day.
-
-**Rate limits (representative)**
-- Chat messages: 40/minute/user (every message triggers an AI call).
-- Practice messages: 30/minute/user.
-- Calendar AI actions (debrief, prep, research, follow-up): 10 per 5 minutes/user.
-- Opportunity refresh: 5/hour/user (a full discovery pass is expensive).
-- File uploads: 20 per 15 minutes/user.
-- Auth endpoints: 10 per 15 minutes/IP (excluding silent token refresh).
+The distinction that matters: **Insights** is where AI does the synthesis work (pattern detection, loss diagnosis); most of **Metrics** is plain aggregation and arithmetic — correlation coefficients, funnel counts, stage distributions — computed in code, not asked of a model. A few specific analyses under Insights use real statistics rather than AI judgment too: mood-vs-performance uses an actual Pearson correlation (requiring 5+ active days before surfacing a result), practice ROI compares outcome rates across weeks-with-practice vs. weeks-without (requiring 3+ weeks in each bucket), and skill persistence classifies a recurring weakness as genuinely "persistent" only after 3+ consecutive weeks.
 
 ---
 
-## 19. Complete User Flows
+## 14. Team Features (Manager+)
 
-### Flow: A new user's first day
-1. Signs up → atomic workspace + owner membership created.
-2. Completes basic info, then three AI-generated question bursts.
-3. Voice profile synthesized; memory seeded, archetype detected, opportunity discovery immediately refreshed in the background.
-4. Sees a sample outreach message generated from their brand-new profile — the first proof it actually learned something.
-5. Opens the discovery feed: real, scored opportunities with drafted messages already waiting.
-6. Optionally starts a practice session to rehearse before sending anything for real.
+For workspaces with more than one member, a manager-gated layer surfaces team-wide versions of the same data, plus coaching tools that don't exist at the individual level.
 
-### Flow: Sending a message and closing the loop
-1. User copies a drafted message, sends it externally, marks it sent.
-2. Days later, logs feedback (positive/negative + note).
-3. On a final outcome: performance stats increment atomically; a conversation-analysis job scores the actual message across 6 dimensions.
-4. If negative with a note: an objection type is classified and tracked, feeding both the objection-trends view and the weekly pattern-detection job.
-5. If positive on a `new` deal: the pipeline stage auto-advances to `contacted`.
+<p align="center"><img src="assets/team-metrics-overview.png" width="700" alt="Team metrics overview with team skill score, weak spot, and buying signals"></p>
 
-### Flow: A calendar meeting end-to-end
-1. Event created with attendee context → prospect resolved/created via dedup matching → research and prep jobs enqueued.
-2. User opens prep before the call: opening line, talking points, anticipated objection, relationship-history brief.
-3. During the call, either meeting-notes chat mode or a voice memo captures raw notes.
-4. Debrief triggers, in parallel: AI summary, merged commitment+signal extraction, relationship-health recompute, and three follow-up variants ready to send — unless the gate determines follow-up isn't warranted for this outcome.
+**Leaderboard** — ranked by a weighted composite of outreach volume, reply quality, deals closed, and skill level.
 
-### Flow: A practice session and its aftermath
-1. Scenario selected (or randomly weighted), buyer persona generated, difficulty auto-calibrated.
-2. Conversation proceeds turn-by-turn, each reply bundling text + private monologue + shifting state + outcome detection.
-3. Session completed → badges evaluated → three staggered jobs fire (scores at 2s, annotations at 5s, playbook at 2h).
-4. If this session reveals a persistent (not one-off) weakness across the last 5+ sessions, a targeted growth card appears.
-5. The week's blended skill snapshot (real messages + this session, normalized onto one scale) updates on the next Sunday aggregation run.
+<p align="center"><img src="assets/team-leaderboard.png" width="700" alt="Team leaderboard ranked by sent, response rate, and deals won"></p>
+
+**Coaching queue** — flags reps hitting two or more risk signals (no outreach in 7 days, no practice in 7 days, declining skill score, low skill score, low average prospect health), each with a one-tap nudge action.
+
+<p align="center"><img src="assets/team-coaching-queue.png" width="700" alt="Coaching queue with flagged reps and skill/pipeline-health detail"></p>
+<p align="center"><img src="assets/team-coaching-nudge-queue.png" width="700" alt="Coaching queue nudge list for reps with no recent outreach or declining scores"></p>
+
+**Velocity** — week-over-week team skill-score change, comparing the current week's average composite against the prior week's.
+
+<p align="center"><img src="assets/team-velocity.png" width="700" alt="Team velocity showing week-over-week skill score change and active member counts"></p>
+
+**Activity feed** — a chronological log of deals closed, practice sessions completed, check-ins submitted, and goals hit across the whole team.
+
+<p align="center"><img src="assets/team-activity-feed.png" width="700" alt="Team activity feed with closed deals, completed practice sessions, and check-ins"></p>
+
+**Team pipeline, opportunities, and analytics** — every deal and opportunity in the workspace regardless of owner, plus a per-member outreach/response breakdown.
+
+<p align="center"><img src="assets/team-pipeline.png" width="700" alt="Team pipeline kanban showing every rep's deals by stage"></p>
+<p align="center"><img src="assets/team-opportunities.png" width="700" alt="Team opportunities list with per-opportunity assignment"></p>
+<p align="center"><img src="assets/team-analytics.png" width="700" alt="Team analytics with per-member sent, response rate, and demo counts"></p>
+
+**Team insights ("Why losing")** — the same loss-diagnosis pattern as the individual Insights tab, aggregated across the whole workspace, plus a team-wide skill matrix.
+
+<p align="center"><img src="assets/team-insights-why-losing.png" width="700" alt="Team-wide loss reasons with a written summary of the dominant pattern"></p>
 
 ---
 
-## 20. Appendix — Glossary
+## 15. Settings & Account
 
-| Term | Meaning |
+Profile and product-context editing, a dedicated Voice Profile page, AI Memory, Notification preferences, and Team member management all live under Settings.
+
+<p align="center"><img src="assets/settings-profile.png" width="700" alt="Settings profile page with business info and links to voice profile, AI memory, notifications, and team members"></p>
+
+### Voice Profile
+
+A standalone page showing the full synthesized profile — unique value prop, target customer, ICP trigger, main objection and its reframe, best proof point, voice style, outreach persona, and phrases to avoid — with a note on when it was last rebuilt and from how many analyzed calls.
+
+<p align="center"><img src="assets/voice-profile-detail.png" width="700" alt="Voice profile detail page with value prop, ICP trigger, objection reframe, and phrases to avoid"></p>
+
+This isn't static after onboarding — it can be edited directly (deep-merged against the existing profile) or rebuilt from scratch against the original onboarding answers.
+
+### Notifications
+
+Granular per-type push preferences grouped by category (outreach, practice, calendar & meetings, growth & coaching), each independently toggleable.
+
+<p align="center"><img src="assets/settings-notifications.png" width="700" alt="Notification preferences grouped by outreach, practice, calendar, and growth categories"></p>
+
+### Team Members
+
+Role management (owner/admin/manager/member) and pending-invite tracking with expiry and revoke actions.
+
+<p align="center"><img src="assets/settings-team-members.png" width="700" alt="Team members list with roles and pending invites"></p>
+
+---
+
+## 16. AI-Powered Experiences — Summary
+
+Pulling the AI usage across the product into one place, since it's easy to undercount when it's woven through every feature above:
+
+| Feature | What the AI actually does |
 |---|---|
-| **Clutch** | The AI companion's product name, as presented to the user — the same underlying multi-provider AI system this document otherwise refers to as "the AI." |
-| **Workspace** | A tenant boundary a user operates inside; one person can belong to several. |
-| **Workspace Profile** | The synthesized voice/product/audience representation built from onboarding, specific to one (user, workspace) pair. |
-| **Voice Profile** | Shorthand for the same concept — how a specific person's product, differentiator, and communication style get represented to the AI. |
-| **Opportunity** | A discovered, scored, real-world conversation matching the user's product, with a drafted outreach message attached. |
-| **Prospect** | A tracked real person, distinct from the raw opportunity that may have sourced them, deduplicated across mentions. |
-| **Practice Session** | A scored, simulated buyer conversation used to rehearse before a real one. |
-| **Buyer Persona** | The AI-generated character a practice session is played against — name, role, pain, hidden motivations, starting emotional state. |
-| **Internal Monologue** | The buyer persona's private, unfiltered reaction, distinct from and sometimes contradicting their spoken reply — surfaced to the user only after the session. |
-| **Archetype** | A user-level classification (seller/builder/freelancer/creator/professional/learner) shaping coaching tone and content. |
-| **Growth Card** | A single prioritized, dismissible coaching artifact surfaced to the user. |
-| **Signal** | A detected buying/risk/timing/engagement cue extracted from meeting notes or conversation text. |
-| **Commitment** | A promise (by either party) extracted from meeting notes, tracked to completion. |
-| **Skill Progression** | The weekly blended snapshot reconciling real-message scoring and practice-session scoring onto one scale. |
+| Onboarding | Generates 3 rounds of probing questions, synthesizes the full voice profile from the answers, seeds long-term memory, detects a user archetype |
+| Opportunity discovery | Decides whether a live search is worth the cost, scores a batch of results on fit/timing/intent, drafts a personalized message per opportunity, self-corrects against a forbidden-phrase list |
+| Opportunity intel | Runs a live web search plus two parallel synthesis calls (research brief + outreach specifics) |
+| Practice | Generates a full buyer persona with hidden motivations, then one bundled call per turn for reply + private thoughts + state delta + outcome + coaching; a separate quality-gate call for ghost scenarios |
+| Practice debrief | Multi-axis skill scoring, per-message coaching annotations, a reusable playbook, a curriculum targeting the weakest axes |
+| Calendar prep | Combines relationship history, prior signals, outstanding commitments, and live research into one structured brief |
+| Calendar debrief | Structured meeting summary; one merged call extracting both commitments and signals from the same notes |
+| Calendar follow-up | Three follow-up message variants in one call, gated on whether a follow-up is even warranted for the outcome |
+| Chat coach | Full conversational coaching with injected memory, goals, mood, and (if applicable) growth-card or opportunity context; optional live web search |
+| Growth cards | Daily tips, weekly plans, check-in responses — mood-aware, referencing specific recent activity where available |
+| Weekly pattern detection | Compares winning vs. losing message statistics to surface 2–4 named communication patterns |
+| Message analysis | Scores every sent message on 6 dimensions once feedback is logged; regex (not AI) handles objection-type classification from feedback notes |
 
 ---
 
-*This document reflects the FounderSales feature set as currently implemented in the backend, including the one feature (public booking pages) that exists at the schema level but isn't yet wired to any route — see `ARCHITECTURE.md` §13.*
+## 17. Future Direction
+
+Where the product is headed, kept clearly separate from what exists today:
+
+- **Split-process deployment as the default**, not just an available option — the API (`server.js`) and worker (`workers/index.js`) processes already exist and run independently; making that the recommended production topology (rather than the current combined-process default) is a deployment decision, not new code.
+- **Billing and plan enforcement.** Tiers (`free`/`pro`/`enterprise`) already gate a few things (Exa quota, market-intel enrichment), but there's no payment integration or subscription lifecycle behind them yet.
+- **Public booking pages** — the schema (`booking_pages`, `availability_windows`) already exists; routing and UI don't yet.
+- **Resolving the `pattern_insights` gap** — deciding between direct cron registration and the current self-enqueue pattern, then wiring the handler that's already written (`patternInsightsJob.js`) into the scheduled worker.
+- **Eventually, a real company.** The product is being built with that direction in mind, but there's no customer base, revenue, or production-scale deployment behind it today — it's a working platform I'm continuing to build toward that goal.

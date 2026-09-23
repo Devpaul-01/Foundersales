@@ -1,5 +1,7 @@
 # FounderSales
 
+[![Backend Unit Tests](https://github.com/Devpaul-01/Foundersales/actions/workflows/tests.yml/badge.svg)](https://github.com/Devpaul-01/Foundersales/actions/workflows/tests.yml)
+
 An AI sales coaching and outreach platform for founders, freelancers, and early-stage sellers — people who have something worth selling but haven't necessarily done outbound sales before.
 
 This is a monorepo with two apps:
@@ -8,6 +10,8 @@ This is a monorepo with two apps:
 - **`frontend/`** — the client the screenshots in this repo come from. Its source isn't part of this documentation pass; everything here about the frontend is inferred from the backend API surface and the app's own UI.
 
 **Status: actively under development.** This is a solo project I'm building toward a real product, not a finished SaaS. Large parts of the backend are genuinely solid — the AI provider layer, the background job system, the calendar cost-gating — and some parts are still rough edges or half-wired (see [Known Gaps](#known-gaps--in-progress-work) below). I'd rather show you both than pretend otherwise.
+
+**This is planned as a startup, not just a portfolio project.** I'm actively open to collaborating with other developers, and I'm open to a cofounder if the fit is right. If you're interested in either, reach out.
 
 ## Why I Built This
 

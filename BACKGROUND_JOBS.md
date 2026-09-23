@@ -259,11 +259,12 @@ sequenceDiagram
     W->>G: transcribeAudio()
     G-->>W: transcript text
     W->>W: UPDATE voice_memos SET transcription_status='completed'
-    Note over W: transcription now committed<br/>enqueue failure below cannot undo it
+    Note over W: transcription now committed
+    Note over W: enqueue failure below cannot undo it
     W->>Q: enqueue voice_memo_enrich (jobId: voice_enrich_{memoId})
     Q->>W: job fires (separate invocation)
     W->>W: generateMeetingDebrief() + extractCommitmentsAndSignals()
-    W->>W: write debrief, commitments, signals; notify user
+    W->>W: write debrief, commitments, signals, notify user
 ```
 
 The fix moved the enrich-stage enqueue to **after** the `try/catch` block entirely, with a colon-free job ID (`voice_enrich_{memoId}`), and changed its failure handling to a logged warning rather than a rethrow — so a failure to *schedule* enrichment can no longer retroactively mark a transcription that actually succeeded as failed.

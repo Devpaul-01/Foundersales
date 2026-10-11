@@ -143,8 +143,8 @@ Full detail — trigger, idempotency mechanism, retry policy, and the one job cu
 ### Installation
 
 ```bash
-git clone <this-repo>
-cd <this-repo>/backend
+git clone https://github.com/Devpaul-01/Foundersales.git
+cd Foundersales/backend
 npm install
 cp .env.example .env   # if present — otherwise see Configuration below
 ```
@@ -185,4 +185,4 @@ I'd rather list these than have someone find them first.
 
 ## License
 
-MIT
+[MIT](LICENSE)

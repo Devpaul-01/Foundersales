@@ -37,3 +37,6 @@ coverage/
 *.tmp
 *.temp
 .cache/
+
+# Local Redis dumps
+*.rdb

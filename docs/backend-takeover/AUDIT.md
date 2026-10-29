@@ -42,17 +42,77 @@ textually, but that doesn't matter: the whole graph resolves before `validateEnv
 intended clean, per-variable error message. It crashes instead with a raw Supabase SDK stack trace
 (`Error: supabaseUrl is required.`) — proving the validator never got a chance to run first.
 
-**Compounding issue:** `validateEnv.js` checks for `SUPABASE_SERVICE_KEY`, but `supabase.js` actually reads
-`process.env.SUPABASE_SERVICE_ROLE_KEY` — a different variable name. Even if the hoisting issue didn't exist, this
-check would never catch a missing service key, because it's checking the wrong name. If `SUPABASE_URL` happens to be
-set but `SUPABASE_SERVICE_ROLE_KEY` is not, the admin Supabase client is constructed successfully with an `undefined`
-key, and the failure only surfaces later, opaquely, on the first real database call — exactly the "cryptic runtime
-crash deep inside a service call" failure mode this file's own header comment says it exists to prevent.
+**Compounding issue, found twice:** `validateEnv.js` checked for `SUPABASE_SERVICE_KEY`, but `supabase.js` actually
+reads `process.env.SUPABASE_SERVICE_ROLE_KEY` — a different variable name. Separately, it checked for
+`FIREBASE_PROJECT_ID`, but `config/firebase.js` never reads that name at all — it reads `FIREBASE_SERVICE_ACCOUNT`
+(a JSON credential blob). Both are the same bug class: the check exists, but checks the wrong name, so it can never
+catch the variable actually being missing. Even setting aside the hoisting issue, these two checks were dead
+weight — always "passing" or "warning" based on a name nothing else reads. The Firebase instance was caught directly
+in this session's own boot verification: with placeholder env vars (no `FIREBASE_SERVICE_ACCOUNT` set), the app
+logged `[Firebase] Init failed: "undefined" is not valid JSON` — not a crash (firebase.js already catches that
+specific failure gracefully), but exactly the "cryptic runtime failure instead of a clear boot-time message" pattern
+this file exists to prevent, confirming the gap wasn't theoretical.
 
 **Impact:** operators cannot trust a clean startup as a signal that required config is present. A misconfigured
-deploy can appear to boot fine and then fail unpredictably on first traffic.
+deploy can appear to boot fine and then fail unpredictably on first traffic (Supabase) or silently disable a feature
+with no clear diagnostic (Firebase/push notifications).
 
-**Fix status:** planned, milestone 1.
+**Related finding, same session:** verifying this fix surfaced a second, independent bug — `config/bullmq.js` threw
+synchronously at module import time when `REDIS_URL` was unset, which (due to the same import-hoisting mechanism)
+crashed the entire process before `app.listen()`, in all three entry points, even though `validateEnv.js` correctly
+classifies `REDIS_URL` as optional. See 1.1b below.
+
+**Fix status:** fixed. `validateEnv.js` now checks `SUPABASE_SERVICE_ROLE_KEY` and `FIREBASE_SERVICE_ACCOUNT`.
+`src/index.js`, `src/index.server.js`, `src/index.workers.js` added as true entry points — each imports only
+`dotenv` and `validateEnv.js`, calls `validateEnv()`, then dynamically `import()`s the real app/server/workers file,
+so validation is structurally guaranteed to run first (a dynamic `import()` is not hoisted, unlike a static one).
+`app.js`/`server.js`/`workers/index.js` no longer call `validateEnv()` themselves. `package.json`'s `start`/`dev`
+point at `index.js`; `start:api`/`start:worker` scripts added for the split-process entry points.
+**Verified:** booting all three entry points with an empty environment now produces validateEnv's clean,
+per-variable message and exits — reproduced directly, see PROGRESS.md. Booting with placeholder credentials now
+reaches `app.listen()` and the `/health` endpoint responds, confirmed via live `curl`. Regression tests added in
+`src/config/__tests__/validateEnv.test.js`.
+
+---
+
+### 1.1b — HIGH — `config/bullmq.js` threw at import time on missing `REDIS_URL`, crashing all three entry points
+**Location:** `backend/src/config/bullmq.js`
+
+Found while verifying the 1.1 fix. `bullmq.js` threw synchronously at module top-level if `REDIS_URL` was unset.
+Because this file is imported transitively by `jobs/index.js`, which all three entry points (`app.js`, `server.js`,
+`workers/index.js`) import statically, the same ESM-hoisting mechanism from 1.1 meant this throw happened before
+`app.listen()` — crashing the entire process, including `server.js` (the API-only process, which doesn't even call
+`startAllJobs()` and is documented as independent of worker/Redis availability). This directly contradicted
+`validateEnv.js`'s own classification of `REDIS_URL` as optional, and `app.js`'s documented design intent ("Start
+listening FIRST so a Redis/BullMQ outage never takes down the whole API — only background jobs are affected").
+
+**Reproduced:** booting with placeholder Supabase/Groq credentials and no `REDIS_URL` reached `app.listen()` (the
+`🚀 Clutch AI Backend` banner printed) but the process then threw `Error: REDIS_URL env variable is not set` at
+import time on a clean run — confirmed by direct `node` execution before the fix, in a background process with
+explicit exit-code checking (not just a 5-second timeout, which was ambiguous between "still booting" and "silently
+crashed").
+
+**Fix:** `bullmq.js` no longer throws when `REDIS_URL` is absent. It constructs the `IORedis` connection against a
+syntactically-valid loopback placeholder instead, which fails at the connection-attempt level — handled by the
+file's own existing `retryStrategy`/`reconnectOnError` logic exactly as an unreachable *configured* Redis already
+was, rather than crashing at import time. `bullmqConnectionState.status` is `'unconfigured'` in this case so
+downstream code can distinguish "never configured" from "configured but down." Retries are skipped immediately
+(rather than running the normal 10-attempt backoff) when no URL was ever configured, since retrying a known
+placeholder serves no purpose.
+
+**Second-order finding from verifying this fix:** fixing the import-time throw surfaced that `app.js` and
+`server.js` had no process-level `unhandledRejection`/`uncaughtException` handler — `workers/index.js` already had
+one, but the other two didn't. Once the import-time throw was removed, a later async rejection from BullMQ's
+internal Redis-connection handling (occurring outside any call stack this codebase directly controls/awaits) was
+still crashing the process a few seconds after it had already started accepting traffic. Added the same safety net
+`workers/index.js` already used (log and continue — infrastructure hiccups degrade background jobs, not request
+handling) to `app.js` and `server.js` as well, for consistency across all three entry points.
+
+**Verified:** booting with placeholder credentials and no `REDIS_URL` now stays running, serves `/health`
+successfully (confirmed via live `curl`), and logs the previously-fatal rejection as a non-fatal warning instead.
+
+**Fix status:** fixed and verified. Regression test added in `src/config/__tests__/bullmq.test.js` (import does not
+throw; `bullmqConnectionState.status` is `'unconfigured'`).
 
 ---
 

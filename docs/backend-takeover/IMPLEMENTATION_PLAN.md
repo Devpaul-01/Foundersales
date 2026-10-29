@@ -11,16 +11,25 @@ Status: **in progress**. Updated as milestones complete.
 - Prior hardening work in this codebase (rate-limit namespacing, IDOR guards, job idempotency, workspace
   re-verification) is preserved as-is unless a specific new defect is found in it.
 
-## Milestone 1 — Fix startup validation (CRITICAL)
-**Addresses:** AUDIT.md 1.1, 1.2
+## Milestone 1 — Fix startup validation (CRITICAL) — ✅ DONE
+**Addresses:** AUDIT.md 1.1, 1.1b, 1.2
 
-- Fix the ESM import-hoisting problem so `validateEnv()` actually runs, and fails cleanly, before any module that
-  constructs a client from `process.env` executes.
-- Fix the `SUPABASE_SERVICE_KEY` vs `SUPABASE_SERVICE_ROLE_KEY` name mismatch.
-- Add `backend/.env.example` derived from `validateEnv.js`'s actual required/optional lists, so it can't drift from
-  the real source of truth.
-- Verify: clean-env boot now exits with validateEnv's intended message, not a raw SDK stack trace. Full-env boot
-  (with placeholder values) reaches `app.listen`.
+- Fixed the ESM import-hoisting problem: added `src/index.js`, `src/index.server.js`, `src/index.workers.js` as
+  true entry points (dotenv + validateEnv only, then a dynamic `import()` of the real app/server/workers file).
+  `package.json` start scripts updated accordingly.
+- Fixed `SUPABASE_SERVICE_KEY` → `SUPABASE_SERVICE_ROLE_KEY` and `FIREBASE_PROJECT_ID` → `FIREBASE_SERVICE_ACCOUNT`
+  name mismatches in validateEnv.js (found a second instance of the same bug class while fixing the first).
+- Found and fixed a related bug surfaced while verifying the above: `config/bullmq.js` threw at import time when
+  `REDIS_URL` was unset, crashing all three entry points before `app.listen()` — contradicting validateEnv's own
+  "REDIS_URL is optional" classification. Fixed to degrade gracefully instead.
+- Found and fixed a second-order gap surfaced by that fix: `app.js`/`server.js` had no process-level
+  `unhandledRejection`/`uncaughtException` handler (unlike `workers/index.js`, which already had one) — added for
+  consistency.
+- Added `backend/.env.example`, covering not just validateEnv's required/optional lists but every env var actually
+  referenced in the codebase (grepped directly, not assumed).
+- Verified: all three entry points now exit cleanly with validateEnv's message on empty env (reproduced directly).
+  With placeholder credentials, all three reach their running state; `index.js`'s `/health` endpoint confirmed
+  responding via live `curl`. Full test suite (21/21, including 5 new regression tests) passing.
 
 ## Milestone 2 — Expand scoping/ownership review to remaining routers
 **Addresses:** AUDIT.md section 2 (practice.js, chat.js, growth.js, feedback.js)

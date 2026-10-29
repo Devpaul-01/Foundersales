@@ -10,17 +10,23 @@
 // Deliberately does NOT import app.js or anything that constructs an
 // Express app — this process's only job is consuming queues.
 //
-// validateEnv() runs first, same as the combined process and the API
-// process, so a missing required var fails loudly at boot rather than
-// surfacing as a confusing runtime error on the first job that touches
-// the missing config.
+// NOTE: the comment above used to claim validateEnv() ran first, same as
+// the combined/API processes — but it had the identical bug those two had.
+// ES module import hoisting means every module this file statically
+// imports (startAllJobs from jobs/index.js, and transitively every job
+// file that imports config/supabase.js — 49 files repo-wide do) is
+// resolved and executed BEFORE the validateEnv() call below ever ran,
+// regardless of it being textually first. See
+// docs/backend-takeover/AUDIT.md 1.1 for the full explanation and how
+// this was reproduced for app.js/server.js (this file had the same
+// structural bug, not independently verified by a separate repro, but the
+// mechanism is identical). validateEnv() now runs in
+// src/index.workers.js, the true entry point for this process, via a
+// dynamic import() (not hoisted) of this file.
 //
-// Run with: node src/workers/index.js
-// or:       npm run worker   (if wired into package.json)
+// Run with: node src/index.workers.js
 // ============================================================
 import 'dotenv/config';
-import { validateEnv } from '../config/validateEnv.js';
-validateEnv();
 import { initSentry } from '../config/sentry.js';
 initSentry();
 

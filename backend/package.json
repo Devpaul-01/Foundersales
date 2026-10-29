@@ -5,8 +5,10 @@
   "main": "src/app.js",
   "type": "module",
   "scripts": {
-    "start": "node src/app.js",
-    "dev": "nodemon src/app.js",
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "start:api": "node src/index.server.js",
+    "start:worker": "node src/index.workers.js",
     "test": "vitest",
     "test:watch": "vitest --watch",
     "test:coverage": "vitest --coverage",

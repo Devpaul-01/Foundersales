@@ -31,8 +31,18 @@
   `growth.js`, `feedback.js` — every identifier-scoped route in the codebase has now been checked. No IDOR found.
   This is a genuine verification result (recorded in AUDIT.md 1.3), not a sign nothing was done.
 
+- **Milestone 3 complete.** Traced redelivery/retry behavior in `messageQueueWorker.js` and `scheduledWorker.js`.
+  Found and fixed: missing idempotency guards on two live AI-generation job handlers (wasted spend on retry, not a
+  correctness bug). Found and fixed a more serious issue while investigating: `pattern_insights` was enqueued live
+  with zero registered handler, so `runPatternInsightsJob` never actually ran in production despite being fully
+  implemented — added the missing registration, verified with a test proven to fail without the fix (reverted and
+  re-tested to confirm). Investigated `handleGhost`/`handleReply`, which looked like a worse version of the same
+  gap; confirmed dead code, not fixed, flagged for cleanup instead. Committed as 3 separate, reviewable commits.
+
 ### Not yet started
-- Milestones 3–4 (background job idempotency review, migration/schema consistency check).
+- Milestone 4 (migration/schema consistency check).
+- Deferred items tracked in IMPLEMENTATION_PLAN.md: duplicate workspace-switch endpoints, multer upgrade,
+  handleGhost/handleReply dead-code removal.
 
 ### Verified facts, stated plainly
 - Existing test suite: 16/16 passing, confirmed by running `npx vitest run` directly.

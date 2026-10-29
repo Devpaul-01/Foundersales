@@ -973,7 +973,8 @@ CREATE TABLE public.conversation_commitments (
     follow_up_message text,
     completed_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now(),
-    workspace_id uuid NOT NULL
+    workspace_id uuid NOT NULL,
+    event_id uuid
 );
 
 
@@ -992,7 +993,8 @@ CREATE TABLE public.conversation_signals (
     confidence numeric(3,2) DEFAULT 0.7,
     is_active boolean DEFAULT true,
     detected_at timestamp with time zone DEFAULT now(),
-    workspace_id uuid NOT NULL
+    workspace_id uuid NOT NULL,
+    event_id uuid
 );
 
 
@@ -2807,6 +2809,17 @@ CREATE INDEX idx_commits_ws_user ON public.conversation_commitments USING btree 
 
 
 --
+-- Name: idx_conversation_commitments_event_id; Type: INDEX; Schema: public; Owner: -
+--
+-- Added via migrations/add_event_id_to_commitments_signals.sql (2026-08-17),
+-- which was never folded back into this file — see
+-- docs/backend-takeover/AUDIT.md milestone 4.
+--
+
+CREATE INDEX idx_conversation_commitments_event_id ON public.conversation_commitments USING btree (event_id);
+
+
+--
 -- Name: idx_conv_analyses_created_at; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3364,6 +3377,17 @@ CREATE INDEX idx_signals_workspace ON public.conversation_signals USING btree (w
 --
 
 CREATE INDEX idx_signals_ws_user ON public.conversation_signals USING btree (workspace_id, user_id);
+
+
+--
+-- Name: idx_conversation_signals_event_id; Type: INDEX; Schema: public; Owner: -
+--
+-- Added via migrations/add_event_id_to_commitments_signals.sql (2026-08-17),
+-- which was never folded back into this file — see
+-- docs/backend-takeover/AUDIT.md milestone 4.
+--
+
+CREATE INDEX idx_conversation_signals_event_id ON public.conversation_signals USING btree (event_id);
 
 
 --
@@ -4028,6 +4052,19 @@ ALTER TABLE ONLY public.conversation_commitments
 
 
 --
+-- Name: conversation_commitments conversation_commitments_event_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+-- Added via migrations/add_event_id_to_commitments_signals.sql (2026-08-17),
+-- which was never folded back into this file — see
+-- docs/backend-takeover/AUDIT.md milestone 4. routes/calendar.js and
+-- jobs/backgroundWorker.js both query this column live.
+--
+
+ALTER TABLE ONLY public.conversation_commitments
+    ADD CONSTRAINT conversation_commitments_event_id_fkey FOREIGN KEY (event_id) REFERENCES public.user_events(id) ON DELETE SET NULL;
+
+
+--
 -- Name: conversation_signals conversation_signals_prospect_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -4049,6 +4086,19 @@ ALTER TABLE ONLY public.conversation_signals
 
 ALTER TABLE ONLY public.conversation_signals
     ADD CONSTRAINT conversation_signals_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE CASCADE;
+
+
+--
+-- Name: conversation_signals conversation_signals_event_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+-- Added via migrations/add_event_id_to_commitments_signals.sql (2026-08-17),
+-- which was never folded back into this file — see
+-- docs/backend-takeover/AUDIT.md milestone 4. routes/calendar.js and
+-- jobs/backgroundWorker.js both query this column live.
+--
+
+ALTER TABLE ONLY public.conversation_signals
+    ADD CONSTRAINT conversation_signals_event_id_fkey FOREIGN KEY (event_id) REFERENCES public.user_events(id) ON DELETE SET NULL;
 
 
 --

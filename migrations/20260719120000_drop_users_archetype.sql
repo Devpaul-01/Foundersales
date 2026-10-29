@@ -11,13 +11,15 @@
 --
 -- What it changes:
 --   ALTER TABLE users DROP COLUMN archetype;
---   (users.archetype_detected_at, if it exists as a separate column, is left
---   untouched by this migration — confirm whether that column is also
---   users-table-scoped and dead, or was only ever written on workspace_profiles;
---   the application code changes in this refactor only ever wrote
---   archetype_detected_at to workspace_profiles, so if a users-table copy of
---   that column also exists, it was likely already dead before this refactor
---   and can be assessed/dropped separately.)
+--
+--   RESOLVED (docs/backend-takeover/AUDIT.md, milestone 4): the open question
+--   below about archetype_detected_at was checked directly against schema.sql
+--   and the application code. archetype_detected_at only ever existed on
+--   workspace_profiles, never as a separate users-table column — confirmed by
+--   schema.sql (no such column on public.users) and by every application
+--   read/write site (routes/growth.js, jobs/growthIntelligenceScheduler.js),
+--   which all read/write it in the workspace_profiles context only. There was
+--   nothing further to drop; this migration's scope was already complete.
 --
 -- Rollback considerations:
 --   This is a destructive, one-directional change — dropping a column loses

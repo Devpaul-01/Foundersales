@@ -274,6 +274,46 @@ specifically has a registered handler. Verified the test has teeth, not just tha
 the `HANDLERS` fix and confirmed the test fails with the exact "expected function, got undefined" assertion before
 restoring the fix and re-confirming it passes.
 
+### 1.9 — HIGH — `schema.sql` was missing one migration's changes; a fresh setup would break two live calendar query paths
+**Location:** `schema.sql`, `migrations/add_event_id_to_commitments_signals.sql`
+
+README.md explicitly documents `schema.sql` as the single artifact a fresh setup applies to a new Supabase
+project ("The database schema is a single `schema.sql` file applied directly to the target Supabase project").
+This was checked directly rather than assumed: every numbered migration (`002` through `014`) and the other
+unnumbered migration (`20260719120000_drop_users_archetype.sql`) were traced against `schema.sql`'s current table
+definitions and all are correctly reflected — `schema.sql` genuinely is kept current for those.
+
+One migration was the exception: `migrations/add_event_id_to_commitments_signals.sql` (dated 2026-08-17) adds an
+`event_id` column, a foreign key to `user_events(id)`, and an index to both `conversation_commitments` and
+`conversation_signals`. None of this was present in `schema.sql`. Confirmed this isn't a theoretical gap: three
+live query sites — `routes/calendar.js` (two call sites) and `jobs/backgroundWorker.js` — filter both tables with
+`.eq('event_id', ...)`. A database provisioned from `schema.sql` alone, exactly as the README's setup
+instructions describe, would be missing this column entirely, and these three query paths (part of the explicitly
+protected calendar feature) would fail with a Postgres "column does not exist" error.
+
+**Fix:** added the `event_id uuid` column, the two FK constraints (matching the exact formatting and `ON DELETE
+SET NULL` semantics of four other `event_id` FK constraints already in the file, e.g. `chats_event_id_fkey`), and
+the two indexes to `schema.sql`, placed alongside each table's existing constraints/indexes and commented with a
+pointer back to the migration file and this audit entry, so a future reader can see why these particular entries
+look newer/differently-dated than their neighbors.
+
+**Verification limitation, stated plainly:** this sandbox has no `psql`/`pg_dump`/Postgres available to actually
+execute the edited `schema.sql` against a real database and confirm it applies cleanly. The edit was made by
+precise structural matching — the new column, constraint, and index blocks are byte-for-byte consistent in format
+with multiple existing, presumably-already-verified blocks in the same file, and the column/table/constraint names
+were cross-checked character-for-character against the original migration file. This is high confidence, not
+proof. Recommend running this against a real (even local/throwaway) Postgres instance before relying on it for an
+actual fresh deployment, and flagging that explicitly rather than claiming it's confirmed working.
+
+**Secondary, minor finding from the same investigation:** `conversation_commitments` has two functionally
+duplicate indexes on `prospect_id` — `idx_commitments_prospect` and `idx_commits_prospect` — almost certainly from
+two separate migration passes that didn't check for an existing equivalent. Not fixed: removing an index that
+some other part of the system or tooling might reference by name isn't a change to make speculatively without
+checking every reference first, and it's a minor storage/write-overhead cost, not a correctness issue. Noted here
+as a low-priority cleanup candidate.
+
+**Fix status:** fixed, with the verification limitation above stated honestly rather than glossed over.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

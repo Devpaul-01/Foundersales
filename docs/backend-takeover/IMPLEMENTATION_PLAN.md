@@ -57,18 +57,35 @@ Status: **in progress**. Updated as milestones complete.
 - `backgroundWorker.js` itself not re-traced beyond milestone 1's initial read (looked sound there); noted as a
   worthwhile follow-up rather than claimed as fully verified.
 
-## Milestone 4 — Migration/schema consistency check
-**Addresses:** AUDIT.md section 2 (migrations vs schema.sql)
+## Milestone 4 — Migration/schema consistency check — ✅ DONE
+**Addresses:** AUDIT.md 1.9
 
-- Determine whether `schema.sql` is the canonical fresh-install source and `migrations/*.sql` are historical/applied
-  records, or whether a fresh setup needs to run both. Document the actual answer in README/ARCHITECTURE — this is
-  likely a documentation gap, not a code defect, but needs to be confirmed rather than assumed.
+- Confirmed `schema.sql` is the canonical fresh-install source (README.md already documented this) and
+  `migrations/*.sql` are the historical/applied-change record — checked by tracing every migration file against
+  `schema.sql`'s current table definitions, not assumed.
+- Found one real gap: `add_event_id_to_commitments_signals.sql` was never folded into `schema.sql`, and three live
+  query sites (calendar.js x2, backgroundWorker.js) depend on the column it adds. Fixed by adding the column, FK
+  constraints, and indexes to `schema.sql` directly, matching the file's existing formatting precisely.
+- Resolved an open question a prior migration (`20260719120000_drop_users_archetype.sql`) had explicitly flagged
+  for future verification — confirmed `archetype_detected_at` only ever existed on `workspace_profiles`, never as
+  a separate `users` column, so there was nothing further to drop. Updated that migration's own comment to record
+  the resolution.
+- Honest limitation: no Postgres available in this environment to execute the edited `schema.sql` and confirm it
+  applies cleanly. The edit is high-confidence (exact structural match to working examples in the same file) but
+  unverified by actual execution — flagged plainly in AUDIT.md rather than claimed as confirmed.
 
 ## Deferred / needs a decision, not yet scheduled
 
 - **`handleGhost`/`handleReply` dead code in `messageQueueWorker.js`** (AUDIT.md 1.7) — confirmed unreachable
   (`PRACTICE_GHOST`/`PRACTICE_REPLY` job types are never enqueued anywhere live). Candidate for removal, not acted
   on yet — deserves its own deliberate pass rather than folding a deletion into an unrelated idempotency-fix commit.
+  Also already transparently disclosed in README.md's "Known Gaps" section, confirming this investigation reached
+  the same conclusion the project owner already documented.
+- **Duplicate index on `conversation_commitments.prospect_id`** (AUDIT.md 1.9) — `idx_commitments_prospect` and
+  `idx_commits_prospect` cover the same column. Not removed — would need to confirm nothing references either name
+  specifically before dropping one.
+- **Recommend validating the `schema.sql` fix (AUDIT.md 1.9) against a real Postgres instance** before relying on
+  it for an actual fresh deployment — this sandbox has no Postgres available to execute and confirm it.
 
 
 - **Duplicate workspace-switch endpoints** (AUDIT.md 1.4) — see DECISIONS.md. Not removing either without

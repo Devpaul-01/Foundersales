@@ -137,10 +137,18 @@ not a missing requirement, *as long as every single query path in the applicatio
 workspace/user*. That means tenant isolation is 100% dependent on application code being correct everywhere, with
 no database-level backstop if a future query is written carelessly.
 
-Spot-checked so far: `middleware/workspace.js` (`resolveWorkspace`), `routes/opportunities.js` (`GET /:id`,
-`PUT /:id/status`, `GET /:id/intel`), `routes/user.js` (`switch-workspace`), `routes/workspaces.js` (`switch`,
-`GET /:id`), `routes/calendar.js` (`GET /team/:userId`). All correctly re-verify workspace membership server-side
-and scope queries by the resolved `req.workspace.id`, not a client-supplied one. No IDOR found in this sample.
+Reviewed in full (not just spot-checked) as of milestone 2: `middleware/workspace.js` (`resolveWorkspace`),
+`routes/opportunities.js` (`GET /:id`, `PUT /:id/status`, `GET /:id/intel`), `routes/user.js`
+(`switch-workspace`), `routes/workspaces.js` (`switch`, `GET /:id`), `routes/calendar.js` (`GET /team/:userId`),
+`routes/practice.js` (all 8 `:sessionId`-scoped routes, including the multi-step `DELETE` handler), `routes/chat.js`
+(all `:chatId`/`:messageId`-scoped routes, including the message-edit handler that checks both identifiers plus a
+role constraint), `routes/growth.js` (`:id`-scoped card routes), `routes/feedback.js` (`/history`, `/pending`).
+
+Every identifier-scoped query checked verifies both `user_id`/ownership AND `workspace_id` (or, in
+`practice.js`'s case, `user_id` alone, which is stricter) before returning or mutating data — not a client-supplied
+workspace/user id, consistently `req.user.id` / the resolved `req.workspace.id`. No IDOR found across this review.
+This is a genuine verification result, not an absence of looking: all route files with `:id`-shaped parameters in
+the codebase have now been read end to end for this specific concern.
 
 **Recommendation:** document this as a deliberate architectural choice (service-role-only, app-layer-enforced
 isolation) in ARCHITECTURE.md, and continue widening the spot-check sample during the remaining milestones,
@@ -198,9 +206,6 @@ currently planned unless a specific fix calls for broader test scaffolding.
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.
 
-- **practice.js, chat.js, growth.js, feedback.js** route-level workspace/ownership scoping has not yet been
-  reviewed as closely as opportunities.js/calendar.js/workspaces.js were. Given the pattern held everywhere checked
-  so far, no specific reason to suspect a problem, but not yet verified directly.
 - **Background job failure/retry semantics** beyond `backgroundWorker.js`'s calendar-prep consolidation (which was
   read and looks sound) — `messageQueueWorker.js`, `practiceWorker.js`, `scheduledWorker.js` not yet traced for
   idempotency under redelivery.

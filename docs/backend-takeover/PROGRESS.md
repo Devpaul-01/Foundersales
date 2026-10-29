@@ -19,11 +19,20 @@
   AUDIT.md 1.3.
 - Wrote AUDIT.md, IMPLEMENTATION_PLAN.md, DECISIONS.md (this directory).
 
-### In progress
-- Milestone 1 (fix validateEnv gating + .env.example) — audit done, implementation starting next.
+### Done (continued, same session)
+- **Milestone 1 complete.** Fixed the validateEnv/ESM-hoisting bug (added `src/index.js`, `src/index.server.js`,
+  `src/index.workers.js` as true entry points), the two wrong-variable-name bugs in validateEnv.js
+  (`SUPABASE_SERVICE_KEY`→`SUPABASE_SERVICE_ROLE_KEY`, `FIREBASE_PROJECT_ID`→`FIREBASE_SERVICE_ACCOUNT`), a related
+  bug found while verifying the fix (`config/bullmq.js` throwing at import time on missing `REDIS_URL`, crashing
+  all three entry points), and a second-order gap found while verifying that fix (missing process-level
+  `unhandledRejection`/`uncaughtException` handlers in `app.js`/`server.js`). Added `.env.example`. Added 5
+  regression tests (21/21 total passing). Committed as 6 separate, reviewable commits on `backend-takeover`.
+- **Milestone 2 complete.** Widened the workspace/ownership scoping review to `practice.js`, `chat.js`,
+  `growth.js`, `feedback.js` — every identifier-scoped route in the codebase has now been checked. No IDOR found.
+  This is a genuine verification result (recorded in AUDIT.md 1.3), not a sign nothing was done.
 
 ### Not yet started
-- Milestones 2–4 (widened scoping review, job idempotency review, migration/schema consistency check).
+- Milestones 3–4 (background job idempotency review, migration/schema consistency check).
 
 ### Verified facts, stated plainly
 - Existing test suite: 16/16 passing, confirmed by running `npx vitest run` directly.

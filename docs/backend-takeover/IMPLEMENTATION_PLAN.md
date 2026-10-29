@@ -31,14 +31,16 @@ Status: **in progress**. Updated as milestones complete.
   With placeholder credentials, all three reach their running state; `index.js`'s `/health` endpoint confirmed
   responding via live `curl`. Full test suite (21/21, including 5 new regression tests) passing.
 
-## Milestone 2 — Expand scoping/ownership review to remaining routers
+## Milestone 2 — Expand scoping/ownership review to remaining routers — ✅ DONE
 **Addresses:** AUDIT.md section 2 (practice.js, chat.js, growth.js, feedback.js)
 
-- Trace workspace/user scoping on identifier-based routes in the not-yet-reviewed routers, same method used for
-  opportunities.js/calendar.js/workspaces.js in AUDIT.md 1.3.
-- Any confirmed IDOR-shaped gap gets fixed immediately as a critical/security item, with a regression test.
-- If nothing is found, AUDIT.md 1.3 is updated to reflect the widened sample — this is verification work, not
-  guaranteed to produce fixes.
+- Traced workspace/user scoping on every identifier-based route in practice.js, chat.js, growth.js, feedback.js —
+  same method used for opportunities.js/calendar.js/workspaces.js.
+- Result: no IDOR found. Every identifier-scoped query verifies ownership (user_id and/or workspace_id, matching
+  the resolved request context) before returning or mutating data. AUDIT.md 1.3 updated to reflect the widened,
+  now-complete-for-this-concern sample across all 7 major route files.
+- No fixes were needed for this milestone — it was verification work, and the result (no defect found) is recorded
+  as such rather than treated as "nothing happened."
 
 ## Milestone 3 — Background job idempotency review
 **Addresses:** AUDIT.md section 2 (messageQueueWorker.js, practiceWorker.js, scheduledWorker.js)

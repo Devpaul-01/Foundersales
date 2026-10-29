@@ -39,10 +39,22 @@
   re-tested to confirm). Investigated `handleGhost`/`handleReply`, which looked like a worse version of the same
   gap; confirmed dead code, not fixed, flagged for cleanup instead. Committed as 3 separate, reviewable commits.
 
-### Not yet started
-- Milestone 4 (migration/schema consistency check).
-- Deferred items tracked in IMPLEMENTATION_PLAN.md: duplicate workspace-switch endpoints, multer upgrade,
-  handleGhost/handleReply dead-code removal.
+- **Milestone 4 complete.** Traced every migration file in `migrations/` against `schema.sql`'s current table
+  definitions to check README.md's documented claim that `schema.sql` alone is the fresh-setup artifact. Confirmed
+  true for all but one migration (`add_event_id_to_commitments_signals.sql`, 2026-08-17), which was never folded
+  back in — a real, live gap, since three query sites in the protected calendar feature depend on the column it
+  adds. Fixed by adding the column/constraints/indexes to `schema.sql` directly, matching the file's existing
+  format precisely. Also resolved an open question a prior migration had explicitly flagged for future
+  verification. Honest limitation recorded: no Postgres available in this sandbox to actually execute and confirm
+  the schema.sql edit applies cleanly — high structural confidence, not proof. Committed as 2 reviewable commits.
+
+### Not yet started / deferred
+- Items tracked in IMPLEMENTATION_PLAN.md's "Deferred" section: duplicate workspace-switch endpoints
+  (user.js/workspaces.js), multer dependency upgrade, handleGhost/handleReply dead-code removal, duplicate
+  prospect_id index on conversation_commitments, validating the schema.sql fix against a real Postgres instance.
+- The originally-scoped milestones 1-4 are now all complete. Remaining work, if continued, would be a fresh pass
+  to decide what's next (the deferred items above, or a new audit pass over areas not yet covered this session —
+  e.g. a closer idempotency trace of backgroundWorker.js, or review of files/routers not touched in milestones 1-4).
 
 ### Verified facts, stated plainly
 - Existing test suite: 16/16 passing, confirmed by running `npx vitest run` directly.

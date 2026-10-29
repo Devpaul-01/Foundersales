@@ -345,12 +345,28 @@ const handleSkillScores = async ({ session_id, user_id }, jobId) => {
     .select('id, role, content, created_at').eq('chat_id', session.chat_id)
     .order('created_at', { ascending: true });
 
-  logAIRequest('generateMultiAxisScores', { userId: user_id, sessionId: session_id, messageCount: messages?.length });
-  const skillScores = await groqService.generateMultiAxisScores(user, messages || [], session.buyer_profile || {});
+  // Idempotency guard: this job has `attempts: 3` (practiceWorker.js), so a
+  // transient failure after the AI call but before/during the DB write (or
+  // a worker crash/restart mid-job) causes BullMQ to redeliver it. Without
+  // this check, redelivery re-ran the Groq call from scratch every time —
+  // same end result, but real duplicate AI cost on every retry. Matches
+  // the guard handlePlaybook already uses for the same reason, just not
+  // previously applied here. skill_scores is only ever set by this
+  // handler, so its presence reliably means a prior attempt already
+  // completed the expensive part.
+  let skillScores = session.skill_scores;
+  if (skillScores) {
+    log('Skill Scores Already Present — Skipping Regeneration', { jobId, sessionId: session_id });
+  } else {
+    logAIRequest('generateMultiAxisScores', { userId: user_id, sessionId: session_id, messageCount: messages?.length });
+    skillScores = await groqService.generateMultiAxisScores(user, messages || [], session.buyer_profile || {});
+    await supabaseAdmin.from('practice_sessions').update({ skill_scores: skillScores }).eq('id', session_id);
+  }
 
-  await supabaseAdmin.from('practice_sessions').update({ skill_scores: skillScores }).eq('id', session_id);
-
-  if (session.retry_of_session_id) {
+  // Same idempotency reasoning as skillScores above, applied to this
+  // separate AI call: skip only if a prior attempt already saved a
+  // comparison for this session.
+  if (session.retry_of_session_id && !session.retry_comparison) {
     const { data: origSession } = await supabaseAdmin.from('practice_sessions')
       .select('*').eq('id', session.retry_of_session_id).single();
     if (origSession) {
@@ -389,6 +405,17 @@ const handleCoachingAnnotations = async ({ session_id, user_id }, jobId) => {
 
   if (!session || !user) {
     log('Annotations Aborted', { jobId, sessionId: session_id, userId: user_id });
+    return;
+  }
+
+  // Idempotency guard: same reasoning as handleSkillScores above — this
+  // job has attempts: 3 and redelivery previously re-ran the Groq call
+  // from scratch every time. coaching_annotations is only ever set by
+  // this handler, so a non-empty array reliably means a prior attempt
+  // already completed.
+  if (Array.isArray(session.coaching_annotations) && session.coaching_annotations.length > 0) {
+    log('Coaching Annotations Already Present — Skipping Regeneration', { jobId, sessionId: session_id });
+    console.log(`[Practice:Queue] Annotations already saved for ${session_id} — skipping`);
     return;
   }
 

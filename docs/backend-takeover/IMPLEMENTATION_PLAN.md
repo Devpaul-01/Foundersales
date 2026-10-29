@@ -42,12 +42,20 @@ Status: **in progress**. Updated as milestones complete.
 - No fixes were needed for this milestone — it was verification work, and the result (no defect found) is recorded
   as such rather than treated as "nothing happened."
 
-## Milestone 3 — Background job idempotency review
-**Addresses:** AUDIT.md section 2 (messageQueueWorker.js, practiceWorker.js, scheduledWorker.js)
+## Milestone 3 — Background job idempotency review — ✅ DONE
+**Addresses:** AUDIT.md 1.7, 1.8
 
-- Trace redelivery/retry behavior the way `backgroundWorker.js`'s CALENDAR_PREP_GENERATE consolidation was already
-  traced. Confirm whether the same "DB-state re-check as a second idempotency layer" pattern is applied consistently
-  or only where it happened to be needed historically.
+- Traced redelivery/retry behavior across `messageQueueWorker.js` and `scheduledWorker.js`'s dispatch layer.
+- Found and fixed: `handleSkillScores`/`handleCoachingAnnotations` re-ran expensive Groq calls on every BullMQ
+  retry with no guard, unlike their neighbor `handlePlaybook`. Added matching guards.
+- Found and fixed a more serious issue while investigating: `pattern_insights` was enqueued live but had zero
+  registered handler in `scheduledWorker.js` — every invocation failed silently in production. Added the missing
+  `HANDLERS` entry; verified the fix with a test that fails without it (proven by reverting and re-testing).
+- Found, investigated, and downgraded: `handleGhost`/`handleReply` looked like a worse version of the same
+  idempotency gap (insert + notify, not just update) but are confirmed dead code, never enqueued live. Flagged for
+  a cleanup pass rather than fixed, since there's no live bug to fix.
+- `backgroundWorker.js` itself not re-traced beyond milestone 1's initial read (looked sound there); noted as a
+  worthwhile follow-up rather than claimed as fully verified.
 
 ## Milestone 4 — Migration/schema consistency check
 **Addresses:** AUDIT.md section 2 (migrations vs schema.sql)
@@ -57,6 +65,11 @@ Status: **in progress**. Updated as milestones complete.
   likely a documentation gap, not a code defect, but needs to be confirmed rather than assumed.
 
 ## Deferred / needs a decision, not yet scheduled
+
+- **`handleGhost`/`handleReply` dead code in `messageQueueWorker.js`** (AUDIT.md 1.7) — confirmed unreachable
+  (`PRACTICE_GHOST`/`PRACTICE_REPLY` job types are never enqueued anywhere live). Candidate for removal, not acted
+  on yet — deserves its own deliberate pass rather than folding a deletion into an unrelated idempotency-fix commit.
+
 
 - **Duplicate workspace-switch endpoints** (AUDIT.md 1.4) — see DECISIONS.md. Not removing either without
   confirming the frontend's actual usage, since frontend changes are out of scope and I can't verify which one（s）

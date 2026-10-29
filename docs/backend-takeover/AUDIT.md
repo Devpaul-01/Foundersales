@@ -202,13 +202,89 @@ All 16 existing tests pass (`npx vitest run`, verified).
 guidance to test what's touched rather than pad test count. A dedicated "raise coverage on X" milestone is not
 currently planned unless a specific fix calls for broader test scaffolding.
 
+### 1.7 — MEDIUM — Two live job handlers re-ran expensive AI calls on BullMQ redelivery
+**Location:** `backend/src/jobs/messageQueueWorker.js` — `handleSkillScores`, `handleCoachingAnnotations`
+
+Both jobs are enqueued live (confirmed: `routes/practice.js` enqueues `PRACTICE_SKILL_SCORES` and
+`PRACTICE_COACHING_ANNOTATIONS` with `attempts: 3` + exponential backoff, via `practiceWorker.js`). Neither had a
+guard against redelivery: a transient failure after the Groq call but before/during the DB write, or a worker
+crash/restart mid-job, causes BullMQ to retry the whole job, including the expensive AI generation call, from
+scratch — even though the correct end state (an `update()` with fresh results) would be identical to not retrying
+at all. `handlePlaybook` in the same file already had exactly this guard (`if (session.playbook_generated) return`)
+— just not applied consistently to its two neighbors.
+
+Not a correctness or data-duplication bug (these handlers only `update()`, never `insert()` or notify — unlike
+`handleGhost`/`handleReply` below, which were a different, higher-looking-severity pattern that turned out to be
+dead code). The real cost is wasted AI spend and latency on every retry.
+
+**Fix:** added an early-skip guard to both handlers — `handleSkillScores` skips regenerating `skill_scores` if
+already present on the session (and separately skips `retry_comparison` if already present, since that's an
+independent AI call with its own redelivery risk), `handleCoachingAnnotations` returns early if
+`coaching_annotations` is already a non-empty array. Matches the existing `handlePlaybook` pattern. The
+`checkAndGenerateWeaknessCard` call after skill scoring was deliberately left reachable in both the first-run and
+already-scored paths (not swallowed by an early return) because it has its own independent 14-day cooldown
+idempotency guard in `practiceWeaknessDetector.js` — layering a second, cruder guard in front of an
+already-self-protecting function would've been redundant and risked suppressing it in the crash-between-steps case.
+
+**Related, downgraded finding:** `handleGhost` and `handleReply` in the same file have a more serious-looking
+pattern (an `insert()` and a `notifyUser()` call with no redelivery guard at all — genuinely would create duplicate
+chat messages and duplicate push notifications on retry). Investigated whether this is reachable: it is not.
+Confirmed by grep that `QUEUE_JOB_TYPES.PRACTICE_GHOST` and `PRACTICE_REPLY` are never enqueued anywhere in the
+live codebase — the file's own comments say so accurately ("kept for legacy completeness... never enqueued from
+the message route"). Not fixed, since fixing dead code isn't a correctness improvement; flagged as a dead-code
+cleanup candidate instead (see IMPLEMENTATION_PLAN.md deferred items).
+
+**Fix status:** fixed and verified (full test suite passing). No targeted regression test added for the guard
+itself — exercising it meaningfully would require mocking Groq + Supabase + asserting the AI service was *not*
+called on a second invocation, which is a heavier integration-test investment than this specific, moderate-severity
+fix justifies on its own. Flagged in IMPLEMENTATION_PLAN.md as a candidate if job-handler test coverage becomes a
+dedicated milestone.
+
+---
+
+### 1.8 — HIGH — `pattern_insights` job was enqueued but had no registered handler — always failed
+**Location:** `backend/src/jobs/scheduledWorker.js`, `backend/src/jobs/patternDetectionJob.js`
+
+`patternDetectionJob.js` enqueues a `'pattern_insights'` job onto `scheduledQueue` on completion of every
+`pattern_detection` run (both its early-return and normal-completion code paths — confirmed these are mutually
+exclusive, not a double-enqueue). `scheduledWorker.js` imports `runPatternInsightsJob` from
+`patternInsightsJob.js` — a fully implemented job function — but never added it to the `HANDLERS` dispatch map.
+Every enqueued `pattern_insights` job therefore hit the worker's `if (!handler) throw new Error(...)` branch,
+failed, retried twice (`attempts: 2`), and was dead-lettered. `runPatternInsightsJob` could not run in production.
+
+This wasn't an oversight born of carelessness — both `scheduledWorker.js` and `registerSchedules.js` carried
+explicit comments showing a prior author correctly reasoned through the *adjacent* risk (don't add a second cron
+entry for `pattern_insights`, since it's meant to be chained off `pattern_detection`'s completion, and registering
+it both ways would double-execute it) and flagged it as unverified against the live system. The verification
+never happened; the actually-needed fix (the missing `HANDLERS` entry) was never made either, even though the
+investigation correctly identified where the real registration needed to happen.
+
+**Verified:** confirmed via direct grep + read of `patternDetectionJob.js` that `pattern_insights` is genuinely
+chained, not cron-driven — a second cron entry would be wrong, consistent with the original caution. Confirmed via
+grep that `runPatternInsightsJob` had zero call sites anywhere in the codebase before this fix.
+
+**Fix:** added `pattern_insights: runPatternInsightsJob` to `scheduledWorker.js`'s `HANDLERS` map. No new cron
+entry added (would reintroduce the double-execution risk the original comment correctly avoided).
+`registerSchedules.js`'s comment updated to record the verification as resolved rather than left open.
+
+**Fix status:** fixed. `HANDLERS` and `SCHEDULES` were both un-exported internal consts; exported both (the only
+change needed to make them testable, no behavior change) and added
+`src/jobs/__tests__/scheduledWorker.test.js`, asserting every name in `SCHEDULES` plus `pattern_insights`
+specifically has a registered handler. Verified the test has teeth, not just that it passes: temporarily reverted
+the `HANDLERS` fix and confirmed the test fails with the exact "expected function, got undefined" assertion before
+restoring the fix and re-confirming it passes.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.
 
-- **Background job failure/retry semantics** beyond `backgroundWorker.js`'s calendar-prep consolidation (which was
-  read and looks sound) — `messageQueueWorker.js`, `practiceWorker.js`, `scheduledWorker.js` not yet traced for
-  idempotency under redelivery.
+- **`handleGhost`/`handleReply` dead code in `messageQueueWorker.js`** (see 1.7) — candidates for removal in a
+  dedicated cleanup pass, since they're unreachable but still maintained/read as if live. Not removed yet because
+  dead-code removal wasn't the active investigation and deserves its own deliberate pass rather than being folded
+  into an idempotency fix's commit.
+- **`backgroundWorker.js`'s idempotency** was read in milestone 1's initial recon and looked sound (deliberate
+  dual-path-race consolidation, well-commented) but hasn't had the same systematic trace milestone 3 gave
+  `messageQueueWorker.js`/`scheduledWorker.js`. Worth a closer pass if time allows.
 - **Migration consistency**: `migrations/` contains 15 numbered + 2 unnumbered-looking files
   (`20260719120000_drop_users_archetype.sql`, `add_event_id_to_commitments_signals.sql`) alongside a 4627-line
   `schema.sql`. Not yet verified whether `schema.sql` is kept in sync with the migrations directory, or which one is

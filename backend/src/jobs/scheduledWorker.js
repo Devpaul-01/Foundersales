@@ -70,8 +70,14 @@ import { enqueueDedupScanForAllWorkspaces } from '../services/prospectDedup.js';
 
 // ──────────────────────────────────────────
 // JOB HANDLER MAP
+// Exported (in addition to being used internally) so
+// src/jobs/__tests__/scheduledWorker.test.js can assert every job name
+// this app actually enqueues onto the 'scheduled-jobs' queue has a
+// registered handler — the exact category of bug this file's
+// pattern_insights entry fixes (imported, never wired in, so every
+// enqueued job failed with "No handler registered").
 // ──────────────────────────────────────────
-const HANDLERS = {
+export const HANDLERS = {
   // High frequency
   memory_extraction:      runMemoryExtractionJob,
   opportunity_fetch:      runOpportunityJob,
@@ -94,13 +100,19 @@ const HANDLERS = {
   weekly_plan:            runWeeklyPlanGeneration,
   email_digest:           runEmailDigestJob,
   pattern_detection:      runPatternDetectionJob,
-  // ⚠️  pattern_insights intentionally NOT registered here — per the
-  //     pre-existing comment, it is (reportedly) enqueued by
-  //     patternDetectionJob on completion. VERIFY this is actually true
-  //     in the live system before changing it either way; registering it
-  //     both ways would double-execute pattern insight generation, which
-  //     is the exact class of bug this implementation pass was written to
-  //     eliminate elsewhere. See IMPLEMENTATION_SUMMARY.md.
+  // VERIFIED (docs/backend-takeover/AUDIT.md): patternDetectionJob.js
+  // does enqueue 'pattern_insights' on scheduledQueue on completion of
+  // every run (both its early-return and normal-completion paths — these
+  // are mutually exclusive, not a double-enqueue). The prior comment here
+  // correctly avoided adding a second, redundant cron entry for it (that
+  // would have double-executed pattern insight generation), but never
+  // actually added the HANDLERS registration this job needs to run at
+  // all — meaning every enqueued pattern_insights job was hitting the
+  // "No handler registered" throw below, failing twice (attempts: 2),
+  // and runPatternInsightsJob (imported above, fully implemented) never
+  // ran. This entry is what was missing; no new cron was added, since
+  // event-chaining off pattern_detection's completion is correct.
+  pattern_insights:       runPatternInsightsJob,
   skill_progression:      runSkillProgressionJob,
   skill_profile_agg:      runSkillProfileAggregationJob,
   adaptive_curriculum:    runAdaptiveCurriculumJob,

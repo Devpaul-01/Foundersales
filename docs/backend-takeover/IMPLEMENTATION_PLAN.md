@@ -76,11 +76,9 @@ Status: **in progress**. Updated as milestones complete.
 
 ## Deferred / needs a decision, not yet scheduled
 
-- **`handleGhost`/`handleReply` dead code in `messageQueueWorker.js`** (AUDIT.md 1.7) — confirmed unreachable
-  (`PRACTICE_GHOST`/`PRACTICE_REPLY` job types are never enqueued anywhere live). Candidate for removal, not acted
-  on yet — deserves its own deliberate pass rather than folding a deletion into an unrelated idempotency-fix commit.
-  Also already transparently disclosed in README.md's "Known Gaps" section, confirming this investigation reached
-  the same conclusion the project owner already documented.
+- ~~`handleGhost`/`handleReply` dead code in `messageQueueWorker.js`~~ — **done.** Removed, along with dispatch
+  cases and the unused `PRACTICE_SCENARIOS` import. `DELIVERY_STATUS.GHOSTED` specifically checked and kept, since
+  it's actively used by the live V3 code path, not part of the dead handler. See AUDIT.md 1.7.
 - **Recommend validating the `schema.sql` changes (AUDIT.md 1.9, 1.10) against a real Postgres instance** before
   relying on them for an actual fresh deployment — this sandbox has no Postgres available to execute and confirm
   them.

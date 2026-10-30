@@ -233,8 +233,20 @@ pattern (an `insert()` and a `notifyUser()` call with no redelivery guard at all
 chat messages and duplicate push notifications on retry). Investigated whether this is reachable: it is not.
 Confirmed by grep that `QUEUE_JOB_TYPES.PRACTICE_GHOST` and `PRACTICE_REPLY` are never enqueued anywhere in the
 live codebase — the file's own comments say so accurately ("kept for legacy completeness... never enqueued from
-the message route"). Not fixed, since fixing dead code isn't a correctness improvement; flagged as a dead-code
-cleanup candidate instead (see IMPLEMENTATION_PLAN.md deferred items).
+the message route") — and README.md independently, transparently discloses the same thing under "Dead code kept
+intentionally, not cleaned up yet," confirming this investigation reached the same conclusion already on record.
+That phrasing ("not cleaned up yet") reads as an acknowledged backlog item, not a deliberate preserve-at-all-costs
+choice, so removed in a follow-up pass (see below) rather than left as a permanent cleanup candidate.
+
+**Follow-up fix:** removed `handleReply` and `handleGhost` entirely, along with their `PRACTICE_REPLY`/
+`PRACTICE_GHOST` dispatch cases and the now-unused `PRACTICE_SCENARIOS` import. Before removing, specifically
+checked whether `DELIVERY_STATUS.GHOSTED` (the delivery-status value `handleGhost` used to set) was also safe to
+touch — it was not: `routes/practice.js`'s live V3 path writes `'ghosted'` directly, and the frontend
+(`PracticeSessionPage.tsx`, `api/types.ts`) actively reads and displays it. Left `DELIVERY_STATUS.GHOSTED`
+untouched; only the dead handler functions and their dispatch wiring were removed. Also left
+`QUEUE_JOB_TYPES.PRACTICE_REPLY`/`PRACTICE_GHOST` in `constants.js` alone — removing two unused string constants
+was marginal benefit for a small added risk versus the actual complexity reduction, which was the dead logic
+itself.
 
 **Fix status:** fixed and verified (full test suite passing). No targeted regression test added for the guard
 itself — exercising it meaningfully would require mocking Groq + Supabase + asserting the AI service was *not*

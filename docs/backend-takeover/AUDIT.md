@@ -170,7 +170,9 @@ complexity the mission asks to simplify — **not acted on yet** because removin
 affect the frontend (out of scope to modify) if it's calling one specific path. Flagging for a decision rather than
 silently picking one.
 
-**Fix status:** deferred — see DECISIONS.md for the question this raises.
+**Fix status:** fixed — see DECISIONS.md D3. Deduplicated the logic (one route now delegates to the other's
+handler) while keeping both URLs registered, since an external API consumer outside this repo couldn't be ruled
+out even though the frontend only uses `/api/workspaces/switch`.
 
 ---
 

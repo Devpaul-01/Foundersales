@@ -3,6 +3,7 @@ import { Router }        from 'express';
 import { asyncHandler }  from '../middleware/errorHandler.js';
 import { createLogger }  from '../utils/logger.js';
 import { clearUserContext } from '../middleware/workspace.js';
+import { switchWorkspaceHandler } from './workspaces.js';
 import supabaseAdmin     from '../config/supabase.js';
 import { createHash }    from 'crypto';
 import { DEFAULT_NOTIFICATION_PREFS, ACTIVITY_EVENTS } from '../config/constants.js';
@@ -122,43 +123,21 @@ router.get('/workspaces', asyncHandler(async (req, res) => {
 }));
 
 // POST /api/user/switch-workspace
-router.post('/switch-workspace', asyncHandler(async (req, res) => {
-  const userId = req.user.id;
-  const { workspace_id } = req.body;
-
-  if (!workspace_id) {
-    return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'workspace_id is required' });
-  }
-
-  log('SWITCH WORKSPACE', { userId, targetWorkspaceId: workspace_id });
-
-  const { data: membership } = await supabaseAdmin
-    .from('workspace_members')
-    .select('role, status')
-    .eq('workspace_id', workspace_id)
-    .eq('user_id', userId)
-    .eq('status', 'active')
-    .single();
-
-  if (!membership) {
-    return res.status(403).json({ error: 'NOT_A_MEMBER', message: 'You are not an active member of this workspace.' });
-  }
-
-  const { data: workspace } = await supabaseAdmin
-    .from('workspaces').select('id, name, plan').eq('id', workspace_id).eq('is_deleted', false).single();
-
-  if (!workspace) return res.status(404).json({ error: 'WORKSPACE_NOT_FOUND' });
-
-  logDB('UPDATE', 'users', { userId, active_workspace_id: workspace_id });
-  await supabaseAdmin.from('users').update({ active_workspace_id: workspace_id }).eq('id', userId);
-
-  // Clear old workspace context and new workspace context atomically
-  await clearUserContext(userId, req.user.active_workspace_id);
-  await clearUserContext(userId, workspace_id);
-
-  log('SWITCH WORKSPACE OK', { userId, workspaceId: workspace_id, role: membership.role });
-  res.json({ success: true, workspace: { ...workspace, role: membership.role } });
-}));
+//
+// NOTE (docs/backend-takeover/AUDIT.md 1.4 / DECISIONS.md D3): this used
+// to be a full, independent copy of the same logic as POST
+// /api/workspaces/switch, and the two had already started drifting
+// (slightly different response shapes, different log labels). Confirmed
+// by reading frontend/src/contexts/WorkspaceContext.tsx (the only code
+// path the actual UI uses to switch workspaces) that it calls
+// /api/workspaces/switch exclusively — the frontend wrapper for this
+// endpoint (frontend/src/api/user.ts's switchWorkspace) has zero callers
+// anywhere in the frontend. Kept this route rather than deleting it,
+// since an external API consumer outside the frontend could still depend
+// on it and that can't be verified from this codebase alone, but it now
+// delegates to the exact same handler /switch uses instead of maintaining
+// a second, independently-drifting copy of the business logic.
+router.post('/switch-workspace', switchWorkspaceHandler);
 
 // POST /api/user/accept-invite/:token
 router.post('/accept-invite/:token', asyncHandler(async (req, res) => {

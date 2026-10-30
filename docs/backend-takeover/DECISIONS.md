@@ -25,15 +25,25 @@ confirmed gap — the spot-checked routes all correctly enforce isolation in app
 architectural characteristic in AUDIT.md 1.3, with a commitment to widen the spot-check (milestone 2) rather than
 add a blanket defensive layer without evidence it's needed.
 
-## D3 — Duplicate workspace-switch endpoints: not removing yet
-**Date:** 2026-10-29
+## D3 — Duplicate workspace-switch endpoints: deduplicated the logic, kept both routes
+**Date:** 2026-10-29 (resolved 2026-10-30)
 
-`POST /api/user/switch-workspace` and `POST /api/workspaces/switch` are functionally redundant. The mission asks to
-simplify unnecessary duplication, and normally I would consolidate these. Not doing so yet because frontend code is
-explicitly out of scope to modify, and removing either endpoint is a backend contract change — if the frontend calls
-one specifically, deleting it breaks a live feature even though the diff is "backend-only." I can read frontend code
-to check which one is actually called (reading isn't the prohibited action, changing is), and will do that before
-deciding, rather than guessing or leaving two permanently-duplicated code paths in place indefinitely.
+`POST /api/user/switch-workspace` and `POST /api/workspaces/switch` were functionally redundant, independently
+implemented, and had already started drifting (different response shapes, different log labels). Checked the
+frontend (reading, not changing, is in scope) to see which one is actually used:
+`frontend/src/contexts/WorkspaceContext.tsx` — the only code path the real UI uses to switch workspaces — calls
+`/api/workspaces/switch` exclusively, confirmed by two separate references including an explicit "canonical switch
+endpoint" comment already in the frontend code. `frontend/src/api/user.ts`'s wrapper for `/api/user/switch-workspace`
+has zero callers anywhere in the frontend.
+
+Decided against deleting `/api/user/switch-workspace` outright despite it being dead from the frontend's
+perspective: an external API consumer (mobile app, third-party integration, something not in this repo) could
+still depend on it, and that can't be ruled out from this codebase alone. Instead: extracted
+`workspaces.js`'s `/switch` logic into an exported `switchWorkspaceHandler`, and made `user.js`'s route delegate to
+the exact same handler instead of maintaining a second, independently-drifting copy. This eliminates the
+duplicated business logic (the actual "unnecessary complexity" problem) while keeping both URLs live for any
+caller this review couldn't see. Verified both routes are still registered and route correctly (both return 401
+under auth middleware, not 404) after the change, and the full test suite still passes.
 
 ## D4 — Not pinning down multer upgrade in this pass
 **Date:** 2026-10-29

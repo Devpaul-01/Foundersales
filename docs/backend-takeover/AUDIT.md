@@ -176,17 +176,29 @@ out even though the frontend only uses `/api/workspaces/switch`.
 
 ---
 
-### 1.5 — LOW — Dependency: `multer` pinned at a vulnerable 1.x line
-**Location:** `backend/package.json`
+### 1.5 — HIGH (upgraded from initial LOW rating) — Dependency: `multer` confirmed vulnerable to 4 real CVEs
+**Location:** `backend/package.json`, `backend/src/routes/upload.js`, `backend/src/routes/calendar.js`
 
-`multer@^1.4.5-lts.1` resolves to `1.4.5-lts.2` on install. The entire 1.x line has known, patched-in-2.x
-vulnerabilities per npm's own deprecation warning at install time. Not actively exploited-in-the-wild evidence
-found, but worth tracking. Upgrading to multer 2.x is an API-surface change (multer's 2.x has a different error
-model) and touches `routes/upload.js` plus wherever upload middleware is used — treating as a tracked follow-up
-rather than an immediate fix, since it's not a confirmed live vulnerability in this app's specific usage, just a
-flagged dependency.
+Originally flagged at LOW severity based only on npm's generic install-time deprecation warning, deliberately not
+treated as urgent without confirming an actual exploit path (see DECISIONS.md D4) — avoided inventing a
+vulnerability just because a dependency looked old. Followed up properly rather than leaving it as a permanent
+"someday" item: `npm audit` on this project reports no multer entry at all (its data appears to lag GitHub's own
+advisory feed for this package specifically). Checked GitHub Advisories/OSV/NVD directly and found the installed
+`1.4.5-lts.2` is confirmed vulnerable to four real, high-severity CVEs — most notably CVE-2025-47944 (CVSS 7.5,
+unhandled exception/DoS via a malformed multipart request) — all fixed in `2.0.x` or later. This is a dependency
+that directly parses user-controlled file uploads in two live routes (`routes/upload.js`'s general file upload,
+`routes/calendar.js`'s voice-memo upload), a directly attacker-reachable surface.
 
-**Fix status:** tracked in IMPLEMENTATION_PLAN.md, not yet scheduled.
+**Fix:** checked both call sites use only the stable API surface unchanged across the 1.x/2.x boundary (no
+`diskStorage` with custom filenames, no `.fields()`, no `MulterError`-specific handling anywhere in the codebase —
+errors flow through the generic handler as plain `Error`s), making this a low-risk upgrade. Upgraded to
+`multer@2.5.0`. Verified functionally, not just by import/syntax check: a successful real multipart upload through
+the app's exact configuration (correct filename/mimetype/size/Buffer), the `fileFilter` rejection path producing
+the same error message as before, and a full app boot + `/health` check, all confirmed clean post-upgrade. The
+existing test suite has zero coverage of the upload routes either before or after this change — noted as a gap,
+not claimed as covered.
+
+**Fix status:** fixed and functionally verified.
 
 ---
 

@@ -87,8 +87,8 @@ Status: **in progress**. Updated as milestones complete.
 - **Duplicate workspace-switch endpoints** (AUDIT.md 1.4) — see DECISIONS.md. Not removing either without
   confirming the frontend's actual usage, since frontend changes are out of scope and I can't verify which one（s）
   it calls without reading frontend code, which is permitted to *read* for this purpose even though not to *change*.
-- **multer dependency upgrade** (AUDIT.md 1.5) — tracked, not scheduled; no confirmed live exploit path found yet in
-  this app's specific upload usage.
+- ~~multer dependency upgrade~~ — **done.** Confirmed 4 real CVEs via GitHub Advisories/OSV (not just npm's
+  deprecation notice), upgraded to 2.5.0, verified functionally with real multipart requests. See AUDIT.md 1.5.
 - **Broad test-suite expansion** — regression tests will be added alongside each fix; a dedicated
   "increase coverage" milestone is not planned unless scope grows to justify it.
 

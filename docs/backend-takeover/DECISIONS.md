@@ -45,11 +45,29 @@ duplicated business logic (the actual "unnecessary complexity" problem) while ke
 caller this review couldn't see. Verified both routes are still registered and route correctly (both return 401
 under auth middleware, not 404) after the change, and the full test suite still passes.
 
-## D4 — Not pinning down multer upgrade in this pass
-**Date:** 2026-10-29
+## D4 — multer upgrade: initially deferred, then confirmed and fixed
+**Date:** 2026-10-29 (resolved 2026-10-30)
 
-multer 1.x has known patched-in-2.x vulnerabilities per npm's deprecation notice. Upgrading is an API-shape change
-(touches `routes/upload.js`, differs in error handling between multer 1.x and 2.x) and not a one-line bump. No
-confirmed exploit path specific to this app's usage was found (would need to check exactly which multer CVEs apply
-to how this app configures it — not yet done). Tracked in IMPLEMENTATION_PLAN.md as a flagged follow-up rather than
-treated as urgent without that confirmation.
+Initially deferred pending confirmation of an actual exploit path, rather than treating npm's install-time
+deprecation notice as sufficient justification on its own. Followed up properly: `npm audit` on this project
+reports no multer entry at all (its advisory data lagged behind GitHub's own advisory feed for this specific
+package — worth knowing on its own). Checked GitHub Advisories/OSV/NVD directly instead and found the installed
+version (`1.4.5-lts.2`) is confirmed vulnerable to four real, high-severity CVEs: CVE-2025-47944 (7.5, unhandled
+exception/DoS via malformed multipart request), CVE-2025-47935, CVE-2025-48997, and CVE-2025-7338 — all affecting
+versions through `1.4.5-lts.2`, all fixed by `2.0.x` or later. This directly handles user-controlled file uploads
+(`routes/upload.js`, `routes/calendar.js`'s voice-memo upload), about as attacker-reachable a surface as a
+dependency gets.
+
+Checked actual usage before upgrading: both call sites use only the stable, unchanged-across-1.x/2.x API surface
+(`multer({ storage, limits, fileFilter })`, `.single('file')`) — no `diskStorage` with custom filename functions,
+no `.fields()`, and no code anywhere checks `err instanceof multer.MulterError` or any version-sensitive error
+shape (errors flow through the generic error handler as plain `Error` objects). Low-risk upgrade given this usage
+pattern.
+
+Upgraded to `multer@2.5.0` (npm installed cleanly, `package.json` range auto-updated). Verified functionally, not
+just by syntax check or the existing test suite (which has zero coverage of the upload routes): wrote a standalone
+script that sends a real `multipart/form-data` request through the exact `multer({...}).single('file')`
+configuration this app uses, confirming the file is parsed correctly (right filename, mimetype, size, and a real
+`Buffer`), and a second script confirming the `fileFilter` rejection path (`cb(new Error(...))`) still surfaces
+the same error message through Express's error handler. Full app boot + `/health` check also confirmed clean
+post-upgrade.

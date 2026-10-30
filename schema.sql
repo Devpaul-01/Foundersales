@@ -2781,14 +2781,13 @@ CREATE INDEX idx_commitments_workspace_user_owner_status ON public.conversation_
 
 
 --
--- Name: idx_commits_prospect; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_commits_prospect ON public.conversation_commitments USING btree (prospect_id);
-
-
---
 -- Name: idx_commits_status; Type: INDEX; Schema: public; Owner: -
+--
+-- (idx_commits_prospect, an exact duplicate of idx_commitments_prospect
+-- above — same table, same column, same index type — was removed here.
+-- See docs/backend-takeover/AUDIT.md milestone 4/5. Not referenced by any
+-- application code or tooling by name, confirmed by repo-wide grep before
+-- removal.)
 --
 
 CREATE INDEX idx_commits_status ON public.conversation_commitments USING btree (workspace_id, status);

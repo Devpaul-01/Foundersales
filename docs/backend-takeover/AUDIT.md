@@ -307,14 +307,36 @@ were cross-checked character-for-character against the original migration file. 
 proof. Recommend running this against a real (even local/throwaway) Postgres instance before relying on it for an
 actual fresh deployment, and flagging that explicitly rather than claiming it's confirmed working.
 
-**Secondary, minor finding from the same investigation:** `conversation_commitments` has two functionally
-duplicate indexes on `prospect_id` — `idx_commitments_prospect` and `idx_commits_prospect` — almost certainly from
-two separate migration passes that didn't check for an existing equivalent. Not fixed: removing an index that
-some other part of the system or tooling might reference by name isn't a change to make speculatively without
-checking every reference first, and it's a minor storage/write-overhead cost, not a correctness issue. Noted here
-as a low-priority cleanup candidate.
+**Secondary, minor finding from the same investigation, fixed separately (see 1.10):** `conversation_commitments`
+had two exact-duplicate indexes on `prospect_id` — `idx_commitments_prospect` and `idx_commits_prospect`.
 
 **Fix status:** fixed, with the verification limitation above stated honestly rather than glossed over.
+
+### 1.10 — LOW — Duplicate index on `conversation_commitments.prospect_id`
+**Location:** `schema.sql`, new `migrations/015_drop_duplicate_commitments_prospect_index.sql`
+
+Found during the milestone 4 schema review: `idx_commitments_prospect` and `idx_commits_prospect` were exact
+duplicates (same table, same column, same index type) — almost certainly from two separate migration passes that
+each independently indexed the table without checking what the other had already added. The table's indexes
+overall split into two naming "families" (`idx_commitments_*` and `idx_commits_*`), suggesting this happened more
+than once in this table's history, though `prospect_id` was the only *exact* duplicate — the other
+`idx_commits_status`/`idx_commits_workspace`/`idx_commits_ws_user` indexes cover different column combinations
+than their `idx_commitments_*` counterparts, so they're not clear-cut duplicates in the same way, and weren't
+touched. Deciding whether that broader set is individually justified is real query-pattern/performance-tuning work
+this review can't do without a live database and real traffic data — scoped this fix narrowly to the one
+confirmed, unambiguous duplicate.
+
+Confirmed by repo-wide grep that neither index name is referenced by any application code or tooling, so removing
+either is safe — kept `idx_commitments_prospect` (listed first in the file) as canonical.
+
+**Fix:** removed the `CREATE INDEX idx_commits_prospect` statement from `schema.sql` (the fresh-install artifact —
+a new database built from it now simply never creates the duplicate). For any database already built from the old
+`schema.sql` (which `DECISIONS.md`/`AUDIT.md` can't know the state of from this codebase alone), added
+`migrations/015_drop_duplicate_commitments_prospect_index.sql` — a forward-only, non-destructive `DROP INDEX IF
+EXISTS`, safe to run at any time, drops only the redundant index structure, not any data or the identical index
+that remains.
+
+**Fix status:** fixed.
 
 ## 2. Suspected / Needs Further Investigation
 

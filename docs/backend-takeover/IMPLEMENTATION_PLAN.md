@@ -81,11 +81,9 @@ Status: **in progress**. Updated as milestones complete.
   on yet — deserves its own deliberate pass rather than folding a deletion into an unrelated idempotency-fix commit.
   Also already transparently disclosed in README.md's "Known Gaps" section, confirming this investigation reached
   the same conclusion the project owner already documented.
-- **Duplicate index on `conversation_commitments.prospect_id`** (AUDIT.md 1.9) — `idx_commitments_prospect` and
-  `idx_commits_prospect` cover the same column. Not removed — would need to confirm nothing references either name
-  specifically before dropping one.
-- **Recommend validating the `schema.sql` fix (AUDIT.md 1.9) against a real Postgres instance** before relying on
-  it for an actual fresh deployment — this sandbox has no Postgres available to execute and confirm it.
+- **Recommend validating the `schema.sql` changes (AUDIT.md 1.9, 1.10) against a real Postgres instance** before
+  relying on them for an actual fresh deployment — this sandbox has no Postgres available to execute and confirm
+  them.
 
 
 - **Duplicate workspace-switch endpoints** (AUDIT.md 1.4) — see DECISIONS.md. Not removing either without

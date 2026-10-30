@@ -48,13 +48,40 @@
   verification. Honest limitation recorded: no Postgres available in this sandbox to actually execute and confirm
   the schema.sql edit applies cleanly — high structural confidence, not proof. Committed as 2 reviewable commits.
 
-### Not yet started / deferred
-- Items tracked in IMPLEMENTATION_PLAN.md's "Deferred" section: duplicate workspace-switch endpoints
-  (user.js/workspaces.js), multer dependency upgrade, handleGhost/handleReply dead-code removal, duplicate
-  prospect_id index on conversation_commitments, validating the schema.sql fix against a real Postgres instance.
-- The originally-scoped milestones 1-4 are now all complete. Remaining work, if continued, would be a fresh pass
-  to decide what's next (the deferred items above, or a new audit pass over areas not yet covered this session —
-  e.g. a closer idempotency trace of backgroundWorker.js, or review of files/routers not touched in milestones 1-4).
+### Done (continued, same session) — deferred items cleared
+- **Workspace-switch deduplication.** Confirmed via the frontend (`WorkspaceContext.tsx`) that
+  `/api/workspaces/switch` is the only one the real UI uses; `/api/user/switch-workspace`'s frontend wrapper has
+  zero callers. Kept both backend routes (an external API consumer outside this repo can't be ruled out) but made
+  one delegate to the other instead of maintaining two independently-drifting copies of the same logic. Verified
+  both still respond correctly via a live boot + curl check.
+- **Test flake fix.** Noticed (unrelated to the above) `scheduledWorker.test.js` occasionally exceeding its
+  default timeout under full-suite load, despite finishing in ~1.5s standalone. Raised the timeout; confirmed 5/5
+  clean full-suite runs after.
+- **Duplicate database index removed.** `idx_commitments_prospect`/`idx_commits_prospect` were exact duplicates on
+  `conversation_commitments.prospect_id`. Confirmed neither name is referenced anywhere before removing the
+  redundant one from `schema.sql`, and added a forward-only `DROP INDEX IF EXISTS` migration for any database
+  already built from the old schema.
+- **Dead code removed.** `handleReply`/`handleGhost` in `messageQueueWorker.js` — confirmed unreachable in
+  milestone 3, and README.md's own "kept intentionally, not cleaned up yet" note confirmed this was an
+  acknowledged backlog item, not a deliberate preserve choice. Removed both handlers, their dispatch cases, and the
+  now-unused `PRACTICE_SCENARIOS` import. Specifically checked and confirmed `DELIVERY_STATUS.GHOSTED` is NOT dead
+  (actively written by the live V3 path, read by the frontend) before touching anything adjacent — left untouched.
+- **multer upgraded, 1.4.5-lts.2 → 2.5.0.** Initially deferred without a confirmed exploit; followed up and found
+  4 real high-severity CVEs via GitHub Advisories/OSV directly (npm audit doesn't currently flag this package at
+  all for this project — worth knowing on its own). Verified both call sites use only the stable, version-safe API
+  surface before upgrading, then verified functionally with real multipart requests (success and fileFilter
+  rejection paths), not just a syntax check — the existing test suite has no upload-route coverage either way.
+
+All deferred items from the original milestones 1-4 pass are now resolved. 7 additional commits this session (18
+total on `backend-takeover`).
+
+### Not yet started
+- No scoped work remains from the original engagement plan. Any further work would be a fresh audit pass over
+  areas not yet covered this session (e.g. a closer idempotency trace of `backgroundWorker.js`, noted but not
+  deeply re-verified since milestone 1's initial read) or the project owner's next priority.
+- **Still open, stated honestly:** the `schema.sql` edits (AUDIT.md 1.9, 1.10) have not been executed against a
+  real Postgres instance — no `psql`/`pg_dump`/Postgres available in this sandbox. High structural confidence, not
+  proof. Recommend validating before relying on them for an actual fresh deployment.
 
 ### Verified facts, stated plainly
 - Existing test suite: 16/16 passing, confirmed by running `npx vitest run` directly.

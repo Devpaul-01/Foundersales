@@ -48,7 +48,14 @@ describe('scheduledWorker HANDLERS completeness', () => {
     const missing = SCHEDULES.map((s) => s.name).filter((name) => typeof HANDLERS[name] !== 'function');
 
     expect(missing, `Scheduled job(s) with no registered handler: ${missing.join(', ')}`).toEqual([]);
-  });
+    // Longer timeout (default 5000ms): this is the heaviest import in the
+    // suite — scheduledWorker.js transitively imports most job files, each
+    // constructing a Supabase client at module load time. Observed flaking
+    // past the default timeout under full-suite parallel load even though
+    // it consistently finishes in ~1.5s standalone; not worth chasing
+    // further given the actual assertion runs essentially instantly once
+    // imports resolve.
+  }, 15000);
 
   it('has a HANDLERS entry for pattern_insights (chained off pattern_detection, not its own cron)', async () => {
     const { HANDLERS } = await import('../scheduledWorker.js');

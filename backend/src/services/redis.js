@@ -64,16 +64,31 @@ const getClient = async () => {
     return null;
   }
 
-  // ── Parse the URL to extract hostname for SNI ──
+  // ── Parse the URL to extract hostname for SNI, and whether TLS applies ──
+  // NOTE (docs/backend-takeover/AUDIT.md): this used to hardcode
+  // `tls: true` unconditionally, regardless of the URL's actual scheme.
+  // config/bullmq.js's IORedis client already derives this correctly from
+  // the scheme (`isTLS = REDIS_URL.startsWith('rediss://')`); this file
+  // did the same hostname-parsing-for-SNI work but then ignored the
+  // scheme. Confirmed live, not just read: booting against a real, local,
+  // plain `redis://` Redis instance (not TLS) logged
+  // "[Redis] getRawClient() failed: tls socket option is set to true
+  // which is mismatch with protocol..." and every caller of this client
+  // (rate limiting, workspace/auth caching, concurrencyGuard's
+  // distributed locking across 7 files) silently fell back to
+  // per-instance/no-op behavior instead of using Redis at all — a
+  // real, previously-undetected reliability gap for the very common case
+  // of a non-TLS Redis (local dev, self-hosted, Docker Compose), not a
+  // theoretical one.
   const url = new URL(REDIS_URL);
   const hostname = url.hostname;
+  const isTLS = REDIS_URL.startsWith('rediss://');
 
   const client = createClient({
     url: REDIS_URL,
-    socket: {
-      tls: true,
-      servername: hostname,  // ← Fix: Add SNI support
-    },
+    socket: isTLS
+      ? { tls: true, servername: hostname } // SNI support for TLS targets
+      : {},
   });
 
   client.on('error', (err) =>

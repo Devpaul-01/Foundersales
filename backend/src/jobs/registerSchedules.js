@@ -9,18 +9,24 @@
 //    "start of day" summaries a founder should see together
 //  - prospect_dedup_scan (3am Monday)       — weekly catch-up fuzzy scan
 //
-// NOT added: a second `pattern_insights` cron entry. The existing comment
-// in scheduledWorker.js claims pattern_insights is chained off
-// pattern_detection's completion rather than run on its own schedule —
-// registering it BOTH ways would reintroduce exactly the kind of
-// duplicate-execution bug this implementation pass exists to fix
-// elsewhere. This needs to be verified against the live system (see
-// IMPLEMENTATION_SUMMARY.md) before either approach is finalized.
+// NOT added: a second `pattern_insights` cron entry. VERIFIED
+// (docs/backend-takeover/AUDIT.md): pattern_insights is genuinely
+// chained off pattern_detection's completion (patternDetectionJob.js
+// enqueues it via scheduledQueue.add on every run), not run on its own
+// schedule — a second cron entry here would double-execute it. This was
+// previously left as an open question for someone to verify; it has now
+// been confirmed directly by reading patternDetectionJob.js. The related
+// bug this surfaced — pattern_insights had no HANDLERS entry in
+// scheduledWorker.js at all, so the enqueued job always failed — is fixed
+// separately in scheduledWorker.js.
 // ============================================================
 
 import { scheduledQueue } from './queues.js';
 
-const SCHEDULES = [
+// Exported so src/jobs/__tests__/scheduledWorker.test.js can assert every
+// scheduled job name here has a corresponding handler registered in
+// scheduledWorker.js's HANDLERS map — see that test file for why.
+export const SCHEDULES = [
   // ── HIGH FREQUENCY ─────────────────────────────────────────
   { name: 'memory_extraction',      cron: '*/30 * * * *'  },
   { name: 'opportunity_fetch',      cron: '0 */6 * * *'   },

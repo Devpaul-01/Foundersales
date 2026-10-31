@@ -209,8 +209,15 @@ export const createWorkspaceHandler = asyncHandler(async (req, res) => {
 });
 router.post('/', createWorkspaceHandler);
 
-// POST /api/workspaces/switch
-router.post('/switch', asyncHandler(async (req, res) => {
+// POST /api/workspaces/switch — the canonical workspace-switch endpoint
+// (confirmed live: frontend/src/contexts/WorkspaceContext.tsx, the only
+// code path the actual UI uses to switch workspaces, calls this one — see
+// docs/backend-takeover/DECISIONS.md D3). Exported as switchWorkspaceHandler
+// so routes/user.js's POST /switch-workspace (kept only for API
+// backward-compatibility, since it has zero frontend callers but could
+// have an external consumer this review can't see) delegates to the exact
+// same logic instead of maintaining a second, drifting copy of it.
+export const switchWorkspaceHandler = asyncHandler(async (req, res) => {
   const userId        = req.user.id;
   const { workspace_id } = req.body;
 
@@ -241,7 +248,8 @@ router.post('/switch', asyncHandler(async (req, res) => {
 
   log('SWITCH OK', { userId, from: req.user.active_workspace_id, to: workspace_id });
   res.json({ success: true, workspace: { id: workspace.id, name: workspace.name, plan: workspace.plan, role: membership.role } });
-}));
+});
+router.post('/switch', switchWorkspaceHandler);
 
 // GET /api/workspaces/:id
 router.get('/:id', asyncHandler(async (req, res) => {

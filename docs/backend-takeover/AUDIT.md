@@ -1,0 +1,480 @@
+# Backend Audit
+
+Status: **in progress** — this is a living document, updated as work continues.
+Last updated: 2026-10-29
+
+## How to read this document
+
+Findings are split into:
+- **Confirmed** — reproduced or verified by reading the actual code path end to end (not inferred from naming or docs).
+- **Suspected** — strong signal, not yet fully traced; needs more investigation before treating as fact.
+
+Each confirmed finding has a severity, the evidence, and the fix status.
+
+## 0. Context that shapes this audit
+
+This is not a greenfield codebase and it is not an unmaintained one either. The source carries extensive inline
+comments (`IMPL-*`, `FIX *`, `Phase 2 refactor`, `Phase 3`) documenting a real prior hardening pass: rate-limiter
+namespace collisions, IDOR guards on opportunity endpoints, Redis-backed distributed concurrency control, dual-path
+job idempotency races, workspace-membership re-verification on every request. That work is sound and is being
+preserved, not redone. This audit is therefore focused on:
+1. Gaps that survive careful review — subtle platform-level issues (e.g. module load order) that don't show up by
+   reading a single file in isolation.
+2. Genuinely unfinished/incomplete functionality.
+3. Things that were never in scope for the prior pass (test coverage breadth, `.env.example`, RLS posture).
+
+Explicit non-goals per the person's instructions: no frontend changes, no payment integration, and calendar,
+metrics, insights, and onboarding are **protected** — flagged if problems are found, not restructured or removed.
+
+## 1. Confirmed Findings
+
+### 1.1 — CRITICAL — `validateEnv()` cannot catch its own required variables due to ESM import hoisting
+**Location:** `backend/src/app.js` (import order), `backend/src/config/supabase.js`, `backend/src/config/validateEnv.js`
+
+`app.js` calls `validateEnv()` early, with an explicit comment claiming it must run "before any other imports touch
+process.env values." In practice this guarantee does not hold, because ES module `import` statements are hoisted:
+every module in the import graph is resolved and its top-level code executed *before* any statement in the
+importing file runs — regardless of where in the file the `import` appears. `supabase.js` calls `createClient()` at
+module top-level, and is reachable via `middleware/auth.js`, which is itself imported by `app.js` after `validateEnv`
+textually, but that doesn't matter: the whole graph resolves before `validateEnv()`'s function body ever executes.
+
+**Reproduced:** running `node src/app.js` with zero environment variables set does **not** produce validateEnv's
+intended clean, per-variable error message. It crashes instead with a raw Supabase SDK stack trace
+(`Error: supabaseUrl is required.`) — proving the validator never got a chance to run first.
+
+**Compounding issue, found twice:** `validateEnv.js` checked for `SUPABASE_SERVICE_KEY`, but `supabase.js` actually
+reads `process.env.SUPABASE_SERVICE_ROLE_KEY` — a different variable name. Separately, it checked for
+`FIREBASE_PROJECT_ID`, but `config/firebase.js` never reads that name at all — it reads `FIREBASE_SERVICE_ACCOUNT`
+(a JSON credential blob). Both are the same bug class: the check exists, but checks the wrong name, so it can never
+catch the variable actually being missing. Even setting aside the hoisting issue, these two checks were dead
+weight — always "passing" or "warning" based on a name nothing else reads. The Firebase instance was caught directly
+in this session's own boot verification: with placeholder env vars (no `FIREBASE_SERVICE_ACCOUNT` set), the app
+logged `[Firebase] Init failed: "undefined" is not valid JSON` — not a crash (firebase.js already catches that
+specific failure gracefully), but exactly the "cryptic runtime failure instead of a clear boot-time message" pattern
+this file exists to prevent, confirming the gap wasn't theoretical.
+
+**Impact:** operators cannot trust a clean startup as a signal that required config is present. A misconfigured
+deploy can appear to boot fine and then fail unpredictably on first traffic (Supabase) or silently disable a feature
+with no clear diagnostic (Firebase/push notifications).
+
+**Related finding, same session:** verifying this fix surfaced a second, independent bug — `config/bullmq.js` threw
+synchronously at module import time when `REDIS_URL` was unset, which (due to the same import-hoisting mechanism)
+crashed the entire process before `app.listen()`, in all three entry points, even though `validateEnv.js` correctly
+classifies `REDIS_URL` as optional. See 1.1b below.
+
+**Fix status:** fixed. `validateEnv.js` now checks `SUPABASE_SERVICE_ROLE_KEY` and `FIREBASE_SERVICE_ACCOUNT`.
+`src/index.js`, `src/index.server.js`, `src/index.workers.js` added as true entry points — each imports only
+`dotenv` and `validateEnv.js`, calls `validateEnv()`, then dynamically `import()`s the real app/server/workers file,
+so validation is structurally guaranteed to run first (a dynamic `import()` is not hoisted, unlike a static one).
+`app.js`/`server.js`/`workers/index.js` no longer call `validateEnv()` themselves. `package.json`'s `start`/`dev`
+point at `index.js`; `start:api`/`start:worker` scripts added for the split-process entry points.
+**Verified:** booting all three entry points with an empty environment now produces validateEnv's clean,
+per-variable message and exits — reproduced directly, see PROGRESS.md. Booting with placeholder credentials now
+reaches `app.listen()` and the `/health` endpoint responds, confirmed via live `curl`. Regression tests added in
+`src/config/__tests__/validateEnv.test.js`.
+
+---
+
+### 1.1b — HIGH — `config/bullmq.js` threw at import time on missing `REDIS_URL`, crashing all three entry points
+**Location:** `backend/src/config/bullmq.js`
+
+Found while verifying the 1.1 fix. `bullmq.js` threw synchronously at module top-level if `REDIS_URL` was unset.
+Because this file is imported transitively by `jobs/index.js`, which all three entry points (`app.js`, `server.js`,
+`workers/index.js`) import statically, the same ESM-hoisting mechanism from 1.1 meant this throw happened before
+`app.listen()` — crashing the entire process, including `server.js` (the API-only process, which doesn't even call
+`startAllJobs()` and is documented as independent of worker/Redis availability). This directly contradicted
+`validateEnv.js`'s own classification of `REDIS_URL` as optional, and `app.js`'s documented design intent ("Start
+listening FIRST so a Redis/BullMQ outage never takes down the whole API — only background jobs are affected").
+
+**Reproduced:** booting with placeholder Supabase/Groq credentials and no `REDIS_URL` reached `app.listen()` (the
+`🚀 Clutch AI Backend` banner printed) but the process then threw `Error: REDIS_URL env variable is not set` at
+import time on a clean run — confirmed by direct `node` execution before the fix, in a background process with
+explicit exit-code checking (not just a 5-second timeout, which was ambiguous between "still booting" and "silently
+crashed").
+
+**Fix:** `bullmq.js` no longer throws when `REDIS_URL` is absent. It constructs the `IORedis` connection against a
+syntactically-valid loopback placeholder instead, which fails at the connection-attempt level — handled by the
+file's own existing `retryStrategy`/`reconnectOnError` logic exactly as an unreachable *configured* Redis already
+was, rather than crashing at import time. `bullmqConnectionState.status` is `'unconfigured'` in this case so
+downstream code can distinguish "never configured" from "configured but down." Retries are skipped immediately
+(rather than running the normal 10-attempt backoff) when no URL was ever configured, since retrying a known
+placeholder serves no purpose.
+
+**Second-order finding from verifying this fix:** fixing the import-time throw surfaced that `app.js` and
+`server.js` had no process-level `unhandledRejection`/`uncaughtException` handler — `workers/index.js` already had
+one, but the other two didn't. Once the import-time throw was removed, a later async rejection from BullMQ's
+internal Redis-connection handling (occurring outside any call stack this codebase directly controls/awaits) was
+still crashing the process a few seconds after it had already started accepting traffic. Added the same safety net
+`workers/index.js` already used (log and continue — infrastructure hiccups degrade background jobs, not request
+handling) to `app.js` and `server.js` as well, for consistency across all three entry points.
+
+**Verified:** booting with placeholder credentials and no `REDIS_URL` now stays running, serves `/health`
+successfully (confirmed via live `curl`), and logs the previously-fatal rejection as a non-fatal warning instead.
+
+**Fix status:** fixed and verified. Regression test added in `src/config/__tests__/bullmq.test.js` (import does not
+throw; `bullmqConnectionState.status` is `'unconfigured'`).
+
+---
+
+### 1.2 — MEDIUM — No `.env.example` for the backend
+**Location:** repo root / `backend/`
+
+`frontend/.env.example` exists; there is no backend equivalent. Combined with 1.1, a new environment is set up by
+guesswork. `validateEnv.js`'s `REQUIRED`/`OPTIONAL_WITH_WARNINGS` lists are the de facto source of truth for what's
+needed, but they're buried in code rather than discoverable at setup time.
+
+**Fix status:** planned, bundled with 1.1 (same root cause, same milestone).
+
+---
+
+### 1.3 — INFO (not a defect) — Zero Row-Level Security policies across 48 tables
+**Location:** `schema.sql`
+
+No table has `ENABLE ROW LEVEL SECURITY`. This is **not inherently a bug**: the backend exclusively uses
+`supabaseAdmin` (the service-role client, which bypasses RLS by design) for all queries — `config/supabase.js`
+exports it as the default export and every route/job imports that. RLS would be redundant defense-in-depth here,
+not a missing requirement, *as long as every single query path in the application correctly scopes by
+workspace/user*. That means tenant isolation is 100% dependent on application code being correct everywhere, with
+no database-level backstop if a future query is written carelessly.
+
+Reviewed in full (not just spot-checked) as of milestone 2: `middleware/workspace.js` (`resolveWorkspace`),
+`routes/opportunities.js` (`GET /:id`, `PUT /:id/status`, `GET /:id/intel`), `routes/user.js`
+(`switch-workspace`), `routes/workspaces.js` (`switch`, `GET /:id`), `routes/calendar.js` (`GET /team/:userId`),
+`routes/practice.js` (all 8 `:sessionId`-scoped routes, including the multi-step `DELETE` handler), `routes/chat.js`
+(all `:chatId`/`:messageId`-scoped routes, including the message-edit handler that checks both identifiers plus a
+role constraint), `routes/growth.js` (`:id`-scoped card routes), `routes/feedback.js` (`/history`, `/pending`).
+
+Every identifier-scoped query checked verifies both `user_id`/ownership AND `workspace_id` (or, in
+`practice.js`'s case, `user_id` alone, which is stricter) before returning or mutating data — not a client-supplied
+workspace/user id, consistently `req.user.id` / the resolved `req.workspace.id`. No IDOR found across this review.
+This is a genuine verification result, not an absence of looking: all route files with `:id`-shaped parameters in
+the codebase have now been read end to end for this specific concern.
+
+**Recommendation:** document this as a deliberate architectural choice (service-role-only, app-layer-enforced
+isolation) in ARCHITECTURE.md, and continue widening the spot-check sample during the remaining milestones,
+particularly around the routes not yet reviewed in depth (practice.js, chat.js, growth.js, feedback.js). Adding RLS
+policies now, on an app that has never had them, is nontrivial schema work with real risk of breaking legitimate
+`supabaseAdmin` queries if done carelessly — not something to do reactively without a specific finding driving it.
+
+---
+
+### 1.4 — LOW — Duplicate workspace-switch endpoints
+**Location:** `backend/src/routes/user.js` (`POST /api/user/switch-workspace`) and
+`backend/src/routes/workspaces.js` (`POST /api/workspaces/switch`)
+
+Both endpoints do the same thing: validate `workspace_id` is provided, verify active membership, verify the
+workspace isn't deleted, update `active_workspace_id`, invalidate both old and new workspace caches. Implementations
+have drifted slightly (e.g. `workspaces.js`'s version also returns the role in the response in a specific shape;
+`user.js`'s version logs differently) but are functionally redundant. This is the kind of duplicated-logic
+complexity the mission asks to simplify — **not acted on yet** because removing one is a contract change that could
+affect the frontend (out of scope to modify) if it's calling one specific path. Flagging for a decision rather than
+silently picking one.
+
+**Fix status:** fixed — see DECISIONS.md D3. Deduplicated the logic (one route now delegates to the other's
+handler) while keeping both URLs registered, since an external API consumer outside this repo couldn't be ruled
+out even though the frontend only uses `/api/workspaces/switch`.
+
+---
+
+### 1.5 — HIGH (upgraded from initial LOW rating) — Dependency: `multer` confirmed vulnerable to 4 real CVEs
+**Location:** `backend/package.json`, `backend/src/routes/upload.js`, `backend/src/routes/calendar.js`
+
+Originally flagged at LOW severity based only on npm's generic install-time deprecation warning, deliberately not
+treated as urgent without confirming an actual exploit path (see DECISIONS.md D4) — avoided inventing a
+vulnerability just because a dependency looked old. Followed up properly rather than leaving it as a permanent
+"someday" item: `npm audit` on this project reports no multer entry at all (its data appears to lag GitHub's own
+advisory feed for this package specifically). Checked GitHub Advisories/OSV/NVD directly and found the installed
+`1.4.5-lts.2` is confirmed vulnerable to four real, high-severity CVEs — most notably CVE-2025-47944 (CVSS 7.5,
+unhandled exception/DoS via a malformed multipart request) — all fixed in `2.0.x` or later. This is a dependency
+that directly parses user-controlled file uploads in two live routes (`routes/upload.js`'s general file upload,
+`routes/calendar.js`'s voice-memo upload), a directly attacker-reachable surface.
+
+**Fix:** checked both call sites use only the stable API surface unchanged across the 1.x/2.x boundary (no
+`diskStorage` with custom filenames, no `.fields()`, no `MulterError`-specific handling anywhere in the codebase —
+errors flow through the generic handler as plain `Error`s), making this a low-risk upgrade. Upgraded to
+`multer@2.5.0`. Verified functionally, not just by import/syntax check: a successful real multipart upload through
+the app's exact configuration (correct filename/mimetype/size/Buffer), the `fileFilter` rejection path producing
+the same error message as before, and a full app boot + `/health` check, all confirmed clean post-upgrade. The
+existing test suite has zero coverage of the upload routes either before or after this change — noted as a gap,
+not claimed as covered.
+
+**Fix status:** fixed and functionally verified.
+
+---
+
+### 1.6 — INFO — Test coverage is narrow relative to codebase size
+**Location:** `backend/src/**/__tests__`
+
+5 test files, 16 tests total, covering: metrics route (4 tests), provider error classification (4), one job's
+workspace-profile-matching fallback logic (3), JSON parser fallback behavior (3), pagination utility (2). No tests
+exist for: auth middleware, workspace resolution/membership checks, any opportunities/calendar/practice/goals route,
+background job handlers beyond the one above, or any database-integration-level behavior.
+
+All 16 existing tests pass (`npx vitest run`, verified).
+
+**Fix status:** will add targeted regression tests alongside each fix made during this engagement, per the mission's
+guidance to test what's touched rather than pad test count. A dedicated "raise coverage on X" milestone is not
+currently planned unless a specific fix calls for broader test scaffolding.
+
+### 1.7 — MEDIUM — Two live job handlers re-ran expensive AI calls on BullMQ redelivery
+**Location:** `backend/src/jobs/messageQueueWorker.js` — `handleSkillScores`, `handleCoachingAnnotations`
+
+Both jobs are enqueued live (confirmed: `routes/practice.js` enqueues `PRACTICE_SKILL_SCORES` and
+`PRACTICE_COACHING_ANNOTATIONS` with `attempts: 3` + exponential backoff, via `practiceWorker.js`). Neither had a
+guard against redelivery: a transient failure after the Groq call but before/during the DB write, or a worker
+crash/restart mid-job, causes BullMQ to retry the whole job, including the expensive AI generation call, from
+scratch — even though the correct end state (an `update()` with fresh results) would be identical to not retrying
+at all. `handlePlaybook` in the same file already had exactly this guard (`if (session.playbook_generated) return`)
+— just not applied consistently to its two neighbors.
+
+Not a correctness or data-duplication bug (these handlers only `update()`, never `insert()` or notify — unlike
+`handleGhost`/`handleReply` below, which were a different, higher-looking-severity pattern that turned out to be
+dead code). The real cost is wasted AI spend and latency on every retry.
+
+**Fix:** added an early-skip guard to both handlers — `handleSkillScores` skips regenerating `skill_scores` if
+already present on the session (and separately skips `retry_comparison` if already present, since that's an
+independent AI call with its own redelivery risk), `handleCoachingAnnotations` returns early if
+`coaching_annotations` is already a non-empty array. Matches the existing `handlePlaybook` pattern. The
+`checkAndGenerateWeaknessCard` call after skill scoring was deliberately left reachable in both the first-run and
+already-scored paths (not swallowed by an early return) because it has its own independent 14-day cooldown
+idempotency guard in `practiceWeaknessDetector.js` — layering a second, cruder guard in front of an
+already-self-protecting function would've been redundant and risked suppressing it in the crash-between-steps case.
+
+**Related, downgraded finding:** `handleGhost` and `handleReply` in the same file have a more serious-looking
+pattern (an `insert()` and a `notifyUser()` call with no redelivery guard at all — genuinely would create duplicate
+chat messages and duplicate push notifications on retry). Investigated whether this is reachable: it is not.
+Confirmed by grep that `QUEUE_JOB_TYPES.PRACTICE_GHOST` and `PRACTICE_REPLY` are never enqueued anywhere in the
+live codebase — the file's own comments say so accurately ("kept for legacy completeness... never enqueued from
+the message route") — and README.md independently, transparently discloses the same thing under "Dead code kept
+intentionally, not cleaned up yet," confirming this investigation reached the same conclusion already on record.
+That phrasing ("not cleaned up yet") reads as an acknowledged backlog item, not a deliberate preserve-at-all-costs
+choice, so removed in a follow-up pass (see below) rather than left as a permanent cleanup candidate.
+
+**Follow-up fix:** removed `handleReply` and `handleGhost` entirely, along with their `PRACTICE_REPLY`/
+`PRACTICE_GHOST` dispatch cases and the now-unused `PRACTICE_SCENARIOS` import. Before removing, specifically
+checked whether `DELIVERY_STATUS.GHOSTED` (the delivery-status value `handleGhost` used to set) was also safe to
+touch — it was not: `routes/practice.js`'s live V3 path writes `'ghosted'` directly, and the frontend
+(`PracticeSessionPage.tsx`, `api/types.ts`) actively reads and displays it. Left `DELIVERY_STATUS.GHOSTED`
+untouched; only the dead handler functions and their dispatch wiring were removed. Also left
+`QUEUE_JOB_TYPES.PRACTICE_REPLY`/`PRACTICE_GHOST` in `constants.js` alone — removing two unused string constants
+was marginal benefit for a small added risk versus the actual complexity reduction, which was the dead logic
+itself.
+
+**Fix status:** fixed and verified (full test suite passing). No targeted regression test added for the guard
+itself — exercising it meaningfully would require mocking Groq + Supabase + asserting the AI service was *not*
+called on a second invocation, which is a heavier integration-test investment than this specific, moderate-severity
+fix justifies on its own. Flagged in IMPLEMENTATION_PLAN.md as a candidate if job-handler test coverage becomes a
+dedicated milestone.
+
+---
+
+### 1.8 — HIGH — `pattern_insights` job was enqueued but had no registered handler — always failed
+**Location:** `backend/src/jobs/scheduledWorker.js`, `backend/src/jobs/patternDetectionJob.js`
+
+`patternDetectionJob.js` enqueues a `'pattern_insights'` job onto `scheduledQueue` on completion of every
+`pattern_detection` run (both its early-return and normal-completion code paths — confirmed these are mutually
+exclusive, not a double-enqueue). `scheduledWorker.js` imports `runPatternInsightsJob` from
+`patternInsightsJob.js` — a fully implemented job function — but never added it to the `HANDLERS` dispatch map.
+Every enqueued `pattern_insights` job therefore hit the worker's `if (!handler) throw new Error(...)` branch,
+failed, retried twice (`attempts: 2`), and was dead-lettered. `runPatternInsightsJob` could not run in production.
+
+This wasn't an oversight born of carelessness — both `scheduledWorker.js` and `registerSchedules.js` carried
+explicit comments showing a prior author correctly reasoned through the *adjacent* risk (don't add a second cron
+entry for `pattern_insights`, since it's meant to be chained off `pattern_detection`'s completion, and registering
+it both ways would double-execute it) and flagged it as unverified against the live system. The verification
+never happened; the actually-needed fix (the missing `HANDLERS` entry) was never made either, even though the
+investigation correctly identified where the real registration needed to happen.
+
+**Verified:** confirmed via direct grep + read of `patternDetectionJob.js` that `pattern_insights` is genuinely
+chained, not cron-driven — a second cron entry would be wrong, consistent with the original caution. Confirmed via
+grep that `runPatternInsightsJob` had zero call sites anywhere in the codebase before this fix.
+
+**Fix:** added `pattern_insights: runPatternInsightsJob` to `scheduledWorker.js`'s `HANDLERS` map. No new cron
+entry added (would reintroduce the double-execution risk the original comment correctly avoided).
+`registerSchedules.js`'s comment updated to record the verification as resolved rather than left open.
+
+**Fix status:** fixed. `HANDLERS` and `SCHEDULES` were both un-exported internal consts; exported both (the only
+change needed to make them testable, no behavior change) and added
+`src/jobs/__tests__/scheduledWorker.test.js`, asserting every name in `SCHEDULES` plus `pattern_insights`
+specifically has a registered handler. Verified the test has teeth, not just that it passes: temporarily reverted
+the `HANDLERS` fix and confirmed the test fails with the exact "expected function, got undefined" assertion before
+restoring the fix and re-confirming it passes.
+
+### 1.9 — HIGH — `schema.sql` was missing one migration's changes; a fresh setup would break two live calendar query paths
+**Location:** `schema.sql`, `migrations/add_event_id_to_commitments_signals.sql`
+
+README.md explicitly documents `schema.sql` as the single artifact a fresh setup applies to a new Supabase
+project ("The database schema is a single `schema.sql` file applied directly to the target Supabase project").
+This was checked directly rather than assumed: every numbered migration (`002` through `014`) and the other
+unnumbered migration (`20260719120000_drop_users_archetype.sql`) were traced against `schema.sql`'s current table
+definitions and all are correctly reflected — `schema.sql` genuinely is kept current for those.
+
+One migration was the exception: `migrations/add_event_id_to_commitments_signals.sql` (dated 2026-08-17) adds an
+`event_id` column, a foreign key to `user_events(id)`, and an index to both `conversation_commitments` and
+`conversation_signals`. None of this was present in `schema.sql`. Confirmed this isn't a theoretical gap: three
+live query sites — `routes/calendar.js` (two call sites) and `jobs/backgroundWorker.js` — filter both tables with
+`.eq('event_id', ...)`. A database provisioned from `schema.sql` alone, exactly as the README's setup
+instructions describe, would be missing this column entirely, and these three query paths (part of the explicitly
+protected calendar feature) would fail with a Postgres "column does not exist" error.
+
+**Fix:** added the `event_id uuid` column, the two FK constraints (matching the exact formatting and `ON DELETE
+SET NULL` semantics of four other `event_id` FK constraints already in the file, e.g. `chats_event_id_fkey`), and
+the two indexes to `schema.sql`, placed alongside each table's existing constraints/indexes and commented with a
+pointer back to the migration file and this audit entry, so a future reader can see why these particular entries
+look newer/differently-dated than their neighbors.
+
+**Verification limitation, stated plainly:** this sandbox has no `psql`/`pg_dump`/Postgres available to actually
+execute the edited `schema.sql` against a real database and confirm it applies cleanly. The edit was made by
+precise structural matching — the new column, constraint, and index blocks are byte-for-byte consistent in format
+with multiple existing, presumably-already-verified blocks in the same file, and the column/table/constraint names
+were cross-checked character-for-character against the original migration file. This is high confidence, not
+proof. Recommend running this against a real (even local/throwaway) Postgres instance before relying on it for an
+actual fresh deployment, and flagging that explicitly rather than claiming it's confirmed working.
+
+**Secondary, minor finding from the same investigation, fixed separately (see 1.10):** `conversation_commitments`
+had two exact-duplicate indexes on `prospect_id` — `idx_commitments_prospect` and `idx_commits_prospect`.
+
+**Fix status:** fixed, with the verification limitation above stated honestly rather than glossed over.
+
+### 1.10 — LOW — Duplicate index on `conversation_commitments.prospect_id`
+**Location:** `schema.sql`, new `migrations/015_drop_duplicate_commitments_prospect_index.sql`
+
+Found during the milestone 4 schema review: `idx_commitments_prospect` and `idx_commits_prospect` were exact
+duplicates (same table, same column, same index type) — almost certainly from two separate migration passes that
+each independently indexed the table without checking what the other had already added. The table's indexes
+overall split into two naming "families" (`idx_commitments_*` and `idx_commits_*`), suggesting this happened more
+than once in this table's history, though `prospect_id` was the only *exact* duplicate — the other
+`idx_commits_status`/`idx_commits_workspace`/`idx_commits_ws_user` indexes cover different column combinations
+than their `idx_commitments_*` counterparts, so they're not clear-cut duplicates in the same way, and weren't
+touched. Deciding whether that broader set is individually justified is real query-pattern/performance-tuning work
+this review can't do without a live database and real traffic data — scoped this fix narrowly to the one
+confirmed, unambiguous duplicate.
+
+Confirmed by repo-wide grep that neither index name is referenced by any application code or tooling, so removing
+either is safe — kept `idx_commitments_prospect` (listed first in the file) as canonical.
+
+**Fix:** removed the `CREATE INDEX idx_commits_prospect` statement from `schema.sql` (the fresh-install artifact —
+a new database built from it now simply never creates the duplicate). For any database already built from the old
+`schema.sql` (which `DECISIONS.md`/`AUDIT.md` can't know the state of from this codebase alone), added
+`migrations/015_drop_duplicate_commitments_prospect_index.sql` — a forward-only, non-destructive `DROP INDEX IF
+EXISTS`, safe to run at any time, drops only the redundant index structure, not any data or the identical index
+that remains.
+
+**Fix status:** fixed.
+
+### 1.11 — CRITICAL — `schema.sql` could not actually be applied to a fresh database at all
+**Location:** `schema.sql`, `README.md`
+
+The person running this engagement offered to install Postgres and Redis locally, which made it possible to
+actually execute `schema.sql` against a real, empty database for the first time, rather than relying on the
+structural-match confidence stated in 1.9/1.10. This surfaced a genuine, critical bug that no amount of reading
+the file would have caught with full confidence: **applying `schema.sql` to a fresh database failed partway
+through**, with cascading `relation "X" does not exist` errors across `workspace_members`, `prospects`, `chats`,
+`user_goals`, `objection_tracker`, and `workspace_activity`.
+
+Root cause, confirmed precisely: `pg_dump` output sections functions before tables. Most function bodies in
+Postgres are late-bound (not checked against the catalog until first call), so referencing a not-yet-created table
+inside a function body is normally harmless at `CREATE FUNCTION` time. But two patterns in this file's functions
+are NOT late-bound: PL/pgSQL `%ROWTYPE` variable declarations (e.g. `v_member workspace_members%ROWTYPE` in
+`accept_workspace_invite`, which needs to know the table's structure immediately to compile) and `LANGUAGE sql`
+function bodies (which Postgres parses/validates eagerly, unlike `plpgsql`). Every one of the ~24 functions in this
+file was defined before any table, so every function using either of these two patterns failed at creation time.
+
+**Fix:** moved the entire function-definition block (originally lines 22–645) to immediately after the last table
+definition, with no change to any function's or table's actual SQL — purely a reordering. Verified precisely: the
+extracted block's line count matched the original exactly before and after relocation (no content lost or
+duplicated), and a diff-equivalent check (table/function/index counts) confirmed nothing else changed.
+
+**Second, related finding from the same live test:** `schema.sql` has no `CREATE EXTENSION` statements at all
+(expected — `pg_dump` doesn't include them; Supabase manages extensions separately, e.g. via its dashboard), and
+the file turned out to depend on a specific, non-default extension layout for this particular project: `pg_trgm`
+installed in the `public` schema (confirmed by its trigram indexes being schema-qualified to
+`public.gin_trgm_ops`), while `uuid-ossp` is used via `extensions.uuid_generate_v4()` — a genuinely mixed setup,
+not the "everything in `extensions`" pattern Supabase defaults to for new projects. README.md documented none of
+this. A developer following its "schema.sql applied directly" instruction on a real fresh Supabase project would
+hit `operator class "public.gin_trgm_ops" does not exist` with no guidance.
+
+**Fix:** added a prerequisites note to README.md's Configuration section, documented precisely (which extension,
+which schema, confirmed by the exact error message a developer would see without it) rather than vaguely. Also
+fixed README.md's Configuration section separately citing the stale `SUPABASE_SERVICE_KEY`/`FIREBASE_PROJECT_ID`
+names already fixed in code during milestone 1 but never updated in the README prose — found while editing the
+same section for the extension note.
+
+**Verified, genuinely, by execution — not just read:** this environment now has Postgres 16 and Redis installed
+locally (`apt-get install postgresql redis-server`). Built a baseline matching the documented prerequisites exactly
+(a minimal `auth.users`/`auth.uid()` stub, since this schema assumes a real Supabase `auth` schema that a plain
+Postgres instance doesn't have — this stub is a test-only accommodation, not something `schema.sql` or the app
+needs; `extensions` schema with `uuid-ossp`/`pgcrypto`; `pg_trgm` in `public`) and applied the actual, fixed
+`schema.sql` file exactly as README instructs. Result: all 48 tables created, 55 functions (including Postgres's
+own trigger-support functions), 241 indexes, and the `event_id` columns/constraints from 1.9 and the de-duplicated
+index from 1.10 all present and correct. The only remaining message is `schema "public" already exists` at the
+file's very first statement — confirmed via external sources (Prisma's own Postgres-migration docs state this
+explicitly) to be expected, harmless, and reported by every tool restoring this kind of dump to any real target
+(Supabase, Neon, Prisma Postgres, vanilla Postgres all pre-create `public`), not a defect in this file.
+
+**What this changes about 1.9/1.10's earlier "no Postgres available, high confidence not proof" caveat:** that
+caveat is resolved for the file as a whole — it now demonstrably applies successfully end to end, including both
+of those earlier fixes, verified by actual execution in this same test.
+
+**Fix status:** fixed and verified by real execution against Postgres 16.
+
+### 1.12 — HIGH — `services/redis.js` hardcoded TLS, silently breaking non-TLS Redis for 7 files' worth of callers
+**Location:** `backend/src/services/redis.js`
+
+Found while running the live boot test for 1.11 (real Postgres/Redis, not placeholders) — this would not have
+been caught by any amount of reading, since the bug only manifests when the app actually tries to use a working,
+non-TLS `REDIS_URL`, a scenario the earlier milestones never exercised (prior tests used either no `REDIS_URL` at
+all, or a deliberately-unreachable placeholder for the `config/bullmq.js` fix).
+
+`getClient()` in this file unconditionally set `socket: { tls: true, servername: hostname }` regardless of whether
+`REDIS_URL` actually used `rediss://` (TLS) or plain `redis://`. `config/bullmq.js`'s separate IORedis connection
+already derives this correctly from the URL scheme (`isTLS = REDIS_URL.startsWith('rediss://')`) — this file did
+the same hostname-parsing-for-SNI work but then ignored the scheme entirely.
+
+**Confirmed live, not inferred:** booting against a real, local, plain `redis://127.0.0.1:6379` Redis instance
+logged `[Redis] getRawClient() failed: tls socket option is set to true which is mismatch with protocol...`, and
+every one of this client's 7 callers (`rateLimitStore.js`, `middleware/auth.js`, `middleware/workspace.js`,
+`utils/concurrencyGuard.js` — the distributed-locking utility this review already trusted for race-condition
+protection — `routes/insights.js`, `routes/metrics.js`, `routes/goals.js`) silently fell back to per-instance/
+no-op behavior instead of actually using Redis. Note this is a *different* Redis client than `config/bullmq.js`'s
+— BullMQ connected successfully in the same boot, confirming the bug was isolated to this file, not a general
+Redis-reachability problem.
+
+This is not a narrow edge case: a plain, non-TLS Redis is the common case for local development, self-hosted
+Redis, and Docker Compose setups — anything that isn't a managed TLS-terminated provider like Upstash. Every one
+of those legitimate setups would have silently lost rate limiting, workspace/auth caching, and distributed locking
+with zero functional error — just a degraded-mode log line easy to miss.
+
+**Fix:** derive `isTLS` from the URL scheme exactly as `config/bullmq.js` already does, and only set TLS socket
+options when `isTLS` is true (omit entirely otherwise, matching the `node-redis` package's expected shape for a
+non-TLS connection).
+
+**Verified by actual execution, not just syntax check:** re-ran the same live boot test after the fix. Log now
+shows `[Redis] Connected` and `[RateLimit] Redis-backed rate limit store initialized (namespace: "auth")` instead
+of the failure/fallback messages. Confirmed via `redis-cli keys "*"` that the app actually wrote real state to the
+real Redis instance during this boot (21 BullMQ schedules registered across three queues). Full test suite (23/23)
+still passing.
+
+**Fix status:** fixed and verified by real execution against a live, non-TLS Redis instance.
+
+## 2. Suspected / Needs Further Investigation
+
+Not yet confirmed — listed so they aren't lost, not yet acted on.
+
+- **`handleGhost`/`handleReply` dead code in `messageQueueWorker.js`** (see 1.7) — candidates for removal in a
+  dedicated cleanup pass, since they're unreachable but still maintained/read as if live. Not removed yet because
+  dead-code removal wasn't the active investigation and deserves its own deliberate pass rather than being folded
+  into an idempotency fix's commit.
+- **`backgroundWorker.js`'s idempotency** was read in milestone 1's initial recon and looked sound (deliberate
+  dual-path-race consolidation, well-commented) but hasn't had the same systematic trace milestone 3 gave
+  `messageQueueWorker.js`/`scheduledWorker.js`. Worth a closer pass if time allows.
+- **Migration consistency**: `migrations/` contains 15 numbered + 2 unnumbered-looking files
+  (`20260719120000_drop_users_archetype.sql`, `add_event_id_to_commitments_signals.sql`) alongside a 4627-line
+  `schema.sql`. Not yet verified whether `schema.sql` is kept in sync with the migrations directory, or which one is
+  the actual source of truth for a fresh setup.
+
+## 3. Explicitly Protected Areas (per project owner's instructions)
+
+Calendar, metrics, insights, and onboarding functionality must not be removed or restructured as part of combining
+this into a single product. Problems found in these areas will be documented here and in IMPLEMENTATION_PLAN.md,
+not silently "simplified away."

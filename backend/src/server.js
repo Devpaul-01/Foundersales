@@ -15,11 +15,10 @@
 // workers) — mirrors app.js exactly, just without the background-job
 // bootstrap at the bottom.
 //
-// Run with: node src/server.js
+// Run with: node src/index.server.js  (see that file for why validateEnv
+// moved out of this file — docs/backend-takeover/AUDIT.md 1.1)
 // ============================================================
 import 'dotenv/config';
-import { validateEnv } from './config/validateEnv.js';
-validateEnv();
 import { initSentry, setupSentryErrorHandler } from './config/sentry.js';
 initSentry();
 import { LIMITERS } from './config/limiters.js';
@@ -58,6 +57,17 @@ import workspaceActivityRoutes from './routes/workspace-activity.js';
 // to mount here even though this process never calls startAllJobs().
 import { serverAdapter } from './jobs/index.js';
 import supabaseAdmin from './config/supabase.js';
+
+// NOTE (docs/backend-takeover/AUDIT.md): see app.js's identical comment —
+// this process had the same missing-safety-net gap, for the same reason
+// (this file also imports jobs/index.js, transitively reaching
+// config/bullmq.js). Matching workers/index.js's existing approach.
+process.on('uncaughtException', (err) => {
+  console.error('[Process] Uncaught exception (non-fatal to the process, but investigate):', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[Process] Unhandled rejection (non-fatal to the process, but investigate):', reason);
+});
 
 const app = express();
 const PORT = process.env.PORT || 3001;

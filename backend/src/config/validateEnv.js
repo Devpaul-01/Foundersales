@@ -15,7 +15,11 @@
 const REQUIRED = [
   // Supabase
   { key: 'SUPABASE_URL',            hint: 'Your Supabase project URL (e.g. https://xxx.supabase.co)' },
-  { key: 'SUPABASE_SERVICE_KEY',    hint: 'Supabase service role key (from project API settings)' },
+  // NOTE: this used to say SUPABASE_SERVICE_KEY, which is not the variable
+  // config/supabase.js actually reads (SUPABASE_SERVICE_ROLE_KEY). That
+  // meant this check could never catch a genuinely missing service key —
+  // see docs/backend-takeover/AUDIT.md 1.1.
+  { key: 'SUPABASE_SERVICE_ROLE_KEY', hint: 'Supabase service role key (from project API settings, Service Role, not anon)' },
 
   // AI providers
   { key: 'GROQ_API_KEY',            hint: 'Groq API key — required for all AI features' },
@@ -25,9 +29,20 @@ const REQUIRED = [
 ];
 
 const OPTIONAL_WITH_WARNINGS = [
+  // Constructed at startup by config/supabase.js (the `supabase` named
+  // export) even though nothing in the codebase currently imports that
+  // export — see docs/backend-takeover/AUDIT.md for a note on removing the
+  // dead export itself in a follow-up. Kept as an optional-with-warning
+  // here rather than required, since no route path currently depends on it.
+  { key: 'SUPABASE_ANON_KEY',       hint: 'Supabase anon key — only used by the currently-unused non-admin Supabase client' },
   { key: 'REDIS_URL',               hint: 'Redis connection URL — workspace caching will be skipped without this' },
   { key: 'EXA_API_KEY',             hint: 'Exa Search API key — opportunity discovery will fall back to Groq without this' },
-  { key: 'FIREBASE_PROJECT_ID',     hint: 'Firebase project ID — push notifications will be disabled without this' },
+  // NOTE: this used to say FIREBASE_PROJECT_ID, which config/firebase.js
+  // does not read at all — it reads FIREBASE_SERVICE_ACCOUNT (a JSON
+  // credential blob), so this check could never catch the actual missing
+  // variable. Same bug class as the SUPABASE_SERVICE_KEY mismatch above —
+  // see docs/backend-takeover/AUDIT.md.
+  { key: 'FIREBASE_SERVICE_ACCOUNT', hint: 'Firebase service account JSON (as a single-line string) — push notifications will be disabled without this' },
   { key: 'FRONTEND_URL',            hint: 'Allowed CORS origin for your frontend (e.g. https://app.yoursite.com)' },
 ];
 

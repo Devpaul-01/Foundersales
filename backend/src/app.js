@@ -28,9 +28,15 @@
 //      config/limiters.js for the reasoning behind each one's specific
 //      numbers. sharedStore (the old single Redis-backed store variable)
 //      is gone; each limiter now owns its own namespaced store internally.
+// NOTE: required-env validation used to happen here via an early
+// validateEnv() call, with a comment claiming it ran before any other
+// import could touch process.env. That guarantee did not actually hold
+// because of ES module import hoisting — see docs/backend-takeover/AUDIT.md
+// 1.1 for the full explanation and reproduction. validateEnv() now runs in
+// src/index.js, the true process entry point, which is guaranteed (via a
+// dynamic import() of this file, not a static one) to execute first. This
+// file is no longer run directly — see package.json's start/dev scripts.
 import 'dotenv/config';
-import { validateEnv }                from './config/validateEnv.js';
-validateEnv();
 import { initSentry, setupSentryErrorHandler } from './config/sentry.js';
 initSentry();
 import { LIMITERS } from './config/limiters.js';
@@ -69,6 +75,27 @@ import growthRoutes                from './routes/growth.js';
 import workspaceActivityRoutes     from './routes/workspace-activity.js';
 import { startAllJobs, serverAdapter } from './jobs/index.js';
 import supabaseAdmin from './config/supabase.js';
+
+// NOTE (docs/backend-takeover/AUDIT.md): this process previously had no
+// process-level unhandledRejection/uncaughtException safety net, unlike
+// workers/index.js (which already had one). That gap was concrete, not
+// theoretical: reproduced crash — booting with no REDIS_URL configured
+// reaches app.listen() successfully (the intended degraded-mode behavior,
+// per this file's own comments below about Redis/BullMQ outages being
+// non-fatal), but then a later async rejection from BullMQ's internal
+// Redis connection handling — occurring outside any awaited call stack
+// this codebase controls — was going fully unhandled and crashing the
+// whole process a few seconds after it had already started accepting
+// traffic. Matching workers/index.js's existing approach: log and keep
+// running, since an infrastructure hiccup in a dependency the app already
+// treats as optional (Redis/BullMQ) should degrade background job
+// processing, not take down request handling.
+process.on('uncaughtException', (err) => {
+  console.error('[Process] Uncaught exception (non-fatal to the process, but investigate):', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[Process] Unhandled rejection (non-fatal to the process, but investigate):', reason);
+});
 
 const app  = express();
 const PORT = 3001;

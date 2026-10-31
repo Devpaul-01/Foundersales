@@ -82,6 +82,39 @@ const handlers = {
   async [BACKGROUND_JOB_TYPES.TIP_CARD_GENERATE](data) {
     const { userId, workspaceId, goalId, tip_context, goal_text, product_description } = data;
     logJob(BACKGROUND_JOB_TYPES.TIP_CARD_GENERATE, { userId, goalId });
+
+    // Idempotency guard (docs/backend-takeover/AUDIT.md): this queue's
+    // defaultJobOptions give every job here attempts: 3, and this handler
+    // had no guard against redelivery — unlike every other growth-card
+    // handler in this file (FIRST_TIME_CARDS_GENERATE, CHECKIN_TIP_GENERATE
+    // both check "already generated today" first). A transient failure
+    // after the Groq call but before/during the insert (or a worker
+    // crash/restart mid-job) would call Groq again and insert a SECOND
+    // growth card for the same goal note — a user-visible duplicate, not
+    // just wasted spend.
+    //
+    // A query filtering on metadata->>goal_id (the JSONB field this insert
+    // already sets below) would be the precise fix, but this environment
+    // has no way to verify that exact PostgREST filter shape against a
+    // live Supabase project (see docs/backend-takeover/PROGRESS.md on the
+    // app<->real-Supabase verification gap), and an incorrectly-shaped
+    // guard that silently never matches is worse than no guard at all —
+    // it gives false confidence duplicates are prevented when they
+    // aren't. Using the same "already generated today" date-window
+    // pattern its siblings already use instead: proven correct in this
+    // exact codebase (FIRST_TIME_CARDS_GENERATE, CHECKIN_TIP_GENERATE),
+    // and a tighter per-goalId check can replace this later once it can
+    // actually be verified against a real Supabase project.
+    const today = new Date().toISOString().split('T')[0];
+    const { count } = await supabaseAdmin.from('growth_cards')
+      .select('id', { count: 'exact', head: true })
+      .eq('workspace_id', workspaceId).eq('user_id', userId)
+      .eq('generated_by', 'goal_note_ai').gte('created_at', today + 'T00:00:00');
+    if (count > 0) {
+      log('tip_card_generate skipped — already generated a goal-note tip today', { userId, goalId });
+      return;
+    }
+
     const { content: tc } = await callWithFallbackGroq({
       systemPrompt: `Generate a growth tip. Context: ${tip_context}. Goal: ${goal_text}. Product: ${product_description ?? ''}. Respond ONLY as JSON: { "title": "<10 words max>", "body": "<2-3 sentences actionable advice>" }`,
       messages: [{ role: 'user', content: 'Generate the tip.' }],

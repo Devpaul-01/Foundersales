@@ -457,6 +457,52 @@ still passing.
 
 **Fix status:** fixed and verified by real execution against a live, non-TLS Redis instance.
 
+### 1.13 — MEDIUM — `backgroundWorker.js`: systematic idempotency trace, one real gap found and fixed
+**Location:** `backend/src/jobs/backgroundWorker.js`
+
+Milestone 1's initial read of this file looked sound but wasn't re-traced with the same systematic rigor
+Milestone 3 gave `messageQueueWorker.js`/`scheduledWorker.js`. Closed that gap: read all 15 handlers plus the
+services they delegate to, and confirmed `backgroundQueue` has `defaultJobOptions: { attempts: 3, ... }` applied
+queue-wide (`jobs/queues.js`), meaning every handler here is genuinely subject to redelivery unless a specific
+`.add()` call overrides it — not just the ones with visible `attempts:` at the call site.
+
+Result: 13 of 15 handlers are correctly guarded, several explicitly and well-commented (`CALENDAR_PREP_GENERATE`'s
+"Layer 1 idempotency" re-check, `CALENDAR_UPDATE_PROSPECT_HEALTH`'s explicit "no guard needed — recomputes from
+source data" comment, `voiceMemoService.js`'s `transcribeMemo`/`enrichMemo` both explicitly marked
+`// idempotency guard`). `CALENDAR_EXTRACT_COMMITMENTS_SIGNALS`, `CALENDAR_GENERATE_FOLLOWUP`, `CHAT_SUMMARIZE`,
+`CHECKIN_TIP_GENERATE`, `FIRST_TIME_CARDS_GENERATE` all check prior-completion state before doing anything.
+`PROSPECT_DEDUP_SCAN` is a read-and-flag scan, naturally safe to re-run.
+
+**One confirmed gap:** `TIP_CARD_GENERATE` had no guard at all — a plain `insert()` after a Groq call, structurally
+identical to its two well-guarded neighbors (`FIRST_TIME_CARDS_GENERATE`, `CHECKIN_TIP_GENERATE`) but missing their
+"already generated today" check. A transient failure after the Groq call but before/during the insert, or a
+worker crash/restart mid-job, would redeliver and insert a second, user-visible duplicate growth card — not just
+wasted AI spend.
+
+**Fix:** added the same "already generated today" date-window guard its siblings already use, scoped to
+`generated_by = 'goal_note_ai'`. **Deliberate tradeoff, stated plainly:** a precise per-goal-note guard (filtering
+on the `metadata.goal_id` this insert already sets) would be tighter, but this environment has no way to verify
+that specific PostgREST JSONB-path filter shape against a real Supabase project (see the app↔real-Supabase gap
+noted in PROGRESS.md), and an incorrectly-shaped guard that silently never matches is worse than no guard — false
+confidence duplicates are prevented when they aren't. Used the proven-correct, coarser pattern instead. Real
+consequence of the coarser guard: if a user logs two separate goal notes that each trigger `needs_tip_card` on the
+same day, only the first produces a tip card — previously both would have (correctly, no bug there before this
+fix). This is a minor, known, intentional narrowing in exchange for closing a real duplicate-card bug with a
+verifiable fix rather than an unverifiable precise one. Noted as a candidate to tighten once the app↔Supabase
+verification gap is closed (see PROGRESS.md).
+
+**Second gap, investigated and flagged rather than fixed:** `SEED_MEMORY` (`groq-onboarding.js`'s
+`seedMemoryFromOnboarding`) has a `MEMORY_CAP` that bounds unbounded growth but does not actually prevent
+duplicate-ish facts from being inserted on a genuine redelivery of the same job (confirmed reachable: its two
+real call sites in `routes/onboarding.js` use no `jobId`/`attempts` override, so they inherit the queue's
+`attempts: 3`). Not fixed here: this sits inside the explicitly protected onboarding flow, and the right fix shape
+is a genuine product judgment call this review isn't positioned to make unilaterally — e.g. should a retry
+re-extract facts fresh (current behavior, bounded by the cap), or should it skip entirely if any onboarding-sourced
+facts already exist for this user? Flagging for the person's decision rather than guessing.
+
+**Fix status:** `TIP_CARD_GENERATE` fixed and verified (syntax check, full test suite 23/23). `SEED_MEMORY` flagged,
+not fixed — see IMPLEMENTATION_PLAN.md.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

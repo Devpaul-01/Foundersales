@@ -106,7 +106,27 @@ read-only confidence for the schema.sql fixes made in milestone 4.
   correctly. Verified by re-running the live boot test: Redis-backed rate limiting now initializes correctly
   instead of silently falling back to in-memory. See AUDIT.md 1.12.
 
+## Milestone 7 — backgroundWorker.js idempotency trace — ✅ DONE
+**Addresses:** AUDIT.md 1.13
+
+Closed the gap noted since milestone 1: this file hadn't been re-traced with the same rigor milestone 3 gave the
+other job files. Read all 15 handlers plus every service they delegate to; confirmed 13 are correctly guarded (one
+is naturally idempotent by design, several are explicitly commented as such). One real gap found and fixed
+(`TIP_CARD_GENERATE`, a genuine missing guard vs. its two structurally-identical, correctly-guarded neighbors). One
+gap found and deliberately left for the person's decision rather than fixed unilaterally (`SEED_MEMORY`, inside the
+protected onboarding flow, where the correct fix shape is a product judgment call).
+
 ## Deferred / needs a decision, not yet scheduled
+
+- **`SEED_MEMORY`'s redelivery behavior** (AUDIT.md 1.13) — `seedMemoryFromOnboarding` doesn't guard against
+  inserting duplicate-ish memory facts on a genuine job redelivery (bounded by `MEMORY_CAP`, not prevented). Two
+  reasonable fixes exist (skip entirely if onboarding-sourced facts already exist, vs. the current re-extract/cap
+  behavior) and choosing between them is a product decision about onboarding behavior, not an engineering one —
+  flagging for the person rather than picking unilaterally inside an explicitly protected flow.
+- **`TIP_CARD_GENERATE`'s guard precision** (AUDIT.md 1.13) — the fix added is deliberately coarser (one
+  goal-note tip per user per day) than a precise per-goal-note check would be, because the precise version needs a
+  PostgREST JSONB-path filter this environment can't verify against a real Supabase project. Worth tightening once
+  that verification gap (see PROGRESS.md) is closed.
 
 - ~~`handleGhost`/`handleReply` dead code in `messageQueueWorker.js`~~ — **done.** Removed, along with dispatch
   cases and the unused `PRACTICE_SCENARIOS` import. `DELIVERY_STATUS.GHOSTED` specifically checked and kept, since

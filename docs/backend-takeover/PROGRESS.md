@@ -75,13 +75,34 @@
 All deferred items from the original milestones 1-4 pass are now resolved. 7 additional commits this session (18
 total on `backend-takeover`).
 
+### Done (continued, same session) — Milestone 6: real-infrastructure verification
+- The person offered to install Postgres and Redis locally rather than continuing to rely on the "no Postgres
+  available" caveat. Installed both (`apt-get install postgresql redis-server`), started both services.
+- Applied `schema.sql` to a genuinely fresh, empty database and found it **actually failed** — a real, critical,
+  previously-undetected bug (functions dumped before tables, two patterns validated eagerly rather than deferred).
+  Fixed by relocating the function-definition block, verified lossless, then re-verified by full successful
+  application end to end (48 tables, 55 functions, 241 indexes, including milestone 4/5's fixes all present).
+- Found and documented a related undocumented prerequisite (`pg_trgm` needed in `public` specifically for this
+  project) and fixed two stale variable names in README.md's prose left over from milestone 1's code fixes.
+- The same real-Redis boot test surfaced a second, independent, genuine bug: `services/redis.js` hardcoded TLS
+  unconditionally, silently breaking rate limiting, workspace/auth caching, and distributed locking for any
+  non-TLS Redis (the common case for local dev / self-hosted setups) — 7 files' worth of callers affected. Fixed
+  to derive TLS from the URL scheme, matching the correct pattern already used in `config/bullmq.js`. Verified by
+  re-running the boot test: Redis-backed rate limiting now initializes correctly.
+- 2 commits this session for milestone 6 (20 total on `backend-takeover`).
+
 ### Not yet started
-- No scoped work remains from the original engagement plan. Any further work would be a fresh audit pass over
-  areas not yet covered this session (e.g. a closer idempotency trace of `backgroundWorker.js`, noted but not
-  deeply re-verified since milestone 1's initial read) or the project owner's next priority.
-- **Still open, stated honestly:** the `schema.sql` edits (AUDIT.md 1.9, 1.10) have not been executed against a
-  real Postgres instance — no `psql`/`pg_dump`/Postgres available in this sandbox. High structural confidence, not
-  proof. Recommend validating before relying on them for an actual fresh deployment.
+- No scoped work remains from the original engagement plan or the deferred items. Any further work would be a
+  fresh audit pass over areas not yet covered this session (e.g. a closer idempotency trace of
+  `backgroundWorker.js`, noted but not deeply re-verified since milestone 1's initial read) or the project owner's
+  next priority.
+- The `schema.sql` → real Supabase project gap that remains: this session's local Postgres cannot fully replicate
+  Supabase's PostgREST API layer, so the actual backend app (which talks to Supabase via `supabaseAdmin`, not raw
+  SQL) could not be boot-tested against this local database for its data operations — only `schema.sql` itself was
+  verified by direct SQL execution. Recommend a final check against an actual Supabase project (or Supabase's own
+  local CLI/Docker stack, which does include PostgREST) before relying on this for a real deployment, though the
+  SQL-level verification here is substantially stronger evidence than the structural-read confidence milestone 4
+  originally shipped with.
 
 ### Verified facts, stated plainly
 - Existing test suite: 16/16 passing, confirmed by running `npx vitest run` directly.

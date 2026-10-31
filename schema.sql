@@ -1,6 +1,32 @@
 --
 -- PostgreSQL database dump
 --
+-- NOTE (docs/backend-takeover/AUDIT.md, milestone 6): this file's
+-- function definitions were originally dumped BEFORE the tables those
+-- functions reference. A handful of functions use %ROWTYPE declarations
+-- or LANGUAGE sql bodies — both are validated against the catalog at
+-- CREATE FUNCTION time, not deferred to first call like a typical
+-- plpgsql function body — so applying this file as originally ordered
+-- failed partway through with errors like 'relation "workspace_members"
+-- does not exist'. Confirmed by actually applying the file against a
+-- real, empty Postgres database (not just read as text): it failed at
+-- line ~140 (accept_workspace_invite's v_member workspace_members%ROWTYPE
+-- declaration, since workspace_members wasn't created until line 1868 in
+-- the original ordering). All CREATE FUNCTION statements have been moved
+-- to immediately after every CREATE TABLE statement, fixing this, with
+-- no change to any function's or table's actual definition.
+--
+-- Separately, confirmed by the same live-database test: this file's
+-- trigram-search indexes (e.g. idx_chats_title_search) are schema-
+-- qualified to public.gin_trgm_ops, meaning this project's pg_trgm
+-- extension is installed in the public schema specifically, not the
+-- extensions schema Supabase uses by default for most extensions since
+-- pg_dump does not include CREATE EXTENSION statements (extension
+-- management is handled separately, e.g. via the Supabase dashboard) —
+-- `CREATE EXTENSION pg_trgm WITH SCHEMA public;` (or enabling it via the
+-- dashboard before this schema is applied) is a real prerequisite this
+-- file alone does not communicate. See README.md's Prerequisites section.
+--
 
 
 
@@ -17,631 +43,6 @@ CREATE SCHEMA public;
 
 COMMENT ON SCHEMA public IS 'standard public schema';
 
-
---
--- Name: accept_workspace_invite(uuid, text); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.accept_workspace_invite(p_user_id uuid, p_token_hash text) RETURNS json
-    LANGUAGE plpgsql SECURITY DEFINER
-    AS $$
-DECLARE
-  v_member       workspace_members%ROWTYPE;
-    v_workspace_id UUID;
-      v_role         TEXT;
-        v_owner_id     UUID;
-          v_owner_profile workspace_profiles%ROWTYPE;
-          BEGIN
-            -- Get the pending invite
-              SELECT * INTO v_member
-                FROM   workspace_members
-                  WHERE  invite_token  = p_token_hash
-                      AND  status        = 'pending_invite'
-                          AND  (invite_expires_at IS NULL OR invite_expires_at > NOW())
-                            LIMIT 1
-                              FOR UPDATE;
-
-                                IF NOT FOUND THEN
-                                    RETURN json_build_object('error', 'INVALID_OR_EXPIRED_TOKEN');
-                                      END IF;
-
-                                        -- Check if already a member
-                                          IF EXISTS (
-                                              SELECT 1 FROM workspace_members
-                                                  WHERE workspace_id = v_member.workspace_id
-                                                        AND user_id      = p_user_id
-                                                              AND status       = 'active'
-                                                                ) THEN
-                                                                    RETURN json_build_object('error', 'ALREADY_A_MEMBER');
-                                                                      END IF;
-
-                                                                        v_workspace_id := v_member.workspace_id;
-                                                                          v_role         := v_member.role;
-
-                                                                            -- Get workspace owner
-                                                                              SELECT owner_user_id INTO v_owner_id
-                                                                                FROM workspaces
-                                                                                  WHERE id = v_workspace_id;
-
-                                                                                    -- Get owner's profile
-                                                                                      SELECT * INTO v_owner_profile
-                                                                                        FROM workspace_profiles
-                                                                                          WHERE workspace_id = v_workspace_id
-                                                                                              AND user_id = v_owner_id
-                                                                                                LIMIT 1;
-
-                                                                                                  -- Update invite to active membership
-                                                                                                    UPDATE workspace_members
-                                                                                                      SET    user_id      = p_user_id,
-                                                                                                               status       = 'active',
-                                                                                                                        joined_at    = NOW(),
-                                                                                                                                 invite_token = NULL
-                                                                                                                                   WHERE  id = v_member.id;
-
-                                                                                                                                     -- Insert profile with defaults from owner (NO DUPLICATES)
-                                                                                                                                       INSERT INTO workspace_profiles (
-                                                                                                                                           workspace_id,
-                                                                                                                                               user_id,
-                                                                                                                                                   onboarding_completed,
-                                                                                                                                                       onboarding_step,
-                                                                                                                                                           onboarding_questions,
-                                                                                                                                                               preferred_platforms,
-                                                                                                                                                                   product_description,
-                                                                                                                                                                       target_audience,
-                                                                                                                                                                           voice_profile,
-                                                                                                                                                                               onboarding_answers,
-                                                                                                                                                                                   primary_goal,
-                                                                                                                                                                                       archetype,
-                                                                                                                                                                                           industry,
-                                                                                                                                                                                               business_stage
-                                                                                                                                                                                                 )
-                                                                                                                                                                                                   VALUES (
-                                                                                                                                                                                                       v_workspace_id,
-                                                                                                                                                                                                           p_user_id,
-                                                                                                                                                                                                               false,
-                                                                                                                                                                                                                   1,
-                                                                                                                                                                                                                       COALESCE(v_owner_profile.onboarding_questions, '{}'::jsonb),
-                                                                                                                                                                                                                           COALESCE(v_owner_profile.preferred_platforms, '{}'::text[]),
-                                                                                                                                                                                                                               v_owner_profile.product_description,
-                                                                                                                                                                                                                                   v_owner_profile.target_audience,
-                                                                                                                                                                                                                                       COALESCE(v_owner_profile.voice_profile, '{}'::jsonb),
-                                                                                                                                                                                                                                           COALESCE(v_owner_profile.onboarding_answers, '{}'::jsonb),
-                                                                                                                                                                                                                                               v_owner_profile.primary_goal,
-                                                                                                                                                                                                                                                   v_owner_profile.archetype,
-                                                                                                                                                                                                                                                       v_owner_profile.industry,
-                                                                                                                                                                                                                                                           v_owner_profile.business_stage
-                                                                                                                                                                                                                                                             )
-                                                                                                                                                                                                                                                               ON CONFLICT (workspace_id, user_id) DO UPDATE SET
-                                                                                                                                                                                                                                                                   onboarding_questions = EXCLUDED.onboarding_questions,
-                                                                                                                                                                                                                                                                       preferred_platforms = EXCLUDED.preferred_platforms,
-                                                                                                                                                                                                                                                                           product_description = EXCLUDED.product_description,
-                                                                                                                                                                                                                                                                               target_audience = EXCLUDED.target_audience,
-                                                                                                                                                                                                                                                                                   voice_profile = EXCLUDED.voice_profile,
-                                                                                                                                                                                                                                                                                       onboarding_answers = EXCLUDED.onboarding_answers,
-                                                                                                                                                                                                                                                                                           primary_goal = EXCLUDED.primary_goal,
-                                                                                                                                                                                                                                                                                               archetype = EXCLUDED.archetype,
-                                                                                                                                                                                                                                                                                                   industry = EXCLUDED.industry,
-                                                                                                                                                                                                                                                                                                       business_stage = EXCLUDED.business_stage;
-
-                                                                                                                                                                                                                                                                                                         -- Update user's active workspace
-                                                                                                                                                                                                                                                                                                           UPDATE users
-                                                                                                                                                                                                                                                                                                             SET active_workspace_id = v_workspace_id
-                                                                                                                                                                                                                                                                                                               WHERE id = p_user_id;
-
-                                                                                                                                                                                                                                                                                                                 RETURN json_build_object(
-                                                                                                                                                                                                                                                                                                                     'workspace_id', v_workspace_id,
-                                                                                                                                                                                                                                                                                                                         'role',         v_role
-                                                                                                                                                                                                                                                                                                                           );
-
-                                                                                                                                                                                                                                                                                                                           EXCEPTION
-                                                                                                                                                                                                                                                                                                                             WHEN OTHERS THEN
-                                                                                                                                                                                                                                                                                                                                 RAISE;
-                                                                                                                                                                                                                                                                                                                                 END;
-                                                                                                                                                                                                                                                                                                                                 $$;
-
-
---
--- Name: create_user_profile(uuid, text, text, text); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.create_user_profile(p_id uuid, p_email text, p_name text DEFAULT NULL::text, p_tier text DEFAULT 'free'::text) RETURNS void
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO 'public'
-    AS $$
-          BEGIN
-            INSERT INTO users (id, email, name, tier, created_at)
-              VALUES (p_id, p_email, p_name, p_tier, NOW())
-                ON CONFLICT (id) DO NOTHING;  -- safe if called twice
-                END;
-                $$;
-
-
---
--- Name: create_user_with_workspace(uuid, text, text, text, text); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.create_user_with_workspace(p_user_id uuid, p_email text, p_name text, p_tier text DEFAULT 'free'::text, p_workspace_name text DEFAULT NULL::text) RETURNS json
-    LANGUAGE plpgsql SECURITY DEFINER
-    AS $$
-DECLARE
-  v_workspace_id UUID;
-  v_slug         TEXT;
-  v_ws_name      TEXT;
-BEGIN
-  INSERT INTO users (id, email, name, tier)
-  VALUES (p_user_id, p_email, p_name, p_tier)
-  ON CONFLICT (id) DO NOTHING;
-
-  v_ws_name := COALESCE(
-    p_workspace_name,
-    COALESCE(p_name, split_part(p_email, '@', 1)) || '''s Workspace'
-  );
-  v_slug := lower(regexp_replace(
-    COALESCE(p_name, split_part(p_email, '@', 1)),
-    '[^a-z0-9]+', '-', 'g'
-  )) || '-' || substring(p_user_id::TEXT, 1, 8);
-
-  INSERT INTO workspaces (name, slug, plan, owner_user_id)
-  VALUES (v_ws_name, v_slug, p_tier, p_user_id)
-  RETURNING id INTO v_workspace_id;
-
-  INSERT INTO workspace_members (workspace_id, user_id, role, status, joined_at)
-  VALUES (v_workspace_id, p_user_id, 'owner', 'active', now());
-
-  INSERT INTO workspace_profiles (workspace_id, user_id)
-  VALUES (v_workspace_id, p_user_id);
-
-  UPDATE users SET active_workspace_id = v_workspace_id WHERE id = p_user_id;
-
-  RETURN json_build_object('workspace_id', v_workspace_id, 'slug', v_slug);
-END;
-$$;
-
-
---
--- Name: create_workspace_for_user(uuid, text, text, text); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.create_workspace_for_user(p_user_id uuid, p_name text, p_slug text, p_plan text) RETURNS json
-    LANGUAGE plpgsql SECURITY DEFINER
-    AS $$
-DECLARE
-  v_workspace_id UUID;
-  v_result       JSON;
-BEGIN
-  -- 1. Insert workspace
-  INSERT INTO workspaces (name, slug, plan, owner_user_id, is_deleted, settings)
-  VALUES (p_name, p_slug, p_plan, p_user_id, false, '{}')
-  RETURNING id INTO v_workspace_id;
-
-  -- 2. Insert owner membership
-  INSERT INTO workspace_members (workspace_id, user_id, role, status, joined_at)
-  VALUES (v_workspace_id, p_user_id, 'owner', 'active', NOW());
-
-  -- 3. Insert empty workspace_profile (filled during onboarding)
-  INSERT INTO workspace_profiles (workspace_id, user_id, onboarding_completed, onboarding_step)
-  VALUES (v_workspace_id, p_user_id, false, 0);
-
-  -- 4. Set active_workspace_id on users
-  UPDATE users
-  SET active_workspace_id = v_workspace_id
-  WHERE id = p_user_id;
-
-  -- Return the created workspace as JSON
-  SELECT row_to_json(w) INTO v_result
-  FROM workspaces w
-  WHERE w.id = v_workspace_id;
-
-  RETURN v_result;
-
-EXCEPTION
-  WHEN OTHERS THEN
-    -- Any step failure automatically rolls back all 4 steps
-    RAISE;
-END;
-$$;
-
-
---
--- Name: expire_stale_invites(); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.expire_stale_invites() RETURNS integer
-    LANGUAGE plpgsql SECURITY DEFINER
-    AS $$
-DECLARE expired_count INTEGER;
-BEGIN
-  UPDATE workspace_members
-  SET status     = 'removed',
-      updated_at = now()
-  WHERE status          = 'pending_invite'
-    AND invite_expires_at < now();
-  GET DIAGNOSTICS expired_count = ROW_COUNT;
-  RETURN expired_count;
-END;
-$$;
-
-
---
--- Name: find_similar_prospects(uuid, uuid, text, numeric); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.find_similar_prospects(p_workspace_id uuid, p_prospect_id uuid, p_name text, p_threshold numeric) RETURNS TABLE(id uuid, similarity numeric)
-    LANGUAGE sql STABLE
-    AS $$
-  SELECT p.id, similarity(p.name, p_name) AS similarity
-  FROM prospects p
-  WHERE p.workspace_id = p_workspace_id
-    AND p.id != p_prospect_id
-    AND similarity(p.name, p_name) >= p_threshold
-  ORDER BY similarity DESC
-  LIMIT 5;
-$$;
-
-
---
--- Name: increment_chat_stats(uuid); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.increment_chat_stats(p_chat_id uuid) RETURNS void
-    LANGUAGE sql
-    AS $$
-  UPDATE chats
-  SET message_count    = COALESCE(message_count, 0) + 1,
-      last_message_at  = NOW()
-  WHERE id = p_chat_id;
-$$;
-
-
---
--- Name: increment_goal_progress(uuid, numeric); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.increment_goal_progress(p_goal_id uuid, p_delta numeric) RETURNS void
-    LANGUAGE sql
-    AS $$
-  UPDATE user_goals
-  SET current_value = COALESCE(current_value, 0) + p_delta,
-      updated_at    = now()
-  WHERE id = p_goal_id;
-$$;
-
-
---
--- Name: increment_performance_stats(uuid, boolean); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.increment_performance_stats(p_user_id uuid, p_is_positive boolean) RETURNS void
-    LANGUAGE plpgsql
-    AS $$
-DECLARE
-  v_workspace_id uuid;
-BEGIN
-  SELECT active_workspace_id INTO v_workspace_id FROM users WHERE id = p_user_id;
-  IF v_workspace_id IS NULL THEN
-    RAISE WARNING 'increment_performance_stats(2-arg): user % has no active_workspace_id, skipping', p_user_id;
-    RETURN;
-  END IF;
-  PERFORM public.increment_performance_stats(p_user_id, p_is_positive, v_workspace_id);
-END;
-$$;
-
-
---
--- Name: increment_performance_stats(uuid, boolean, uuid); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.increment_performance_stats(p_user_id uuid, p_is_positive boolean, p_workspace_id uuid) RETURNS void
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  INSERT INTO user_performance_profiles
-    (user_id, workspace_id, total_sent, total_positive, total_negative, positive_rate)
-  VALUES (
-    p_user_id, p_workspace_id, 1,
-    CASE WHEN p_is_positive THEN 1 ELSE 0 END,
-    CASE WHEN p_is_positive THEN 0 ELSE 1 END,
-    CASE WHEN p_is_positive THEN 1.0 ELSE 0.0 END
-  )
-  ON CONFLICT (user_id, workspace_id) DO UPDATE SET
-    total_sent     = user_performance_profiles.total_sent + 1,
-    total_positive = user_performance_profiles.total_positive
-                     + (CASE WHEN p_is_positive THEN 1 ELSE 0 END),
-    total_negative = user_performance_profiles.total_negative
-                     + (CASE WHEN p_is_positive THEN 0 ELSE 1 END),
-    positive_rate  = ROUND(
-      (user_performance_profiles.total_positive
-       + (CASE WHEN p_is_positive THEN 1 ELSE 0 END))::NUMERIC
-      / (user_performance_profiles.total_sent + 1), 4
-    ),
-    updated_at = now();
-END;
-$$;
-
-
---
--- Name: increment_performance_stats(uuid, uuid, boolean); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.increment_performance_stats(p_workspace_id uuid, p_user_id uuid, p_is_positive boolean) RETURNS void
-    LANGUAGE plpgsql
-    AS $$
-                    BEGIN
-                      INSERT INTO user_performance_profiles
-                          (workspace_id, user_id, total_sent, total_positive, total_negative, positive_rate)
-                            VALUES (
-                                p_workspace_id,
-                                    p_user_id,
-                                        1,
-                                            CASE WHEN p_is_positive THEN 1 ELSE 0 END,
-                                                CASE WHEN p_is_positive THEN 0 ELSE 1 END,
-                                                    CASE WHEN p_is_positive THEN 1.0 ELSE 0.0 END
-                                                      )
-                                                        ON CONFLICT (workspace_id, user_id) DO UPDATE SET
-                                                            total_sent     = user_performance_profiles.total_sent + 1,
-                                                                total_positive = user_performance_profiles.total_positive
-                                                                                     + (CASE WHEN p_is_positive THEN 1 ELSE 0 END),
-                                                                                         total_negative = user_performance_profiles.total_negative
-                                                                                                              + (CASE WHEN p_is_positive THEN 0 ELSE 1 END),
-                                                                                                                  positive_rate  = ROUND(
-                                                                                                                        (user_performance_profiles.total_positive
-                                                                                                                               + (CASE WHEN p_is_positive THEN 1 ELSE 0 END))::NUMERIC
-                                                                                                                                     / (user_performance_profiles.total_sent + 1), 4
-                                                                                                                                         );
-                                                                                                                                         END;
-                                                                                                                                         $$;
-
-
---
--- Name: is_workspace_member(uuid); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.is_workspace_member(ws_id uuid) RETURNS boolean
-    LANGUAGE sql SECURITY DEFINER
-    AS $$
-  SELECT EXISTS (
-    SELECT 1 FROM workspace_members
-    WHERE workspace_id = ws_id
-      AND user_id      = auth.uid()
-      AND status       = 'active'
-  );
-$$;
-
-
---
--- Name: record_ai_usage(uuid, uuid, text, text, text, text, integer, integer, numeric, integer, text, jsonb); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.record_ai_usage(p_workspace_id uuid, p_user_id uuid, p_provider text, p_event_type text, p_model text, p_tier text, p_tokens_in integer, p_tokens_out integer, p_credits_used numeric, p_cost_cents integer, p_source_job text, p_metadata jsonb) RETURNS uuid
-    LANGUAGE plpgsql
-    AS $$
-DECLARE
-  v_event_id     uuid;
-  v_total_tokens integer := COALESCE(p_tokens_in, 0) + COALESCE(p_tokens_out, 0);
-  v_today        date := CURRENT_DATE;
-BEGIN
-  INSERT INTO ai_usage_events (
-    workspace_id, user_id, provider, event_type, model, tier,
-    tokens_in, tokens_out, total_tokens, credits_used,
-    estimated_cost_cents, source_job, metadata
-  ) VALUES (
-    p_workspace_id, p_user_id, p_provider, p_event_type, p_model, p_tier,
-    COALESCE(p_tokens_in, 0), COALESCE(p_tokens_out, 0), v_total_tokens,
-    COALESCE(p_credits_used, 0), COALESCE(p_cost_cents, 0), p_source_job,
-    COALESCE(p_metadata, '{}'::jsonb)
-  )
-  RETURNING id INTO v_event_id;
-
-  INSERT INTO workspace_ai_usage_daily (
-    workspace_id, date, provider, call_count, total_tokens, total_credits, estimated_cost_cents
-  ) VALUES (
-    p_workspace_id, v_today, p_provider, 1, v_total_tokens, COALESCE(p_credits_used, 0), COALESCE(p_cost_cents, 0)
-  )
-  ON CONFLICT (workspace_id, date, provider) DO UPDATE SET
-    call_count            = workspace_ai_usage_daily.call_count + 1,
-    total_tokens          = workspace_ai_usage_daily.total_tokens + v_total_tokens,
-    total_credits         = workspace_ai_usage_daily.total_credits + COALESCE(p_credits_used, 0),
-    estimated_cost_cents  = workspace_ai_usage_daily.estimated_cost_cents + COALESCE(p_cost_cents, 0),
-    updated_at            = now();
-
-  RETURN v_event_id;
-END;
-$$;
-
-
---
--- Name: set_updated_at(); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.set_updated_at() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  NEW.updated_at = now();
-  RETURN NEW;
-END;
-$$;
-
-
---
--- Name: transfer_workspace_ownership(uuid, uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.transfer_workspace_ownership(p_workspace_id uuid, p_current_owner_id uuid, p_new_owner_id uuid) RETURNS void
-    LANGUAGE plpgsql SECURITY DEFINER
-    AS $$
-BEGIN
-  -- Demote current owner to admin
-  UPDATE workspace_members
-  SET role = 'admin'
-  WHERE workspace_id = p_workspace_id
-    AND user_id      = p_current_owner_id
-    AND status       = 'active';
-
-  -- Promote new owner
-  UPDATE workspace_members
-  SET role = 'owner'
-  WHERE workspace_id = p_workspace_id
-    AND user_id      = p_new_owner_id
-    AND status       = 'active';
-
-  -- Update workspaces.owner_user_id
-  UPDATE workspaces
-  SET owner_user_id = p_new_owner_id
-  WHERE id = p_workspace_id;
-
-EXCEPTION
-  WHEN OTHERS THEN
-    RAISE;
-END;
-$$;
-
-
---
--- Name: truncate_all_public_tables(); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.truncate_all_public_tables() RETURNS void
-    LANGUAGE plpgsql
-    AS $$
-DECLARE
-  r RECORD;
-  BEGIN
-    FOR r IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' LOOP
-        EXECUTE 'TRUNCATE TABLE public.' || quote_ident(r.tablename) || ' RESTART IDENTITY CASCADE';
-          END LOOP;
-          END;
-          $$;
-
-
---
--- Name: update_stage_changed_at(); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.update_stage_changed_at() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF OLD.stage IS DISTINCT FROM NEW.stage THEN
-      NEW.last_stage_changed_at = now();
-        END IF;
-          RETURN NEW;
-          END;
-          $$;
-
-
---
--- Name: update_updated_at(); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.update_updated_at() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  NEW.updated_at = NOW();
-    RETURN NEW;
-    END;
-    $$;
-
-
---
--- Name: update_updated_at_column(); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.update_updated_at_column() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-    NEW.updated_at = NOW();
-        RETURN NEW;
-        END;
-        $$;
-
-
---
--- Name: upsert_objection_count(uuid, text, text); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.upsert_objection_count(p_user_id uuid, p_objection_type text, p_phrase text) RETURNS void
-    LANGUAGE plpgsql
-    AS $$
-DECLARE
-  v_workspace_id uuid;
-BEGIN
-  SELECT active_workspace_id INTO v_workspace_id FROM users WHERE id = p_user_id;
-  IF v_workspace_id IS NULL THEN
-    RAISE WARNING 'upsert_objection_count(3-arg): user % has no active_workspace_id, skipping', p_user_id;
-    RETURN;
-  END IF;
-  PERFORM public.upsert_objection_count(v_workspace_id, p_user_id, p_objection_type, p_phrase);
-END;
-$$;
-
-
---
--- Name: upsert_objection_count(uuid, uuid, text, text); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.upsert_objection_count(p_workspace_id uuid, p_user_id uuid, p_objection_type text, p_phrase text) RETURNS void
-    LANGUAGE sql
-    AS $$
-                  INSERT INTO objection_tracker
-                      (workspace_id, user_id, objection_type, objection_phrase, occurrence_count, last_seen_at)
-                        VALUES (p_workspace_id, p_user_id, p_objection_type, p_phrase, 1, now())
-                          ON CONFLICT (workspace_id, user_id, objection_type)
-                            DO UPDATE SET
-                                occurrence_count = objection_tracker.occurrence_count + 1,
-                                    last_seen_at     = now();
-                                    $$;
-
-
---
--- Name: upsert_objection_tracker(uuid, text, text); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.upsert_objection_tracker(p_user_id uuid, p_objection_type text, p_objection_phrase text) RETURNS void
-    LANGUAGE plpgsql
-    AS $$
-DECLARE
-  v_workspace_id uuid;
-BEGIN
-  SELECT active_workspace_id INTO v_workspace_id FROM users WHERE id = p_user_id;
-  IF v_workspace_id IS NULL THEN
-    RAISE WARNING 'upsert_objection_tracker: user % has no active_workspace_id, skipping', p_user_id;
-    RETURN;
-  END IF;
-  PERFORM public.upsert_objection_count(v_workspace_id, p_user_id, p_objection_type, p_objection_phrase);
-END;
-$$;
-
-
---
--- Name: voice_memos_tsv_trigger(); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.voice_memos_tsv_trigger() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  NEW.transcript_tsv := to_tsvector('english', COALESCE(NEW.transcript_text, ''));
-  RETURN NEW;
-END;
-$$;
-
-
---
--- Name: workspace_role(uuid); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.workspace_role(ws_id uuid) RETURNS text
-    LANGUAGE sql SECURITY DEFINER
-    AS $$
-  SELECT role FROM workspace_members
-  WHERE workspace_id = ws_id
-    AND user_id      = auth.uid()
-    AND status       = 'active'
-  LIMIT 1;
-$$;
 
 
 SET default_tablespace = '';
@@ -1936,6 +1337,631 @@ CREATE TABLE public.workspaces (
     CONSTRAINT workspaces_plan_check CHECK ((plan = ANY (ARRAY['free'::text, 'pro'::text, 'enterprise'::text])))
 );
 
+
+--
+-- Name: accept_workspace_invite(uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.accept_workspace_invite(p_user_id uuid, p_token_hash text) RETURNS json
+    LANGUAGE plpgsql SECURITY DEFINER
+    AS $$
+DECLARE
+  v_member       workspace_members%ROWTYPE;
+    v_workspace_id UUID;
+      v_role         TEXT;
+        v_owner_id     UUID;
+          v_owner_profile workspace_profiles%ROWTYPE;
+          BEGIN
+            -- Get the pending invite
+              SELECT * INTO v_member
+                FROM   workspace_members
+                  WHERE  invite_token  = p_token_hash
+                      AND  status        = 'pending_invite'
+                          AND  (invite_expires_at IS NULL OR invite_expires_at > NOW())
+                            LIMIT 1
+                              FOR UPDATE;
+
+                                IF NOT FOUND THEN
+                                    RETURN json_build_object('error', 'INVALID_OR_EXPIRED_TOKEN');
+                                      END IF;
+
+                                        -- Check if already a member
+                                          IF EXISTS (
+                                              SELECT 1 FROM workspace_members
+                                                  WHERE workspace_id = v_member.workspace_id
+                                                        AND user_id      = p_user_id
+                                                              AND status       = 'active'
+                                                                ) THEN
+                                                                    RETURN json_build_object('error', 'ALREADY_A_MEMBER');
+                                                                      END IF;
+
+                                                                        v_workspace_id := v_member.workspace_id;
+                                                                          v_role         := v_member.role;
+
+                                                                            -- Get workspace owner
+                                                                              SELECT owner_user_id INTO v_owner_id
+                                                                                FROM workspaces
+                                                                                  WHERE id = v_workspace_id;
+
+                                                                                    -- Get owner's profile
+                                                                                      SELECT * INTO v_owner_profile
+                                                                                        FROM workspace_profiles
+                                                                                          WHERE workspace_id = v_workspace_id
+                                                                                              AND user_id = v_owner_id
+                                                                                                LIMIT 1;
+
+                                                                                                  -- Update invite to active membership
+                                                                                                    UPDATE workspace_members
+                                                                                                      SET    user_id      = p_user_id,
+                                                                                                               status       = 'active',
+                                                                                                                        joined_at    = NOW(),
+                                                                                                                                 invite_token = NULL
+                                                                                                                                   WHERE  id = v_member.id;
+
+                                                                                                                                     -- Insert profile with defaults from owner (NO DUPLICATES)
+                                                                                                                                       INSERT INTO workspace_profiles (
+                                                                                                                                           workspace_id,
+                                                                                                                                               user_id,
+                                                                                                                                                   onboarding_completed,
+                                                                                                                                                       onboarding_step,
+                                                                                                                                                           onboarding_questions,
+                                                                                                                                                               preferred_platforms,
+                                                                                                                                                                   product_description,
+                                                                                                                                                                       target_audience,
+                                                                                                                                                                           voice_profile,
+                                                                                                                                                                               onboarding_answers,
+                                                                                                                                                                                   primary_goal,
+                                                                                                                                                                                       archetype,
+                                                                                                                                                                                           industry,
+                                                                                                                                                                                               business_stage
+                                                                                                                                                                                                 )
+                                                                                                                                                                                                   VALUES (
+                                                                                                                                                                                                       v_workspace_id,
+                                                                                                                                                                                                           p_user_id,
+                                                                                                                                                                                                               false,
+                                                                                                                                                                                                                   1,
+                                                                                                                                                                                                                       COALESCE(v_owner_profile.onboarding_questions, '{}'::jsonb),
+                                                                                                                                                                                                                           COALESCE(v_owner_profile.preferred_platforms, '{}'::text[]),
+                                                                                                                                                                                                                               v_owner_profile.product_description,
+                                                                                                                                                                                                                                   v_owner_profile.target_audience,
+                                                                                                                                                                                                                                       COALESCE(v_owner_profile.voice_profile, '{}'::jsonb),
+                                                                                                                                                                                                                                           COALESCE(v_owner_profile.onboarding_answers, '{}'::jsonb),
+                                                                                                                                                                                                                                               v_owner_profile.primary_goal,
+                                                                                                                                                                                                                                                   v_owner_profile.archetype,
+                                                                                                                                                                                                                                                       v_owner_profile.industry,
+                                                                                                                                                                                                                                                           v_owner_profile.business_stage
+                                                                                                                                                                                                                                                             )
+                                                                                                                                                                                                                                                               ON CONFLICT (workspace_id, user_id) DO UPDATE SET
+                                                                                                                                                                                                                                                                   onboarding_questions = EXCLUDED.onboarding_questions,
+                                                                                                                                                                                                                                                                       preferred_platforms = EXCLUDED.preferred_platforms,
+                                                                                                                                                                                                                                                                           product_description = EXCLUDED.product_description,
+                                                                                                                                                                                                                                                                               target_audience = EXCLUDED.target_audience,
+                                                                                                                                                                                                                                                                                   voice_profile = EXCLUDED.voice_profile,
+                                                                                                                                                                                                                                                                                       onboarding_answers = EXCLUDED.onboarding_answers,
+                                                                                                                                                                                                                                                                                           primary_goal = EXCLUDED.primary_goal,
+                                                                                                                                                                                                                                                                                               archetype = EXCLUDED.archetype,
+                                                                                                                                                                                                                                                                                                   industry = EXCLUDED.industry,
+                                                                                                                                                                                                                                                                                                       business_stage = EXCLUDED.business_stage;
+
+                                                                                                                                                                                                                                                                                                         -- Update user's active workspace
+                                                                                                                                                                                                                                                                                                           UPDATE users
+                                                                                                                                                                                                                                                                                                             SET active_workspace_id = v_workspace_id
+                                                                                                                                                                                                                                                                                                               WHERE id = p_user_id;
+
+                                                                                                                                                                                                                                                                                                                 RETURN json_build_object(
+                                                                                                                                                                                                                                                                                                                     'workspace_id', v_workspace_id,
+                                                                                                                                                                                                                                                                                                                         'role',         v_role
+                                                                                                                                                                                                                                                                                                                           );
+
+                                                                                                                                                                                                                                                                                                                           EXCEPTION
+                                                                                                                                                                                                                                                                                                                             WHEN OTHERS THEN
+                                                                                                                                                                                                                                                                                                                                 RAISE;
+                                                                                                                                                                                                                                                                                                                                 END;
+                                                                                                                                                                                                                                                                                                                                 $$;
+
+
+--
+-- Name: create_user_profile(uuid, text, text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.create_user_profile(p_id uuid, p_email text, p_name text DEFAULT NULL::text, p_tier text DEFAULT 'free'::text) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+          BEGIN
+            INSERT INTO users (id, email, name, tier, created_at)
+              VALUES (p_id, p_email, p_name, p_tier, NOW())
+                ON CONFLICT (id) DO NOTHING;  -- safe if called twice
+                END;
+                $$;
+
+
+--
+-- Name: create_user_with_workspace(uuid, text, text, text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.create_user_with_workspace(p_user_id uuid, p_email text, p_name text, p_tier text DEFAULT 'free'::text, p_workspace_name text DEFAULT NULL::text) RETURNS json
+    LANGUAGE plpgsql SECURITY DEFINER
+    AS $$
+DECLARE
+  v_workspace_id UUID;
+  v_slug         TEXT;
+  v_ws_name      TEXT;
+BEGIN
+  INSERT INTO users (id, email, name, tier)
+  VALUES (p_user_id, p_email, p_name, p_tier)
+  ON CONFLICT (id) DO NOTHING;
+
+  v_ws_name := COALESCE(
+    p_workspace_name,
+    COALESCE(p_name, split_part(p_email, '@', 1)) || '''s Workspace'
+  );
+  v_slug := lower(regexp_replace(
+    COALESCE(p_name, split_part(p_email, '@', 1)),
+    '[^a-z0-9]+', '-', 'g'
+  )) || '-' || substring(p_user_id::TEXT, 1, 8);
+
+  INSERT INTO workspaces (name, slug, plan, owner_user_id)
+  VALUES (v_ws_name, v_slug, p_tier, p_user_id)
+  RETURNING id INTO v_workspace_id;
+
+  INSERT INTO workspace_members (workspace_id, user_id, role, status, joined_at)
+  VALUES (v_workspace_id, p_user_id, 'owner', 'active', now());
+
+  INSERT INTO workspace_profiles (workspace_id, user_id)
+  VALUES (v_workspace_id, p_user_id);
+
+  UPDATE users SET active_workspace_id = v_workspace_id WHERE id = p_user_id;
+
+  RETURN json_build_object('workspace_id', v_workspace_id, 'slug', v_slug);
+END;
+$$;
+
+
+--
+-- Name: create_workspace_for_user(uuid, text, text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.create_workspace_for_user(p_user_id uuid, p_name text, p_slug text, p_plan text) RETURNS json
+    LANGUAGE plpgsql SECURITY DEFINER
+    AS $$
+DECLARE
+  v_workspace_id UUID;
+  v_result       JSON;
+BEGIN
+  -- 1. Insert workspace
+  INSERT INTO workspaces (name, slug, plan, owner_user_id, is_deleted, settings)
+  VALUES (p_name, p_slug, p_plan, p_user_id, false, '{}')
+  RETURNING id INTO v_workspace_id;
+
+  -- 2. Insert owner membership
+  INSERT INTO workspace_members (workspace_id, user_id, role, status, joined_at)
+  VALUES (v_workspace_id, p_user_id, 'owner', 'active', NOW());
+
+  -- 3. Insert empty workspace_profile (filled during onboarding)
+  INSERT INTO workspace_profiles (workspace_id, user_id, onboarding_completed, onboarding_step)
+  VALUES (v_workspace_id, p_user_id, false, 0);
+
+  -- 4. Set active_workspace_id on users
+  UPDATE users
+  SET active_workspace_id = v_workspace_id
+  WHERE id = p_user_id;
+
+  -- Return the created workspace as JSON
+  SELECT row_to_json(w) INTO v_result
+  FROM workspaces w
+  WHERE w.id = v_workspace_id;
+
+  RETURN v_result;
+
+EXCEPTION
+  WHEN OTHERS THEN
+    -- Any step failure automatically rolls back all 4 steps
+    RAISE;
+END;
+$$;
+
+
+--
+-- Name: expire_stale_invites(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.expire_stale_invites() RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    AS $$
+DECLARE expired_count INTEGER;
+BEGIN
+  UPDATE workspace_members
+  SET status     = 'removed',
+      updated_at = now()
+  WHERE status          = 'pending_invite'
+    AND invite_expires_at < now();
+  GET DIAGNOSTICS expired_count = ROW_COUNT;
+  RETURN expired_count;
+END;
+$$;
+
+
+--
+-- Name: find_similar_prospects(uuid, uuid, text, numeric); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.find_similar_prospects(p_workspace_id uuid, p_prospect_id uuid, p_name text, p_threshold numeric) RETURNS TABLE(id uuid, similarity numeric)
+    LANGUAGE sql STABLE
+    AS $$
+  SELECT p.id, similarity(p.name, p_name) AS similarity
+  FROM prospects p
+  WHERE p.workspace_id = p_workspace_id
+    AND p.id != p_prospect_id
+    AND similarity(p.name, p_name) >= p_threshold
+  ORDER BY similarity DESC
+  LIMIT 5;
+$$;
+
+
+--
+-- Name: increment_chat_stats(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.increment_chat_stats(p_chat_id uuid) RETURNS void
+    LANGUAGE sql
+    AS $$
+  UPDATE chats
+  SET message_count    = COALESCE(message_count, 0) + 1,
+      last_message_at  = NOW()
+  WHERE id = p_chat_id;
+$$;
+
+
+--
+-- Name: increment_goal_progress(uuid, numeric); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.increment_goal_progress(p_goal_id uuid, p_delta numeric) RETURNS void
+    LANGUAGE sql
+    AS $$
+  UPDATE user_goals
+  SET current_value = COALESCE(current_value, 0) + p_delta,
+      updated_at    = now()
+  WHERE id = p_goal_id;
+$$;
+
+
+--
+-- Name: increment_performance_stats(uuid, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.increment_performance_stats(p_user_id uuid, p_is_positive boolean) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  v_workspace_id uuid;
+BEGIN
+  SELECT active_workspace_id INTO v_workspace_id FROM users WHERE id = p_user_id;
+  IF v_workspace_id IS NULL THEN
+    RAISE WARNING 'increment_performance_stats(2-arg): user % has no active_workspace_id, skipping', p_user_id;
+    RETURN;
+  END IF;
+  PERFORM public.increment_performance_stats(p_user_id, p_is_positive, v_workspace_id);
+END;
+$$;
+
+
+--
+-- Name: increment_performance_stats(uuid, boolean, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.increment_performance_stats(p_user_id uuid, p_is_positive boolean, p_workspace_id uuid) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  INSERT INTO user_performance_profiles
+    (user_id, workspace_id, total_sent, total_positive, total_negative, positive_rate)
+  VALUES (
+    p_user_id, p_workspace_id, 1,
+    CASE WHEN p_is_positive THEN 1 ELSE 0 END,
+    CASE WHEN p_is_positive THEN 0 ELSE 1 END,
+    CASE WHEN p_is_positive THEN 1.0 ELSE 0.0 END
+  )
+  ON CONFLICT (user_id, workspace_id) DO UPDATE SET
+    total_sent     = user_performance_profiles.total_sent + 1,
+    total_positive = user_performance_profiles.total_positive
+                     + (CASE WHEN p_is_positive THEN 1 ELSE 0 END),
+    total_negative = user_performance_profiles.total_negative
+                     + (CASE WHEN p_is_positive THEN 0 ELSE 1 END),
+    positive_rate  = ROUND(
+      (user_performance_profiles.total_positive
+       + (CASE WHEN p_is_positive THEN 1 ELSE 0 END))::NUMERIC
+      / (user_performance_profiles.total_sent + 1), 4
+    ),
+    updated_at = now();
+END;
+$$;
+
+
+--
+-- Name: increment_performance_stats(uuid, uuid, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.increment_performance_stats(p_workspace_id uuid, p_user_id uuid, p_is_positive boolean) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+                    BEGIN
+                      INSERT INTO user_performance_profiles
+                          (workspace_id, user_id, total_sent, total_positive, total_negative, positive_rate)
+                            VALUES (
+                                p_workspace_id,
+                                    p_user_id,
+                                        1,
+                                            CASE WHEN p_is_positive THEN 1 ELSE 0 END,
+                                                CASE WHEN p_is_positive THEN 0 ELSE 1 END,
+                                                    CASE WHEN p_is_positive THEN 1.0 ELSE 0.0 END
+                                                      )
+                                                        ON CONFLICT (workspace_id, user_id) DO UPDATE SET
+                                                            total_sent     = user_performance_profiles.total_sent + 1,
+                                                                total_positive = user_performance_profiles.total_positive
+                                                                                     + (CASE WHEN p_is_positive THEN 1 ELSE 0 END),
+                                                                                         total_negative = user_performance_profiles.total_negative
+                                                                                                              + (CASE WHEN p_is_positive THEN 0 ELSE 1 END),
+                                                                                                                  positive_rate  = ROUND(
+                                                                                                                        (user_performance_profiles.total_positive
+                                                                                                                               + (CASE WHEN p_is_positive THEN 1 ELSE 0 END))::NUMERIC
+                                                                                                                                     / (user_performance_profiles.total_sent + 1), 4
+                                                                                                                                         );
+                                                                                                                                         END;
+                                                                                                                                         $$;
+
+
+--
+-- Name: is_workspace_member(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.is_workspace_member(ws_id uuid) RETURNS boolean
+    LANGUAGE sql SECURITY DEFINER
+    AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM workspace_members
+    WHERE workspace_id = ws_id
+      AND user_id      = auth.uid()
+      AND status       = 'active'
+  );
+$$;
+
+
+--
+-- Name: record_ai_usage(uuid, uuid, text, text, text, text, integer, integer, numeric, integer, text, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.record_ai_usage(p_workspace_id uuid, p_user_id uuid, p_provider text, p_event_type text, p_model text, p_tier text, p_tokens_in integer, p_tokens_out integer, p_credits_used numeric, p_cost_cents integer, p_source_job text, p_metadata jsonb) RETURNS uuid
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  v_event_id     uuid;
+  v_total_tokens integer := COALESCE(p_tokens_in, 0) + COALESCE(p_tokens_out, 0);
+  v_today        date := CURRENT_DATE;
+BEGIN
+  INSERT INTO ai_usage_events (
+    workspace_id, user_id, provider, event_type, model, tier,
+    tokens_in, tokens_out, total_tokens, credits_used,
+    estimated_cost_cents, source_job, metadata
+  ) VALUES (
+    p_workspace_id, p_user_id, p_provider, p_event_type, p_model, p_tier,
+    COALESCE(p_tokens_in, 0), COALESCE(p_tokens_out, 0), v_total_tokens,
+    COALESCE(p_credits_used, 0), COALESCE(p_cost_cents, 0), p_source_job,
+    COALESCE(p_metadata, '{}'::jsonb)
+  )
+  RETURNING id INTO v_event_id;
+
+  INSERT INTO workspace_ai_usage_daily (
+    workspace_id, date, provider, call_count, total_tokens, total_credits, estimated_cost_cents
+  ) VALUES (
+    p_workspace_id, v_today, p_provider, 1, v_total_tokens, COALESCE(p_credits_used, 0), COALESCE(p_cost_cents, 0)
+  )
+  ON CONFLICT (workspace_id, date, provider) DO UPDATE SET
+    call_count            = workspace_ai_usage_daily.call_count + 1,
+    total_tokens          = workspace_ai_usage_daily.total_tokens + v_total_tokens,
+    total_credits         = workspace_ai_usage_daily.total_credits + COALESCE(p_credits_used, 0),
+    estimated_cost_cents  = workspace_ai_usage_daily.estimated_cost_cents + COALESCE(p_cost_cents, 0),
+    updated_at            = now();
+
+  RETURN v_event_id;
+END;
+$$;
+
+
+--
+-- Name: set_updated_at(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.set_updated_at() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: transfer_workspace_ownership(uuid, uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.transfer_workspace_ownership(p_workspace_id uuid, p_current_owner_id uuid, p_new_owner_id uuid) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    AS $$
+BEGIN
+  -- Demote current owner to admin
+  UPDATE workspace_members
+  SET role = 'admin'
+  WHERE workspace_id = p_workspace_id
+    AND user_id      = p_current_owner_id
+    AND status       = 'active';
+
+  -- Promote new owner
+  UPDATE workspace_members
+  SET role = 'owner'
+  WHERE workspace_id = p_workspace_id
+    AND user_id      = p_new_owner_id
+    AND status       = 'active';
+
+  -- Update workspaces.owner_user_id
+  UPDATE workspaces
+  SET owner_user_id = p_new_owner_id
+  WHERE id = p_workspace_id;
+
+EXCEPTION
+  WHEN OTHERS THEN
+    RAISE;
+END;
+$$;
+
+
+--
+-- Name: truncate_all_public_tables(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.truncate_all_public_tables() RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  r RECORD;
+  BEGIN
+    FOR r IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' LOOP
+        EXECUTE 'TRUNCATE TABLE public.' || quote_ident(r.tablename) || ' RESTART IDENTITY CASCADE';
+          END LOOP;
+          END;
+          $$;
+
+
+--
+-- Name: update_stage_changed_at(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.update_stage_changed_at() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF OLD.stage IS DISTINCT FROM NEW.stage THEN
+      NEW.last_stage_changed_at = now();
+        END IF;
+          RETURN NEW;
+          END;
+          $$;
+
+
+--
+-- Name: update_updated_at(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.update_updated_at() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  NEW.updated_at = NOW();
+    RETURN NEW;
+    END;
+    $$;
+
+
+--
+-- Name: update_updated_at_column(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.update_updated_at_column() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    NEW.updated_at = NOW();
+        RETURN NEW;
+        END;
+        $$;
+
+
+--
+-- Name: upsert_objection_count(uuid, text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.upsert_objection_count(p_user_id uuid, p_objection_type text, p_phrase text) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  v_workspace_id uuid;
+BEGIN
+  SELECT active_workspace_id INTO v_workspace_id FROM users WHERE id = p_user_id;
+  IF v_workspace_id IS NULL THEN
+    RAISE WARNING 'upsert_objection_count(3-arg): user % has no active_workspace_id, skipping', p_user_id;
+    RETURN;
+  END IF;
+  PERFORM public.upsert_objection_count(v_workspace_id, p_user_id, p_objection_type, p_phrase);
+END;
+$$;
+
+
+--
+-- Name: upsert_objection_count(uuid, uuid, text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.upsert_objection_count(p_workspace_id uuid, p_user_id uuid, p_objection_type text, p_phrase text) RETURNS void
+    LANGUAGE sql
+    AS $$
+                  INSERT INTO objection_tracker
+                      (workspace_id, user_id, objection_type, objection_phrase, occurrence_count, last_seen_at)
+                        VALUES (p_workspace_id, p_user_id, p_objection_type, p_phrase, 1, now())
+                          ON CONFLICT (workspace_id, user_id, objection_type)
+                            DO UPDATE SET
+                                occurrence_count = objection_tracker.occurrence_count + 1,
+                                    last_seen_at     = now();
+                                    $$;
+
+
+--
+-- Name: upsert_objection_tracker(uuid, text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.upsert_objection_tracker(p_user_id uuid, p_objection_type text, p_objection_phrase text) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  v_workspace_id uuid;
+BEGIN
+  SELECT active_workspace_id INTO v_workspace_id FROM users WHERE id = p_user_id;
+  IF v_workspace_id IS NULL THEN
+    RAISE WARNING 'upsert_objection_tracker: user % has no active_workspace_id, skipping', p_user_id;
+    RETURN;
+  END IF;
+  PERFORM public.upsert_objection_count(v_workspace_id, p_user_id, p_objection_type, p_objection_phrase);
+END;
+$$;
+
+
+--
+-- Name: voice_memos_tsv_trigger(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.voice_memos_tsv_trigger() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  NEW.transcript_tsv := to_tsvector('english', COALESCE(NEW.transcript_text, ''));
+  RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: workspace_role(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.workspace_role(ws_id uuid) RETURNS text
+    LANGUAGE sql SECURITY DEFINER
+    AS $$
+  SELECT role FROM workspace_members
+  WHERE workspace_id = ws_id
+    AND user_id      = auth.uid()
+    AND status       = 'active'
+  LIMIT 1;
+$$;
 
 --
 -- Name: chat_messages seq; Type: DEFAULT; Schema: public; Owner: -

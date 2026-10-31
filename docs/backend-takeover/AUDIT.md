@@ -362,6 +362,101 @@ that remains.
 
 **Fix status:** fixed.
 
+### 1.11 — CRITICAL — `schema.sql` could not actually be applied to a fresh database at all
+**Location:** `schema.sql`, `README.md`
+
+The person running this engagement offered to install Postgres and Redis locally, which made it possible to
+actually execute `schema.sql` against a real, empty database for the first time, rather than relying on the
+structural-match confidence stated in 1.9/1.10. This surfaced a genuine, critical bug that no amount of reading
+the file would have caught with full confidence: **applying `schema.sql` to a fresh database failed partway
+through**, with cascading `relation "X" does not exist` errors across `workspace_members`, `prospects`, `chats`,
+`user_goals`, `objection_tracker`, and `workspace_activity`.
+
+Root cause, confirmed precisely: `pg_dump` output sections functions before tables. Most function bodies in
+Postgres are late-bound (not checked against the catalog until first call), so referencing a not-yet-created table
+inside a function body is normally harmless at `CREATE FUNCTION` time. But two patterns in this file's functions
+are NOT late-bound: PL/pgSQL `%ROWTYPE` variable declarations (e.g. `v_member workspace_members%ROWTYPE` in
+`accept_workspace_invite`, which needs to know the table's structure immediately to compile) and `LANGUAGE sql`
+function bodies (which Postgres parses/validates eagerly, unlike `plpgsql`). Every one of the ~24 functions in this
+file was defined before any table, so every function using either of these two patterns failed at creation time.
+
+**Fix:** moved the entire function-definition block (originally lines 22–645) to immediately after the last table
+definition, with no change to any function's or table's actual SQL — purely a reordering. Verified precisely: the
+extracted block's line count matched the original exactly before and after relocation (no content lost or
+duplicated), and a diff-equivalent check (table/function/index counts) confirmed nothing else changed.
+
+**Second, related finding from the same live test:** `schema.sql` has no `CREATE EXTENSION` statements at all
+(expected — `pg_dump` doesn't include them; Supabase manages extensions separately, e.g. via its dashboard), and
+the file turned out to depend on a specific, non-default extension layout for this particular project: `pg_trgm`
+installed in the `public` schema (confirmed by its trigram indexes being schema-qualified to
+`public.gin_trgm_ops`), while `uuid-ossp` is used via `extensions.uuid_generate_v4()` — a genuinely mixed setup,
+not the "everything in `extensions`" pattern Supabase defaults to for new projects. README.md documented none of
+this. A developer following its "schema.sql applied directly" instruction on a real fresh Supabase project would
+hit `operator class "public.gin_trgm_ops" does not exist` with no guidance.
+
+**Fix:** added a prerequisites note to README.md's Configuration section, documented precisely (which extension,
+which schema, confirmed by the exact error message a developer would see without it) rather than vaguely. Also
+fixed README.md's Configuration section separately citing the stale `SUPABASE_SERVICE_KEY`/`FIREBASE_PROJECT_ID`
+names already fixed in code during milestone 1 but never updated in the README prose — found while editing the
+same section for the extension note.
+
+**Verified, genuinely, by execution — not just read:** this environment now has Postgres 16 and Redis installed
+locally (`apt-get install postgresql redis-server`). Built a baseline matching the documented prerequisites exactly
+(a minimal `auth.users`/`auth.uid()` stub, since this schema assumes a real Supabase `auth` schema that a plain
+Postgres instance doesn't have — this stub is a test-only accommodation, not something `schema.sql` or the app
+needs; `extensions` schema with `uuid-ossp`/`pgcrypto`; `pg_trgm` in `public`) and applied the actual, fixed
+`schema.sql` file exactly as README instructs. Result: all 48 tables created, 55 functions (including Postgres's
+own trigger-support functions), 241 indexes, and the `event_id` columns/constraints from 1.9 and the de-duplicated
+index from 1.10 all present and correct. The only remaining message is `schema "public" already exists` at the
+file's very first statement — confirmed via external sources (Prisma's own Postgres-migration docs state this
+explicitly) to be expected, harmless, and reported by every tool restoring this kind of dump to any real target
+(Supabase, Neon, Prisma Postgres, vanilla Postgres all pre-create `public`), not a defect in this file.
+
+**What this changes about 1.9/1.10's earlier "no Postgres available, high confidence not proof" caveat:** that
+caveat is resolved for the file as a whole — it now demonstrably applies successfully end to end, including both
+of those earlier fixes, verified by actual execution in this same test.
+
+**Fix status:** fixed and verified by real execution against Postgres 16.
+
+### 1.12 — HIGH — `services/redis.js` hardcoded TLS, silently breaking non-TLS Redis for 7 files' worth of callers
+**Location:** `backend/src/services/redis.js`
+
+Found while running the live boot test for 1.11 (real Postgres/Redis, not placeholders) — this would not have
+been caught by any amount of reading, since the bug only manifests when the app actually tries to use a working,
+non-TLS `REDIS_URL`, a scenario the earlier milestones never exercised (prior tests used either no `REDIS_URL` at
+all, or a deliberately-unreachable placeholder for the `config/bullmq.js` fix).
+
+`getClient()` in this file unconditionally set `socket: { tls: true, servername: hostname }` regardless of whether
+`REDIS_URL` actually used `rediss://` (TLS) or plain `redis://`. `config/bullmq.js`'s separate IORedis connection
+already derives this correctly from the URL scheme (`isTLS = REDIS_URL.startsWith('rediss://')`) — this file did
+the same hostname-parsing-for-SNI work but then ignored the scheme entirely.
+
+**Confirmed live, not inferred:** booting against a real, local, plain `redis://127.0.0.1:6379` Redis instance
+logged `[Redis] getRawClient() failed: tls socket option is set to true which is mismatch with protocol...`, and
+every one of this client's 7 callers (`rateLimitStore.js`, `middleware/auth.js`, `middleware/workspace.js`,
+`utils/concurrencyGuard.js` — the distributed-locking utility this review already trusted for race-condition
+protection — `routes/insights.js`, `routes/metrics.js`, `routes/goals.js`) silently fell back to per-instance/
+no-op behavior instead of actually using Redis. Note this is a *different* Redis client than `config/bullmq.js`'s
+— BullMQ connected successfully in the same boot, confirming the bug was isolated to this file, not a general
+Redis-reachability problem.
+
+This is not a narrow edge case: a plain, non-TLS Redis is the common case for local development, self-hosted
+Redis, and Docker Compose setups — anything that isn't a managed TLS-terminated provider like Upstash. Every one
+of those legitimate setups would have silently lost rate limiting, workspace/auth caching, and distributed locking
+with zero functional error — just a degraded-mode log line easy to miss.
+
+**Fix:** derive `isTLS` from the URL scheme exactly as `config/bullmq.js` already does, and only set TLS socket
+options when `isTLS` is true (omit entirely otherwise, matching the `node-redis` package's expected shape for a
+non-TLS connection).
+
+**Verified by actual execution, not just syntax check:** re-ran the same live boot test after the fix. Log now
+shows `[Redis] Connected` and `[RateLimit] Redis-backed rate limit store initialized (namespace: "auth")` instead
+of the failure/fallback messages. Confirmed via `redis-cli keys "*"` that the app actually wrote real state to the
+real Redis instance during this boot (21 BullMQ schedules registered across three queues). Full test suite (23/23)
+still passing.
+
+**Fix status:** fixed and verified by real execution against a live, non-TLS Redis instance.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

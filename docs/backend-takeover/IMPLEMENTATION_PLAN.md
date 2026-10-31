@@ -74,6 +74,38 @@ Status: **in progress**. Updated as milestones complete.
   applies cleanly. The edit is high-confidence (exact structural match to working examples in the same file) but
   unverified by actual execution — flagged plainly in AUDIT.md rather than claimed as confirmed.
 
+## Milestone 6 — Real-infrastructure verification of schema.sql — ✅ DONE
+**Addresses:** AUDIT.md 1.11
+
+Prompted by the person offering to install Postgres/Redis locally rather than continuing to rely on structural
+read-only confidence for the schema.sql fixes made in milestone 4.
+
+- Installed Postgres 16 and Redis locally (`apt-get install postgresql redis-server`), started both services.
+- Applied `schema.sql` to a genuinely fresh, empty database and found it failed partway through — a real,
+  critical, previously-undetected bug: functions dumped before the tables they reference, and two patterns
+  (`%ROWTYPE` declarations, `LANGUAGE sql` bodies) are validated eagerly at `CREATE FUNCTION` time rather than
+  deferred, so ~24 functions failed to create.
+- Fixed by relocating the entire function-definition block to after all tables, verified line-count-exact (no
+  content lost) and the fix's effect confirmed by successful full application afterward.
+- Found and documented a second, related gap: `pg_trgm` needs to be in `public` specifically for this project (not
+  Supabase's `extensions` default), undocumented anywhere — added to README.md with the exact error a developer
+  would hit without it.
+- Fixed two more stale variable names in README.md's prose (`SUPABASE_SERVICE_KEY`, `FIREBASE_PROJECT_ID`) found
+  while editing the same section — these were already fixed in code during milestone 1 but the README text was
+  never updated to match.
+- Final verification: applied the fully-fixed `schema.sql` end to end against a correctly-baselined local Postgres
+  instance. All 48 tables, 55 functions, 241 indexes created successfully; milestone 4's `event_id` columns and
+  milestone 5's de-duplicated index both confirmed present. Only remaining output is the single, externally-
+  confirmed-harmless `schema "public" already exists` message every Supabase/Postgres restore produces.
+- This resolves the "no Postgres available, high confidence not proof" caveat from milestone 4 — the file is now
+  verified by actual execution, not just structural pattern-matching against the rest of the dump.
+- Separately, the live boot test against real Redis (not a placeholder) surfaced a genuine, previously-undetected
+  bug: `services/redis.js` hardcoded TLS unconditionally, silently breaking rate limiting, workspace/auth caching,
+  and distributed locking (7 files' worth of callers) for any non-TLS Redis — the common case for local dev and
+  self-hosted setups. Fixed to derive TLS from the URL scheme, matching the pattern `config/bullmq.js` already used
+  correctly. Verified by re-running the live boot test: Redis-backed rate limiting now initializes correctly
+  instead of silently falling back to in-memory. See AUDIT.md 1.12.
+
 ## Deferred / needs a decision, not yet scheduled
 
 - ~~`handleGhost`/`handleReply` dead code in `messageQueueWorker.js`~~ — **done.** Removed, along with dispatch

@@ -164,11 +164,13 @@ node src/workers/index.js   # scheduler + all 3 workers only
 
 ### Configuration
 
-Required at startup (the process exits immediately with a clear per-variable message if any are missing): `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `GROQ_API_KEY`, `ADMIN_SECRET`.
+Required at startup (the process exits immediately with a clear per-variable message if any are missing): `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `GROQ_API_KEY`, `ADMIN_SECRET`. See `backend/.env.example` for every variable the app reads, required and optional.
 
-Optional, feature-gating (the app boots without these, with a startup warning, and the corresponding feature degrades): `REDIS_URL` (workspace/profile caching and all background job processing are skipped without it), `EXA_API_KEY` (opportunity discovery falls back to a Groq-generated practice-example mode), `FIREBASE_PROJECT_ID` + service account config, `FRONTEND_URL`, additional provider keys (`CEREBRAS_API_KEY`, `MISTRAL_API_KEY`, `OPENROUTER_API_KEY`, numbered `_1`–`_N` variants for multi-key pools), `SENTRY_DSN`, `RESEND_API_KEY`/SMTP variables.
+Optional, feature-gating (the app boots without these, with a startup warning, and the corresponding feature degrades): `REDIS_URL` (workspace/profile caching and all background job processing are skipped without it), `EXA_API_KEY` (opportunity discovery falls back to a Groq-generated practice-example mode), `FIREBASE_SERVICE_ACCOUNT`, `FRONTEND_URL`, additional provider keys (`CEREBRAS_API_KEY`, `MISTRAL_API_KEY`, `OPENROUTER_API_KEY`, numbered `_1`–`_N` variants for multi-key pools), `SENTRY_DSN`, `RESEND_API_KEY`/SMTP variables.
 
 The database schema is a single `schema.sql` file applied directly to the target Supabase project — it also defines every atomic Postgres RPC the app relies on. See [ARCHITECTURE.md §5](ARCHITECTURE.md#5-data-architecture) for the RPC list and what each one prevents.
+
+**Prerequisite not covered by `schema.sql` itself:** `pg_dump` (what produced this file) doesn't include `CREATE EXTENSION` statements — extension management is handled separately, e.g. via the Supabase dashboard. This project's trigram-search indexes are schema-qualified to `public.gin_trgm_ops`, meaning `pg_trgm` needs to be enabled in the `public` schema specifically (not Supabase's more common `extensions` schema default) before applying `schema.sql` — either via the dashboard's Database → Extensions page, or `CREATE EXTENSION pg_trgm WITH SCHEMA public;` run first. Confirmed by actually applying this file against a real, empty Postgres database: it fails with `operator class "public.gin_trgm_ops" does not exist for access method "gin"` without this.
 
 ## Known Gaps & In-Progress Work
 

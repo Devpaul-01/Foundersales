@@ -64,7 +64,7 @@ ownership-scoping check; a route file does):
 | followup.js | 🔧 | Under-scoped mark-as-viewed update tightened. .or()-on-mutation workaround verified correct, not changed. See AUDIT.md 1.16. |
 | goals.js | 🔧 | Real gap: note-delete didn't verify noteId belonged to goalId. Plus consistency tightening + an RPC design note flagged. See AUDIT.md 1.17. |
 | growth.js | ✅ (prior pass) | Reviewed in original engagement's milestone 2 |
-| insights.js | ⏳ | |
+| insights.js | 🔧 | Large file (1238 lines, ~25 handlers), otherwise very clean. One verified-then-unscoped mutation tightened. See AUDIT.md 1.18. |
 | metrics.js | ⏳ | |
 | onboarding.js | ⏳ | Only two enqueue call sites were seen (SEED_MEMORY context), not the full file |
 | opportunities.js | ✅ (prior pass) | Reviewed in original engagement's milestones 1-2 |

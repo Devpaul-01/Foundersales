@@ -610,6 +610,27 @@ to justify it today. Noting it as a design characteristic worth knowing about fo
 **Fix status:** the two real logic gaps (notes delete, PUT/DELETE scoping) fixed and verified (syntax check, full
 test suite). RPC design note flagged only.
 
+### 1.18 — LOW — `routes/insights.js` full read (full audit, file 5 of 80)
+**Location:** `backend/src/routes/insights.js`
+
+Full read of all ~25 route handlers (1238 lines, the largest file reviewed so far) against the checklist.
+
+Notably well-written: every self-scoped read/write correctly filters by `workspace_id`+`user_id`, every
+workspace-wide aggregation route correctly requires `manager` or `owner` via `requirePermission`. The file's own
+comments document two real bugs a prior pass already found and fixed in `/intelligence` (an undefined
+`INTELLIGENCE_TTL_S` reference and a call to a `generateRuleBasedInsights` function that didn't exist anywhere —
+together these meant the endpoint 500'd on every request regardless of AI success) — verified these are genuinely
+fixed now (the constant is a real import, the function is a real implementation in `services/intelligenceReport.js`
+not yet separately read in this pass), not just claimed fixed by a stale comment.
+
+**One real, low-severity finding, fixed:** `DELETE /patterns/:id` verified ownership via a preceding `select()`,
+but the dismiss `update()` itself filtered only by `.eq('id', req.params.id)` — the same "verified-then-unscoped
+mutation" pattern now found and fixed in four consecutive files (`commitments.js` 1.15, `followup.js` 1.16,
+`goals.js` 1.17). Not exploitable as written; tightened to match `/weekly/dismiss/:id` just below it in the same
+file, which already does this correctly.
+
+**Fix status:** fixed and verified (syntax check, full test suite).
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

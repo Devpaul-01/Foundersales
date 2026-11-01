@@ -578,6 +578,38 @@ inconsistent with the rest of the file. Fixed by adding `.eq('workspace_id', wor
 
 **Fix status:** fixed and verified (syntax check, full test suite).
 
+### 1.17 — MEDIUM — `routes/goals.js` full read (full audit, file 4 of 80)
+**Location:** `backend/src/routes/goals.js`
+
+Full read against the checklist. This is also the file enqueuing the `TIP_CARD_GENERATE` job fixed in milestone 7
+(AUDIT.md 1.13) — the full file had never been read, only that one call site.
+
+**Real finding, fixed:** `DELETE /:goalId/notes/:noteId` verified the goal belongs to the requesting user/workspace,
+but the actual delete (`'goal_notes'.delete().eq('id', noteId).eq('user_id', userId)`) never verified `noteId`
+actually belongs to `goalId` — only that both the goal and the note separately belong to this user. The URL's own
+shape implies that relationship; the code didn't enforce it. Concretely: a request with a `goalId` the user owns,
+paired with a `noteId` belonging to one of their *other* goals, would still delete it. Scoped to the same user only
+(not a cross-user issue), but a real logic gap, not just a defense-in-depth tightening like the other findings in
+this file. Fixed by adding `.eq('goal_id', goalId)` to the delete filter.
+
+**Lower-severity, fixed for consistency:** `PUT /:id` and `DELETE /:id`'s actual mutations filtered only by
+`.eq('id', id)` — ownership verified in a preceding `select()`, not re-applied on the mutation itself, same pattern
+already fixed in `commitments.js` (1.15) and `followup.js` (1.16). Not exploitable as written; tightened to match.
+
+**Flagged, not fixed — database-level design note:** `POST /:goalId/notes` calls
+`rpc('increment_goal_progress', { p_goal_id, p_delta })`. Checked the RPC definition in `schema.sql`: it's a bare
+`UPDATE user_goals SET current_value = ... WHERE id = p_goal_id`, with no workspace/user scoping parameter at
+all — it relies entirely on the caller having already validated ownership. Confirmed this route does validate
+ownership before calling it (via the `goal` fetch at line 77), and confirmed by repo-wide grep this is the RPC's
+*only* call site in the entire codebase, so there's no current exploit path. But the RPC itself has no
+defense-in-depth: any future caller that invokes it without first checking ownership would have a direct IDOR.
+Not fixed here — rewriting a database RPC's signature/body is exactly the kind of schema change the mission asks
+to be cautious about without first checking every consumer and migration implication, and there's no live defect
+to justify it today. Noting it as a design characteristic worth knowing about for whoever adds the next caller.
+
+**Fix status:** the two real logic gaps (notes delete, PUT/DELETE scoping) fixed and verified (syntax check, full
+test suite). RPC design note flagged only.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

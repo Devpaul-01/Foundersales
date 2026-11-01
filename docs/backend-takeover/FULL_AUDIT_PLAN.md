@@ -62,7 +62,7 @@ ownership-scoping check; a route file does):
 | commitments.js | 🔧 | Under-scoped update() in generate-message tightened (not exploitable as written, but inconsistent with file's own pattern). See AUDIT.md 1.15. |
 | feedback.js | ✅ (prior pass) | Reviewed in original engagement's milestone 2 |
 | followup.js | 🔧 | Under-scoped mark-as-viewed update tightened. .or()-on-mutation workaround verified correct, not changed. See AUDIT.md 1.16. |
-| goals.js | ⏳ | Only the TIP_CARD_GENERATE enqueue call site was seen, not the full file |
+| goals.js | 🔧 | Real gap: note-delete didn't verify noteId belonged to goalId. Plus consistency tightening + an RPC design note flagged. See AUDIT.md 1.17. |
 | growth.js | ✅ (prior pass) | Reviewed in original engagement's milestone 2 |
 | insights.js | ⏳ | |
 | metrics.js | ⏳ | |

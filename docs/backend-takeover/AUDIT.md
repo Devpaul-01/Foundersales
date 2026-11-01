@@ -503,6 +503,42 @@ facts already exist for this user? Flagging for the person's decision rather tha
 **Fix status:** `TIP_CARD_GENERATE` fixed and verified (syntax check, full test suite 23/23). `SEED_MEMORY` flagged,
 not fixed — see IMPLEMENTATION_PLAN.md.
 
+### 1.14 — LOW/INFO — `routes/auth.js` full read (full audit, file 1 of 80)
+**Location:** `backend/src/routes/auth.js`
+
+Full read against the checklist in FULL_AUDIT_PLAN.md.
+
+- **Rate limiting**: initially looked like `/set-password`/`/reset-password` (which take `access_token` and
+  `new_password` directly in the body, no header) had zero rate limiting, since no limiter is visible anywhere in
+  this file for them. Traced further before concluding anything: `app.js` mounts this entire router behind
+  `LIMITERS.authLimiter` (10 requests / 15 min / IP, correctly keyed, `/refresh` explicitly exempted) at the mount
+  point, not per-route inside this file. Confirmed this covers the whole router. Not a bug — just something that
+  required tracing past this file's own contents before concluding anything.
+- **`/logout`'s dead `refreshSession()` call — fixed.** Called `supabaseAdmin.auth.refreshSession({ refresh_token
+  })` with a comment claiming it was "trying to revoke" the token, result discarded. Verified against Supabase's
+  own documentation: `refreshSession()` has no revocation semantics at all — it mints a new access/refresh token
+  pair. This did nothing toward logout; the `admin.signOut(token)` call just above it is what actually revokes the
+  session. Removed as dead weight (an unnecessary extra Auth API call on every logout).
+- **`/logout`'s sign-out scope — flagged, not changed.** `admin.signOut(token)` is called with no `scope` argument,
+  which defaults to `"global"` per Supabase's docs — every logout revokes *all* of that user's sessions on every
+  device, not just the current one. This might be the intended behavior, but it's a real product/security decision
+  (`"global"` vs `"local"` vs `"others"`) this review isn't positioned to silently change. Flagging it as a
+  characteristic worth confirming is intentional, not changing it.
+- **Access tokens are never revoked on logout** — confirmed via Supabase's own docs this is expected, standard JWT
+  behavior (access tokens remain valid until their encoded expiry regardless of sign-out; only the refresh token is
+  revoked, preventing new ones from being minted), not a defect in this codebase. The actual mitigation for this
+  (shorter JWT expiry) is a Supabase project *configuration* setting, not application code — out of scope to "fix"
+  here, noted only for completeness.
+- Removed one stray, orphaned comment block (a `// POST /api/auth/reset-password` header with no route beneath it
+  — the real route is defined earlier in the file; this was leftover dead text, not a duplicate route).
+- Everything else read clean: `/register`, `/login`, `/refresh`, `/me`, `/profile/ensure`, `/google/url`,
+  `/google/callback`, `createUserWithWorkspaceRetry`, `deleteAuthUserWithRetry` all handle errors sensibly, use
+  `req.user.id` correctly where authenticated, and the retry helpers have sensible backoff and duplicate-key
+  handling.
+
+**Fix status:** `/logout`'s dead call removed and verified (syntax check, full test suite). Sign-out scope flagged
+for confirmation, not changed.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

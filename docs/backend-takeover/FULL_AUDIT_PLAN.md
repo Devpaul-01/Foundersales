@@ -56,7 +56,7 @@ ownership-scoping check; a route file does):
 ### Routes (20)
 | File | Status | Note |
 |---|---|---|
-| auth.js | ⏳ | |
+| auth.js | 🔧 | Dead refreshSession() call removed from /logout; sign-out scope ("global") flagged not changed. See AUDIT.md 1.14. |
 | calendar.js | ✅ (prior pass) | Reviewed in original engagement's milestones 1-2 |
 | chat.js | ✅ (prior pass) | Reviewed in original engagement's milestone 2 |
 | commitments.js | ⏳ | |

@@ -59,7 +59,7 @@ ownership-scoping check; a route file does):
 | auth.js | 🔧 | Dead refreshSession() call removed from /logout; sign-out scope ("global") flagged not changed. See AUDIT.md 1.14. |
 | calendar.js | ✅ (prior pass) | Reviewed in original engagement's milestones 1-2 |
 | chat.js | ✅ (prior pass) | Reviewed in original engagement's milestone 2 |
-| commitments.js | ⏳ | |
+| commitments.js | 🔧 | Under-scoped update() in generate-message tightened (not exploitable as written, but inconsistent with file's own pattern). See AUDIT.md 1.15. |
 | feedback.js | ✅ (prior pass) | Reviewed in original engagement's milestone 2 |
 | followup.js | ⏳ | |
 | goals.js | ⏳ | Only the TIP_CARD_GENERATE enqueue call site was seen, not the full file |

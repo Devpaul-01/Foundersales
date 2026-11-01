@@ -539,6 +539,25 @@ Full read against the checklist in FULL_AUDIT_PLAN.md.
 **Fix status:** `/logout`'s dead call removed and verified (syntax check, full test suite). Sign-out scope flagged
 for confirmation, not changed.
 
+### 1.15 — LOW — `routes/commitments.js` full read (full audit, file 2 of 80)
+**Location:** `backend/src/routes/commitments.js`
+
+Full read against the checklist. `GET /`, `PUT /:id` both correctly scoped by `workspace_id`/`user_id`.
+`updateCommitmentProspectHealth` already carries its own `FIX MED-04` comment from a prior pass fixing exactly
+this class of issue (missing `workspace_id` on an update). `GET /` has no `requirePermission` call unlike the
+write routes — checked this isn't a gap: `app.js` applies `authenticate`/`resolveWorkspace` to the whole router at
+the mount point, so the route is still properly authenticated/workspace-scoped; it just doesn't add an extra
+role-floor beyond "active member," which is the normal, correct pattern for a read endpoint.
+
+**One real, low-severity finding, fixed:** `POST /:id/generate-message`'s final `update()` (saving the generated
+follow-up message) filtered only by `.eq('id', commitment.id)` — missing the `workspace_id`/`user_id` scoping
+every other query in this file applies, including the explicit prior fix for this exact category of bug a few
+lines below it. Not actually exploitable as written: `commitment.id` only reaches this line via the `select()`
+immediately above, which already verifies ownership — but inconsistent with the file's own established pattern,
+and a future edit that reorders or reuses this code could silently lose that protection. Tightened to match.
+
+**Fix status:** fixed and verified (syntax check, full test suite).
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

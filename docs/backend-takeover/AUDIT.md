@@ -558,6 +558,26 @@ and a future edit that reorders or reuses this code could silently lose that pro
 
 **Fix status:** fixed and verified (syntax check, full test suite).
 
+### 1.16 — LOW — `routes/followup.js` full read (full audit, file 3 of 80)
+**Location:** `backend/src/routes/followup.js`
+
+Full read against the checklist. `/unviewed-count`, `/:id/sent`, `/:id/dismiss` all correctly scoped by
+`workspace_id` and (`user_id` OR `assigned_to`). Verified, not assumed: this file's `/sent`/`/dismiss` routes carry
+a comment claiming `.or()` combined with `.select()` on an UPDATE produces an invalid-SQL error in PostgREST, and
+deliberately avoid it by splitting into a scoped `fetch` then an `id`-only `update`. Confirmed via Supabase's own
+troubleshooting documentation: this is a real, specifically-documented PostgREST bug (pre-14.4, `or()` on a
+mutation combined with `select=`/`return=representation`) with exactly this workaround as one of the two
+officially recommended fixes. Not a bug to correct — the existing workaround is the right one, already correctly
+applied consistently across both routes.
+
+**One real, low-severity finding, fixed:** `GET /`'s "mark opportunities as viewed" update filtered only by
+`.in('id', ids)` — missing the `workspace_id` scoping `/sent`/`/dismiss` both correctly apply. Not actually
+exploitable as written (`ids` only ever comes from the workspace-scoped `select()` immediately above), but
+inconsistent with the rest of the file. Fixed by adding `.eq('workspace_id', workspaceId)` — a plain `.eq()`, not
+`.or()`, so it doesn't reintroduce the PostgREST mutation bug just confirmed above.
+
+**Fix status:** fixed and verified (syntax check, full test suite).
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

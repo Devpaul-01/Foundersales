@@ -61,7 +61,7 @@ ownership-scoping check; a route file does):
 | chat.js | ✅ (prior pass) | Reviewed in original engagement's milestone 2 |
 | commitments.js | 🔧 | Under-scoped update() in generate-message tightened (not exploitable as written, but inconsistent with file's own pattern). See AUDIT.md 1.15. |
 | feedback.js | ✅ (prior pass) | Reviewed in original engagement's milestone 2 |
-| followup.js | ⏳ | |
+| followup.js | 🔧 | Under-scoped mark-as-viewed update tightened. .or()-on-mutation workaround verified correct, not changed. See AUDIT.md 1.16. |
 | goals.js | ⏳ | Only the TIP_CARD_GENERATE enqueue call site was seen, not the full file |
 | growth.js | ✅ (prior pass) | Reviewed in original engagement's milestone 2 |
 | insights.js | ⏳ | |

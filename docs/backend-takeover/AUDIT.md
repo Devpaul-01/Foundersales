@@ -672,6 +672,45 @@ verified zero references in the file or its test file before removing.
 **Fix status:** fixed and verified (syntax check, full test suite including the file's own existing
 `metrics.test.js`, which covers the three exported pure helpers unaffected by these changes).
 
+### 1.20 — INFO — `routes/onboarding.js` full read (full audit, file 7 of 80)
+**Location:** `backend/src/routes/onboarding.js`
+
+Full read against the checklist. This file is explicitly protected per the project owner's instructions
+(calendar, metrics, insights, onboarding — don't remove or restructure). Treated accordingly: only genuinely
+risk-free cosmetic cleanups made, nothing touching actual onboarding logic or behavior.
+
+Every query correctly scoped by `workspace_id`+`user_id`. The `ConcurrencyGuard` section documents a real, subtle,
+already-fixed distributed-systems bug (a local-pending-array deadlock under multi-instance load) — read carefully,
+confirmed the fix described matches the current implementation, not touched further.
+
+**This is also the file containing both `SEED_MEMORY` call sites** flagged but not resolved in milestone 7
+(AUDIT.md 1.13). Reading both in full context sharpens that flag:
+- `POST /rebuild-voice-profile` enqueues with `isRebuild: true`. Re-checked `seedMemoryFromOnboarding`
+  (`groq-onboarding.js`): the `isRebuild: true` path already clears stale onboarding-seeded memories before
+  reseeding — genuinely redelivery-safe, a real retry just clears-and-reseeds again, no duplication. Not a gap.
+- `POST /answers` (fresh onboarding completion) enqueues with `isRebuild: false` — this is the path with no
+  redelivery protection, confirmed precisely now rather than inferred. Bounded, not unbounded: `MEMORY_CAP = 100`,
+  and a single seeding run inserts "8-10 key facts" per its own prompt, so a worst-case single redelivery adds
+  roughly 8-10 duplicate-ish facts out of a 100-fact cap, not uncontrolled growth. Milestone 7's framing of this
+  as a bounded, product-judgment-call item (skip-if-already-seeded vs. the current re-extract-and-cap behavior)
+  stands, now with this more precise severity bound. Still not fixed — still the person's call, inside protected
+  functionality.
+
+**Two trivial, zero-behavior-change cleanups made:** a comment (`// GET /api/onboarding/status`) was accidentally
+duplicated on two consecutive lines above the route it describes; both `SEED_MEMORY` enqueue calls had a stray
+`// ✅ ADD THIS` edit-marker comment and slightly inconsistent indentation left over from whatever edit added the
+`workspaceId` field. Fixed purely as whitespace/comment hygiene — no logic, query, or behavior touched.
+
+**Flagged, not acted on:** a comment header `// POST /api/onboarding/voice-profile/regenerate` has no route
+beneath it. Unlike the clearly-dead leftover comment found and removed in `auth.js` (1.14) — where the real route
+was confirmed to still exist elsewhere in that file — this reads more like a planned-but-never-built feature
+marker than cruft from a completed refactor. Given the explicit protection on this file, left alone rather than
+guessing which case it is.
+
+**Fix status:** two trivial cosmetic fixes made and verified (syntax check, full test suite). `SEED_MEMORY`'s
+flag sharpened with precise severity bound, not independently resolved — still awaiting the person's decision from
+milestone 7.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

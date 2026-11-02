@@ -66,7 +66,7 @@ ownership-scoping check; a route file does):
 | growth.js | ✅ (prior pass) | Reviewed in original engagement's milestone 2 |
 | insights.js | 🔧 | Large file (1238 lines, ~25 handlers), otherwise very clean. One verified-then-unscoped mutation tightened. See AUDIT.md 1.18. |
 | metrics.js | 🔧 | HIGH: real cross-workspace data leak (practice_badges/drills, found twice), fixed. Dead code removed. Self-flagged scoring question resolved. See AUDIT.md 1.19. |
-| onboarding.js | ⏳ | Only two enqueue call sites were seen (SEED_MEMORY context), not the full file |
+| onboarding.js | 🔧 | Protected file — only trivial whitespace/comment cleanup made. Sharpened the SEED_MEMORY flag from milestone 7 with full context. See AUDIT.md 1.20. |
 | opportunities.js | ✅ (prior pass) | Reviewed in original engagement's milestones 1-2 |
 | pipeline.js | ⏳ | |
 | practice.js | ✅ (prior pass) | Reviewed in original engagement's milestone 2 |

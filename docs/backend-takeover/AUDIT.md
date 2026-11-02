@@ -746,6 +746,31 @@ written.
 
 **Fix status:** no fix needed. Reviewed clean.
 
+### 1.23 — LOW — `routes/suggestions.js` full read (full audit, file 10 of 80)
+**Location:** `backend/src/routes/suggestions.js`
+
+Full read against the checklist. Scoping correct throughout (`workspace_id`+`user_id` on both the cache read and
+upsert). `userData` possibly being `null` from its `select()` is handled correctly (`userData || {}` at both
+downstream call sites).
+
+**One real, low-severity finding, fixed:** this file's AI-response JSON parsing did a manual markdown-fence strip
+(`.replace(/\`\`\`json|\`\`\`/g, '')`) followed by a raw `JSON.parse()` — unlike every other AI-JSON-parsing call
+site in this codebase, which uses `utils/parser.js`'s `parseJSON`/`parseJSONArray`/`parseJSONObject` (already
+test-covered, handles the same fence-stripping plus additional recovery like unwrapping an array nested inside an
+object, and never throws). Not a live crash as written: the raw `JSON.parse()`'s throw on malformed AI output was
+already being caught by this function's own surrounding `try/catch`, correctly falling through to the
+stale-cache-or-defaults path. Switched to `parseJSONArray` for consistency and because it's more robust than the
+manual version, not because the manual version was actually broken.
+
+**Noted, not acted on:** there are two separate JSON-parsing utilities in this codebase —
+`utils/parser.js` (`parseJSON`/`parseJSONArray`/`parseJSONObject`, test-covered) and `utils/parseAIJson.js`
+(`parseAIJson`, a differently-shaped single function). Worth knowing this duplication exists; not consolidating
+them in this pass — that's a larger, cross-cutting refactor (would need to trace every call site of both to do
+safely) better suited to a dedicated pass once `utils/parseAIJson.js` itself has been read as part of this audit
+(not yet reached).
+
+**Fix status:** fixed and verified (syntax check, full test suite).
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

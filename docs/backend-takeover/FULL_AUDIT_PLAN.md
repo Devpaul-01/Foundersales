@@ -71,7 +71,7 @@ ownership-scoping check; a route file does):
 | pipeline.js | 🔧 | Two verified-then-unscoped mutations tightened (stage update, assign update). See AUDIT.md 1.21. |
 | practice.js | ✅ (prior pass) | Reviewed in original engagement's milestone 2 |
 | prospects.js | ✅ | Clean — every mutation correctly scoped, Zod .strict() injection guard, correct route ordering. See AUDIT.md 1.22. |
-| suggestions.js | ⏳ | |
+| suggestions.js | 🔧 | Switched manual JSON.parse to the tested parseJSONArray utility (not a live crash, just more robust/consistent). Noted a two-utility duplication to revisit later. See AUDIT.md 1.23. |
 | upload.js | 🔧 (prior pass, partial) | multer usage checked for the CVE fix; full route logic not reviewed |
 | user.js | ✅ (prior pass) | Reviewed in original engagement's milestones 1-2, deferred-items pass |
 | workspace-activity.js | ⏳ | |

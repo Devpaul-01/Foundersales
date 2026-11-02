@@ -631,6 +631,47 @@ file, which already does this correctly.
 
 **Fix status:** fixed and verified (syntax check, full test suite).
 
+### 1.19 — HIGH — `routes/metrics.js` full read (full audit, file 6 of 80)
+**Location:** `backend/src/routes/metrics.js`
+
+Full read of all ~30 route handlers (1549 lines, the largest file reviewed in this pass) against the checklist.
+Like `insights.js`, this file's own comments document several real prior fixes (explicit "Fix 2," "Fix 3," "Fix:"
+labels throughout, matching the pattern this review has found repeatedly), and its very first comment block
+already explicitly states the exact bug class found twice below: *"a user can belong to more than one workspace —
+without this filter, a multi-workspace user's stats bleed across workspaces."*
+
+**Real, HIGH-severity finding, fixed — found twice:** `GET /achievements` and `GET /practice/summary`'s badge
+count both queried `practice_badges` (and `/achievements` also `practice_drills`) filtered only by `.eq('user_id',
+userId)` — with **no `workspace_id` filter at all**, unlike every other one of the ~28 other handlers in this
+file. Confirmed both tables have a `NOT NULL workspace_id` column in `schema.sql`. This is not a
+defense-in-depth gap like the "verified-then-unscoped mutation" pattern found in the four prior files (1.15–1.18)
+— there was no scoping here to begin with. For any user who belongs to more than one workspace, both endpoints
+would return badges/drills earned across *every* workspace they're a member of, combined — a real, live,
+cross-workspace data leak, reachable by any authenticated user with multi-workspace membership, exactly the
+scenario this file's own top-of-file comment already identified as the reason to scope by workspace elsewhere.
+
+**Fix:** added `.eq('workspace_id', workspaceId)` to both `practice_badges` queries and the `practice_drills`
+query in `/achievements`.
+
+**Resolved a self-flagged open question:** the workspace leaderboard scoring formula (`/workspace/leaderboard`)
+carried a comment explicitly saying `skill_score`'s 0–10 scale assumption was "worth double-checking against how
+skill_progression is actually populated." Traced it: confirmed genuinely 0–10, by design — conversation-derived
+axes come straight from already-0–10 fields, and practice-derived axes are explicitly divided by 10 before being
+blended in, a deliberate, separately-documented normalization (`FIX HIGH-12`) specifically because the raw
+practice axes are natively 0–100. The formula's `* 2` scaling is correct. Updated the comment to record this as
+resolved rather than leave it open for the next reader to redo.
+
+**Dead code removed:** a local `generateRuleBasedInsights(profile, pipeline, goals, objections, patterns,
+stalledDeals)` function had zero call sites anywhere in this file. Its own comment described a fix to its call
+signature from "the `/intelligence` catch block" — but there's no `/intelligence` route in this file; that route
+now lives in `insights.js` (confirmed while auditing that file, 1.18) and imports a *different*,
+differently-signatured `generateRuleBasedInsights(context, metrics)` from `services/intelligenceReport.js`.
+Genuinely orphaned by whatever refactor moved `/intelligence` out of this file, never cleaned up. Removed —
+verified zero references in the file or its test file before removing.
+
+**Fix status:** fixed and verified (syntax check, full test suite including the file's own existing
+`metrics.test.js`, which covers the three exported pure helpers unaffected by these changes).
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

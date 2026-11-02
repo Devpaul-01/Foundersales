@@ -70,7 +70,7 @@ ownership-scoping check; a route file does):
 | opportunities.js | ✅ (prior pass) | Reviewed in original engagement's milestones 1-2 |
 | pipeline.js | 🔧 | Two verified-then-unscoped mutations tightened (stage update, assign update). See AUDIT.md 1.21. |
 | practice.js | ✅ (prior pass) | Reviewed in original engagement's milestone 2 |
-| prospects.js | ⏳ | |
+| prospects.js | ✅ | Clean — every mutation correctly scoped, Zod .strict() injection guard, correct route ordering. See AUDIT.md 1.22. |
 | suggestions.js | ⏳ | |
 | upload.js | 🔧 (prior pass, partial) | multer usage checked for the CVE fix; full route logic not reviewed |
 | user.js | ✅ (prior pass) | Reviewed in original engagement's milestones 1-2, deferred-items pass |

@@ -731,6 +731,21 @@ both to match the file's own established pattern.
 
 **Fix status:** fixed and verified (syntax check, full test suite).
 
+### 1.22 — INFO — `routes/prospects.js` full read (full audit, file 9 of 80) — clean
+**Location:** `backend/src/routes/prospects.js`
+
+Full read against the checklist. **No issue found** — the cleanest file reviewed in this pass so far. Every
+mutation correctly re-applies `workspace_id`+`user_id` on the actual write statement, not just a preceding check
+(the pattern six other files in this audit needed fixing). `DELETE /:id` doesn't even need a prior `select()` —
+it deletes directly with full scoping, correctly fail-safe if the row doesn't match. `PUT /:id` uses a Zod
+`.strict()` schema with an explicit comment explaining why: rejecting any key not explicitly listed is the actual
+guard against a client smuggling `workspace_id`/`user_id` into the body to overwrite them. The merge-candidate
+routes carry a correct comment about Express route-registration order (`/merge-candidates` must be registered
+before `/:id`, or the param route would swallow it) — verified this ordering is indeed correct in the file as
+written.
+
+**Fix status:** no fix needed. Reviewed clean.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

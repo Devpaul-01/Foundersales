@@ -183,7 +183,11 @@ router.put('/:id/stage', requirePermission('member'), asyncHandler(async (req, r
     updates.marked_sent_at = now;
   }
 
-  await supabaseAdmin.from('opportunities').update(updates).eq('id', id);
+  // NOTE (docs/backend-takeover/AUDIT.md, full audit): tightened to match
+  // deal-value's update and DELETE /:id just below — not exploitable as
+  // written (id only reaches here via the ownership-verified select()
+  // above), but kept consistent.
+  await supabaseAdmin.from('opportunities').update(updates).eq('id', id).eq('workspace_id', workspaceId);
 
   if (stage === PIPELINE_STAGES.CLOSED_WON) {
     try {
@@ -301,7 +305,8 @@ router.put('/:id/assign', requirePermission('manager'), asyncHandler(async (req,
 
   if (!opp) return res.status(404).json({ error: 'NOT_FOUND', message: 'Deal not found.' });
 
-  await supabaseAdmin.from('opportunities').update({ assigned_to: assigneeId }).eq('id', id);
+  // Same tightening as PUT /:id/stage above.
+  await supabaseAdmin.from('opportunities').update({ assigned_to: assigneeId }).eq('id', id).eq('workspace_id', workspaceId);
 
   if (assignee?.email) {
     sendDealAssignedEmail({

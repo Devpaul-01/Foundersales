@@ -711,6 +711,26 @@ guessing which case it is.
 flag sharpened with precise severity bound, not independently resolved — still awaiting the person's decision from
 milestone 7.
 
+### 1.21 — LOW — `routes/pipeline.js` full read (full audit, file 8 of 80)
+**Location:** `backend/src/routes/pipeline.js`
+
+Full read against the checklist. File's own comments document three real prior fixes ("FIX 1" route-ordering,
+"FIX 2" workspace-wide manager assignment scope, "FIX 3" manager-vs-member deal visibility, "FIX 5" removing
+member-level delete access) — same pattern of genuine prior care seen throughout this audit. `GET /:id`'s and
+`PATCH /:id/deal-value`'s cross-table `feedback` queries (filtered only by `opportunity_id`, not re-stating
+`workspace_id`) checked and confirmed safe: the `opportunity_id` used is only ever one already verified against
+`workspace_id` in a preceding query on the same request, same reasoning already established for similar patterns
+in `opportunities.js` (milestone 2).
+
+**Two real, low-severity findings, fixed:** `PUT /:id/stage` and `PUT /:id/assign` both had their final
+`update()` filtered only by `.eq('id', id)` — missing `workspace_id`, unlike `PATCH /:id/deal-value`'s update
+flow and `DELETE /:id` elsewhere in the same file (both correctly re-apply workspace scoping on the mutation).
+Same "verified-then-unscoped mutation" pattern now found in six files across this audit. Not exploitable as
+written (`id` only reaches each mutation via an already workspace-verified `select()` immediately above); tightened
+both to match the file's own established pattern.
+
+**Fix status:** fixed and verified (syntax check, full test suite).
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

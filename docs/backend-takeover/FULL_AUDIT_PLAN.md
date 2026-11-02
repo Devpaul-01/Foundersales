@@ -68,7 +68,7 @@ ownership-scoping check; a route file does):
 | metrics.js | 🔧 | HIGH: real cross-workspace data leak (practice_badges/drills, found twice), fixed. Dead code removed. Self-flagged scoring question resolved. See AUDIT.md 1.19. |
 | onboarding.js | 🔧 | Protected file — only trivial whitespace/comment cleanup made. Sharpened the SEED_MEMORY flag from milestone 7 with full context. See AUDIT.md 1.20. |
 | opportunities.js | ✅ (prior pass) | Reviewed in original engagement's milestones 1-2 |
-| pipeline.js | ⏳ | |
+| pipeline.js | 🔧 | Two verified-then-unscoped mutations tightened (stage update, assign update). See AUDIT.md 1.21. |
 | practice.js | ✅ (prior pass) | Reviewed in original engagement's milestone 2 |
 | prospects.js | ⏳ | |
 | suggestions.js | ⏳ | |

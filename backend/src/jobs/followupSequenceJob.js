@@ -6,19 +6,23 @@
 //  HIGH-03: follow_up_count is now incremented AND follow_up_sent_at
 //            is set after each generated follow-up, enforcing the
 //            "max 2 follow-ups" business rule correctly.
-//  MED-08:  Removed import of non-existent FOLLOW_UP_THRESHOLDS constant.
-//            Values are now defined inline with a comment indicating they
-//            should be added to constants.js.
 //  Token tracking: recordTokenUsage now uses workspaceId.
+//
+//  NOTE (docs/backend-takeover/AUDIT.md, full audit): the MED-08 entry
+//  that used to be here claimed FOLLOW_UP_THRESHOLDS "does not exist in
+//  constants.js" and was "defined inline" in this file — neither was
+//  true as found: FOLLOW_UP_THRESHOLDS is genuinely exported from
+//  constants.js (see that file's own MED-01 entry, which fixed exactly
+//  this — it used to be a non-exported const), and there was no inline
+//  definition anywhere in this file to find. This comment predated that
+//  fix and was never updated afterward. Removed the stale claim rather
+//  than leave a future reader looking for a definition that isn't here.
 
 import supabaseAdmin from '../config/supabase.js';
 import { callWithFallbackGroq as cwf } from '../services/multiProvider.js';
 import { notifyUser as nu }         from '../services/notifications.js';
 import { BATCH_SIZE, FOLLOW_UP_THRESHOLDS }               from '../config/constants.js';
 import { sleep, logJob }            from '../utils/jobHelpers.js';
-
-// FIX MED-08: FOLLOW_UP_THRESHOLDS does not exist in constants.js.
-// Define inline here. TODO: add to constants.js as FOLLOW_UP_THRESHOLDS.
 
 const FOLLOWUP_BATCH_DELAY_MS = 1500;
 
@@ -180,11 +184,23 @@ Return ONLY the message text. No quotes, no explanation.`;
   // FIX HIGH-03: increment follow_up_count AND set follow_up_sent_at so the
   // "max 2 follow-ups" business rule is actually enforced. Previously only
   // follow_up_message was updated, leaving follow_up_count at 0 forever.
+  //
+  // NOTE (docs/backend-takeover/AUDIT.md, full audit): added
+  // .eq('workspace_id', workspaceId) here. opp.id is sourced from this
+  // job's own system query, not external input, so this was never
+  // exploitable — but unlike most other files' per-user jobs, this job's
+  // main query has no workspace-level filter at all (it's a deliberate
+  // cross-workspace sweep by design, correctly joining each opportunity's
+  // own workspace_profiles for context). That means this update's id
+  // filter was the ONLY thing standing between a correct write and a
+  // wrong one if opp.id and opp.workspace_id were ever to disagree (e.g.
+  // a future refactor reusing this function with a differently-sourced
+  // opp object). Tightened for defense-in-depth.
   await supabaseAdmin.from('opportunities').update({
     follow_up_message: followUpMessage,
     follow_up_count:   (opp.follow_up_count || 0) + 1,
     follow_up_sent_at: new Date().toISOString(),
-  }).eq('id', opp.id);
+  }).eq('id', opp.id).eq('workspace_id', workspaceId);
 
   if (opp.users?.fcm_token) {
     await nu(userId, {

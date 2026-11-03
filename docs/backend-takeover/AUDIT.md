@@ -849,6 +849,38 @@ and a clear log message when the AI response genuinely can't be parsed.
 **Fix status:** both fixed and verified (syntax check, full test suite, manual verification of the escaping
 helper against adversarial input).
 
+### 1.27 — LOW — `jobs/followupSequenceJob.js` full read (full audit, file 14 of 80)
+**Location:** `backend/src/jobs/followupSequenceJob.js`
+
+Full read against the checklist. This file has existing test coverage (`matchWorkspaceProfile`, the pure
+array-disambiguation helper, 3 tests) but the actual job logic had never been read. File's own header documents
+two real, previously-fatal bugs already fixed (`CRIT-03`: missing import crashed every run; `HIGH-03`:
+`follow_up_count` was never actually incremented, so the "max 2 follow-ups" business rule silently never applied)
+— both verified fixed in the current code.
+
+This job is architecturally a deliberate cross-workspace sweep (processes all opportunities across all workspaces
+meeting stage/timing criteria, correctly joining each opportunity's own `workspace_profiles` for context) — unlike
+most other jobs reviewed, which iterate scoped-by-construction per-user/per-workspace pairs. Worth noting since it
+changes what "correctly scoped" means here: there's no workspace-level pre-filter anywhere in the main query by
+design, which is appropriate for a sweep, but means downstream mutations have less structural protection than in
+other files.
+
+**One real, low-severity finding, fixed:** the final `update()` in `generateFollowup` filtered only by
+`.eq('id', opp.id)` — missing `workspace_id`. Given this job's lack of any workspace-level pre-filter (see above),
+this `id` filter was the *only* thing preventing a cross-workspace write if `opp.id`/`opp.workspace_id` were ever
+to disagree — not currently exploitable (`opp.id` comes from this job's own system query, not external input), but
+worth tightening given the weaker surrounding protection than other files had. Added `.eq('workspace_id',
+workspaceId)`.
+
+**One stale, misleading comment, fixed:** the file's `MED-08` header entry claimed `FOLLOW_UP_THRESHOLDS` "does
+not exist in constants.js" and was "defined inline" in this file. Checked both claims directly: neither was true.
+`FOLLOW_UP_THRESHOLDS` is genuinely exported from `constants.js` (confirmed by that file's own `MED-01` entry,
+which fixed exactly this — it used to be a non-exported `const`), and there's no inline definition anywhere in
+this file. The comment predated that fix in the other file and was never updated. Removed the stale claim rather
+than leave a future reader searching for a definition that was never actually here.
+
+**Fix status:** both fixed and verified (syntax check, full test suite including the file's own existing tests).
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

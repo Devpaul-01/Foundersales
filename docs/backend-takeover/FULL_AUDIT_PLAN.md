@@ -85,7 +85,7 @@ ownership-scoping check; a route file does):
 | conversationAnalysisJob.js | ✅ | Clean — correct idempotency, correct trust model for a job, clean JSON-parse pattern. See AUDIT.md 1.24. |
 | coreJobs.js | ✅ | Clean — strong idempotency design throughout (atomic compare-and-swap, single-source prep generation). See AUDIT.md 1.25. |
 | emailDigestJob.js | 🔧 | HIGH: unescaped AI/user content in raw email HTML, fixed. Also unsafe JSON.parse replaced. See AUDIT.md 1.26. |
-| followupSequenceJob.js | ⏳ | Has existing test coverage (followupSequenceJob.test.js), logic not read |
+| followupSequenceJob.js | 🔧 | Unscoped mutation tightened (weaker surrounding protection than other files — this job sweeps cross-workspace by design). Stale constants.js comment fixed. See AUDIT.md 1.27. |
 | growthIntelligenceScheduler.js | ⏳ | Only detectAndSaveArchetype's call site seen |
 | growthPushNotificationJob.js | ⏳ | |
 | index.js | ✅ (prior pass) | Reviewed in milestone 3 |

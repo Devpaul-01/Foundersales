@@ -87,7 +87,7 @@ ownership-scoping check; a route file does):
 | emailDigestJob.js | 🔧 | HIGH: unescaped AI/user content in raw email HTML, fixed. Also unsafe JSON.parse replaced. See AUDIT.md 1.26. |
 | followupSequenceJob.js | 🔧 | Unscoped mutation tightened (weaker surrounding protection than other files — this job sweeps cross-workspace by design). Stale constants.js comment fixed. See AUDIT.md 1.27. |
 | growthIntelligenceScheduler.js | 🔧 | Three instances of the same unscoped-query pattern fixed (AI context contamination risk, not a direct leak). See AUDIT.md 1.28. |
-| growthPushNotificationJob.js | ⏳ | |
+| growthPushNotificationJob.js | 🔧 | One unscoped query fixed (notification-logic leak, not data exposure). push_notification_log's user-only design confirmed deliberate. See AUDIT.md 1.29. |
 | index.js | ✅ (prior pass) | Reviewed in milestone 3 |
 | memoryExtractionJob.js | ⏳ | |
 | messageQueueWorker.js | ✅ (prior pass) | Full idempotency trace + dead code removal, milestone 3 |

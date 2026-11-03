@@ -914,6 +914,25 @@ recurring in new call sites even after being fixed once elsewhere in the same fi
 
 **Fix status:** fixed and verified (syntax check, full test suite).
 
+### 1.29 — LOW — `jobs/growthPushNotificationJob.js` full read (full audit, file 16 of 80)
+**Location:** `backend/src/jobs/growthPushNotificationJob.js`
+
+Full read against the checklist. Every `growth_cards`/`opportunities`/`skill_progression` query in this file is
+explicitly comment-labeled "workspace-scoped" and correctly is. Checked whether `push_notification_log`'s
+user-only (no `workspace_id`) anti-spam queries were a gap: confirmed the table genuinely has no `workspace_id`
+column at all in `schema.sql` — this is a deliberate design choice (a global, per-user daily push cap and cooldown
+regardless of which workspace triggered it, which is sensible: a multi-workspace user shouldn't get double the
+notifications just for being in two workspaces), not an oversight.
+
+**One real, low-severity finding, fixed:** `buildEveningNotification2`'s `practice_sessions` existence check (used
+to decide whether to suppress the "you haven't practiced your weakest skill" reminder) filtered only by
+`user_id`, missing `workspace_id` — inconsistent with every other query in this file. Consequence: a
+multi-workspace user who practiced in one workspace within the last 2 days would incorrectly suppress this
+reminder for a different workspace too — a notification-logic leak (wrong UX), not a data exposure. Fixed by
+adding `workspace_id`.
+
+**Fix status:** fixed and verified (syntax check, full test suite).
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

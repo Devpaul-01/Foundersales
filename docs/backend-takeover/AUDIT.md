@@ -789,6 +789,31 @@ not independently verified line-by-line, appropriately so for a heuristic.
 
 **Fix status:** no fix needed. Reviewed clean.
 
+### 1.25 — INFO — `jobs/coreJobs.js` full read (full audit, file 12 of 80) — clean
+**Location:** `backend/src/jobs/coreJobs.js`
+
+Full read of all 7 scheduled jobs against the checklist. **No issue found.** Only the `runOpportunitiesRefreshForUser`
+call site had been seen before this pass; the full file (468 lines) had not.
+
+Several genuinely strong patterns, verified against their own header comments rather than taken on faith:
+- `runCalendarPrepJob`'s header claims it was refactored from a second, duplicate prep-generation implementation
+  into a thin scan-and-enqueue using the same job type/implementation as every other prep trigger — confirmed in
+  the actual code, not just the comment.
+- `runCalendarReminderScan` uses an atomic `UPDATE user_events SET reminder_sent=true WHERE id=... AND
+  reminder_sent=false ... RETURNING id` as its idempotency mechanism — a genuine database-level compare-and-swap,
+  avoiding per-event BullMQ job scheduling entirely. `if (!claimed) continue` correctly handles the case where a
+  concurrent scan tick already claimed the event. This is exactly the kind of "use database constraints and atomic
+  operations" pattern the mission asks for, already correctly implemented.
+- `runFeedbackPromptJob` cross-references candidate opportunities against `workspace_members.status = 'active'`
+  before notifying, correctly excluding stale data for users who've since left the workspace.
+- `runCalendarDebriefDigest`'s header explicitly clarifies it is NOT the Slack/email digest feature (which the
+  comment says was deliberately excluded from that implementation pass) — worth noting for anyone looking for
+  that feature and not finding it here.
+
+All database queries across all 7 jobs correctly scoped by `workspace_id`+`user_id` where applicable.
+
+**Fix status:** no fix needed. Reviewed clean.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

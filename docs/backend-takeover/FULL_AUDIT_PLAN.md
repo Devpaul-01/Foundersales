@@ -83,7 +83,7 @@ ownership-scoping check; a route file does):
 | backgroundWorker.js | ✅ (prior pass) | Full idempotency trace, milestone 7 |
 | bullmq.js | ✅ (prior pass) | Full fix + review, milestone 1 |
 | conversationAnalysisJob.js | ✅ | Clean — correct idempotency, correct trust model for a job, clean JSON-parse pattern. See AUDIT.md 1.24. |
-| coreJobs.js | ⏳ | Only runOpportunitiesRefreshForUser's call site seen |
+| coreJobs.js | ✅ | Clean — strong idempotency design throughout (atomic compare-and-swap, single-source prep generation). See AUDIT.md 1.25. |
 | emailDigestJob.js | ⏳ | |
 | followupSequenceJob.js | ⏳ | Has existing test coverage (followupSequenceJob.test.js), logic not read |
 | growthIntelligenceScheduler.js | ⏳ | Only detectAndSaveArchetype's call site seen |

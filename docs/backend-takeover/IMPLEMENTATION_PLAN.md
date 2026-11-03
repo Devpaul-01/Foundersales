@@ -118,11 +118,13 @@ protected onboarding flow, where the correct fix shape is a product judgment cal
 
 ## Deferred / needs a decision, not yet scheduled
 
-- **`SEED_MEMORY`'s redelivery behavior** (AUDIT.md 1.13) — `seedMemoryFromOnboarding` doesn't guard against
-  inserting duplicate-ish memory facts on a genuine job redelivery (bounded by `MEMORY_CAP`, not prevented). Two
-  reasonable fixes exist (skip entirely if onboarding-sourced facts already exist, vs. the current re-extract/cap
-  behavior) and choosing between them is a product decision about onboarding behavior, not an engineering one —
-  flagging for the person rather than picking unilaterally inside an explicitly protected flow.
+- **`SEED_MEMORY`'s redelivery behavior** (AUDIT.md 1.13, sharpened in 1.20) — only the `isRebuild: false` path
+  (fresh onboarding completion, `POST /onboarding/answers`) lacks a redelivery guard; the `isRebuild: true` path
+  (`POST /onboarding/rebuild-voice-profile`) already clears-then-reseeds safely. Precise severity, confirmed by
+  reading `seedMemoryFromOnboarding` in full: bounded by `MEMORY_CAP = 100`, a single redelivery adds ~8-10
+  duplicate-ish facts, not unbounded growth. Two reasonable fixes exist (skip entirely if onboarding-sourced facts
+  already exist, vs. the current re-extract/cap behavior) and choosing between them is a product decision, not an
+  engineering one — flagging for the person rather than picking unilaterally inside an explicitly protected flow.
 - **`TIP_CARD_GENERATE`'s guard precision** (AUDIT.md 1.13) — the fix added is deliberately coarser (one
   goal-note tip per user per day) than a precise per-goal-note check would be, because the precise version needs a
   PostgREST JSONB-path filter this environment can't verify against a real Supabase project. Worth tightening once

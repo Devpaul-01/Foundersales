@@ -88,10 +88,16 @@ router.delete('/patterns/:id', asyncHandler(async (req, res) => {
 
   if (!pattern) return res.status(404).json({ error: 'NOT_FOUND', message: 'Pattern not found.' });
 
+  // NOTE (docs/backend-takeover/AUDIT.md, full audit): tightened to match
+  // the select() above and the /weekly/dismiss/:id route just below in
+  // this same file — not exploitable as written (ownership already
+  // verified above), but kept consistent.
   await supabaseAdmin
     .from('communication_patterns')
     .update({ is_active: false, dismissed_at: new Date().toISOString() })
-    .eq('id', req.params.id);
+    .eq('id', req.params.id)
+    .eq('workspace_id', workspaceId)
+    .eq('user_id', userId);
 
   res.json({ success: true });
 }));

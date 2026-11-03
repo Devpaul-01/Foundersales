@@ -503,6 +503,436 @@ facts already exist for this user? Flagging for the person's decision rather tha
 **Fix status:** `TIP_CARD_GENERATE` fixed and verified (syntax check, full test suite 23/23). `SEED_MEMORY` flagged,
 not fixed — see IMPLEMENTATION_PLAN.md.
 
+### 1.14 — LOW/INFO — `routes/auth.js` full read (full audit, file 1 of 80)
+**Location:** `backend/src/routes/auth.js`
+
+Full read against the checklist in FULL_AUDIT_PLAN.md.
+
+- **Rate limiting**: initially looked like `/set-password`/`/reset-password` (which take `access_token` and
+  `new_password` directly in the body, no header) had zero rate limiting, since no limiter is visible anywhere in
+  this file for them. Traced further before concluding anything: `app.js` mounts this entire router behind
+  `LIMITERS.authLimiter` (10 requests / 15 min / IP, correctly keyed, `/refresh` explicitly exempted) at the mount
+  point, not per-route inside this file. Confirmed this covers the whole router. Not a bug — just something that
+  required tracing past this file's own contents before concluding anything.
+- **`/logout`'s dead `refreshSession()` call — fixed.** Called `supabaseAdmin.auth.refreshSession({ refresh_token
+  })` with a comment claiming it was "trying to revoke" the token, result discarded. Verified against Supabase's
+  own documentation: `refreshSession()` has no revocation semantics at all — it mints a new access/refresh token
+  pair. This did nothing toward logout; the `admin.signOut(token)` call just above it is what actually revokes the
+  session. Removed as dead weight (an unnecessary extra Auth API call on every logout).
+- **`/logout`'s sign-out scope — flagged, not changed.** `admin.signOut(token)` is called with no `scope` argument,
+  which defaults to `"global"` per Supabase's docs — every logout revokes *all* of that user's sessions on every
+  device, not just the current one. This might be the intended behavior, but it's a real product/security decision
+  (`"global"` vs `"local"` vs `"others"`) this review isn't positioned to silently change. Flagging it as a
+  characteristic worth confirming is intentional, not changing it.
+- **Access tokens are never revoked on logout** — confirmed via Supabase's own docs this is expected, standard JWT
+  behavior (access tokens remain valid until their encoded expiry regardless of sign-out; only the refresh token is
+  revoked, preventing new ones from being minted), not a defect in this codebase. The actual mitigation for this
+  (shorter JWT expiry) is a Supabase project *configuration* setting, not application code — out of scope to "fix"
+  here, noted only for completeness.
+- Removed one stray, orphaned comment block (a `// POST /api/auth/reset-password` header with no route beneath it
+  — the real route is defined earlier in the file; this was leftover dead text, not a duplicate route).
+- Everything else read clean: `/register`, `/login`, `/refresh`, `/me`, `/profile/ensure`, `/google/url`,
+  `/google/callback`, `createUserWithWorkspaceRetry`, `deleteAuthUserWithRetry` all handle errors sensibly, use
+  `req.user.id` correctly where authenticated, and the retry helpers have sensible backoff and duplicate-key
+  handling.
+
+**Fix status:** `/logout`'s dead call removed and verified (syntax check, full test suite). Sign-out scope flagged
+for confirmation, not changed.
+
+### 1.15 — LOW — `routes/commitments.js` full read (full audit, file 2 of 80)
+**Location:** `backend/src/routes/commitments.js`
+
+Full read against the checklist. `GET /`, `PUT /:id` both correctly scoped by `workspace_id`/`user_id`.
+`updateCommitmentProspectHealth` already carries its own `FIX MED-04` comment from a prior pass fixing exactly
+this class of issue (missing `workspace_id` on an update). `GET /` has no `requirePermission` call unlike the
+write routes — checked this isn't a gap: `app.js` applies `authenticate`/`resolveWorkspace` to the whole router at
+the mount point, so the route is still properly authenticated/workspace-scoped; it just doesn't add an extra
+role-floor beyond "active member," which is the normal, correct pattern for a read endpoint.
+
+**One real, low-severity finding, fixed:** `POST /:id/generate-message`'s final `update()` (saving the generated
+follow-up message) filtered only by `.eq('id', commitment.id)` — missing the `workspace_id`/`user_id` scoping
+every other query in this file applies, including the explicit prior fix for this exact category of bug a few
+lines below it. Not actually exploitable as written: `commitment.id` only reaches this line via the `select()`
+immediately above, which already verifies ownership — but inconsistent with the file's own established pattern,
+and a future edit that reorders or reuses this code could silently lose that protection. Tightened to match.
+
+**Fix status:** fixed and verified (syntax check, full test suite).
+
+### 1.16 — LOW — `routes/followup.js` full read (full audit, file 3 of 80)
+**Location:** `backend/src/routes/followup.js`
+
+Full read against the checklist. `/unviewed-count`, `/:id/sent`, `/:id/dismiss` all correctly scoped by
+`workspace_id` and (`user_id` OR `assigned_to`). Verified, not assumed: this file's `/sent`/`/dismiss` routes carry
+a comment claiming `.or()` combined with `.select()` on an UPDATE produces an invalid-SQL error in PostgREST, and
+deliberately avoid it by splitting into a scoped `fetch` then an `id`-only `update`. Confirmed via Supabase's own
+troubleshooting documentation: this is a real, specifically-documented PostgREST bug (pre-14.4, `or()` on a
+mutation combined with `select=`/`return=representation`) with exactly this workaround as one of the two
+officially recommended fixes. Not a bug to correct — the existing workaround is the right one, already correctly
+applied consistently across both routes.
+
+**One real, low-severity finding, fixed:** `GET /`'s "mark opportunities as viewed" update filtered only by
+`.in('id', ids)` — missing the `workspace_id` scoping `/sent`/`/dismiss` both correctly apply. Not actually
+exploitable as written (`ids` only ever comes from the workspace-scoped `select()` immediately above), but
+inconsistent with the rest of the file. Fixed by adding `.eq('workspace_id', workspaceId)` — a plain `.eq()`, not
+`.or()`, so it doesn't reintroduce the PostgREST mutation bug just confirmed above.
+
+**Fix status:** fixed and verified (syntax check, full test suite).
+
+### 1.17 — MEDIUM — `routes/goals.js` full read (full audit, file 4 of 80)
+**Location:** `backend/src/routes/goals.js`
+
+Full read against the checklist. This is also the file enqueuing the `TIP_CARD_GENERATE` job fixed in milestone 7
+(AUDIT.md 1.13) — the full file had never been read, only that one call site.
+
+**Real finding, fixed:** `DELETE /:goalId/notes/:noteId` verified the goal belongs to the requesting user/workspace,
+but the actual delete (`'goal_notes'.delete().eq('id', noteId).eq('user_id', userId)`) never verified `noteId`
+actually belongs to `goalId` — only that both the goal and the note separately belong to this user. The URL's own
+shape implies that relationship; the code didn't enforce it. Concretely: a request with a `goalId` the user owns,
+paired with a `noteId` belonging to one of their *other* goals, would still delete it. Scoped to the same user only
+(not a cross-user issue), but a real logic gap, not just a defense-in-depth tightening like the other findings in
+this file. Fixed by adding `.eq('goal_id', goalId)` to the delete filter.
+
+**Lower-severity, fixed for consistency:** `PUT /:id` and `DELETE /:id`'s actual mutations filtered only by
+`.eq('id', id)` — ownership verified in a preceding `select()`, not re-applied on the mutation itself, same pattern
+already fixed in `commitments.js` (1.15) and `followup.js` (1.16). Not exploitable as written; tightened to match.
+
+**Flagged, not fixed — database-level design note:** `POST /:goalId/notes` calls
+`rpc('increment_goal_progress', { p_goal_id, p_delta })`. Checked the RPC definition in `schema.sql`: it's a bare
+`UPDATE user_goals SET current_value = ... WHERE id = p_goal_id`, with no workspace/user scoping parameter at
+all — it relies entirely on the caller having already validated ownership. Confirmed this route does validate
+ownership before calling it (via the `goal` fetch at line 77), and confirmed by repo-wide grep this is the RPC's
+*only* call site in the entire codebase, so there's no current exploit path. But the RPC itself has no
+defense-in-depth: any future caller that invokes it without first checking ownership would have a direct IDOR.
+Not fixed here — rewriting a database RPC's signature/body is exactly the kind of schema change the mission asks
+to be cautious about without first checking every consumer and migration implication, and there's no live defect
+to justify it today. Noting it as a design characteristic worth knowing about for whoever adds the next caller.
+
+**Fix status:** the two real logic gaps (notes delete, PUT/DELETE scoping) fixed and verified (syntax check, full
+test suite). RPC design note flagged only.
+
+### 1.18 — LOW — `routes/insights.js` full read (full audit, file 5 of 80)
+**Location:** `backend/src/routes/insights.js`
+
+Full read of all ~25 route handlers (1238 lines, the largest file reviewed so far) against the checklist.
+
+Notably well-written: every self-scoped read/write correctly filters by `workspace_id`+`user_id`, every
+workspace-wide aggregation route correctly requires `manager` or `owner` via `requirePermission`. The file's own
+comments document two real bugs a prior pass already found and fixed in `/intelligence` (an undefined
+`INTELLIGENCE_TTL_S` reference and a call to a `generateRuleBasedInsights` function that didn't exist anywhere —
+together these meant the endpoint 500'd on every request regardless of AI success) — verified these are genuinely
+fixed now (the constant is a real import, the function is a real implementation in `services/intelligenceReport.js`
+not yet separately read in this pass), not just claimed fixed by a stale comment.
+
+**One real, low-severity finding, fixed:** `DELETE /patterns/:id` verified ownership via a preceding `select()`,
+but the dismiss `update()` itself filtered only by `.eq('id', req.params.id)` — the same "verified-then-unscoped
+mutation" pattern now found and fixed in four consecutive files (`commitments.js` 1.15, `followup.js` 1.16,
+`goals.js` 1.17). Not exploitable as written; tightened to match `/weekly/dismiss/:id` just below it in the same
+file, which already does this correctly.
+
+**Fix status:** fixed and verified (syntax check, full test suite).
+
+### 1.19 — HIGH — `routes/metrics.js` full read (full audit, file 6 of 80)
+**Location:** `backend/src/routes/metrics.js`
+
+Full read of all ~30 route handlers (1549 lines, the largest file reviewed in this pass) against the checklist.
+Like `insights.js`, this file's own comments document several real prior fixes (explicit "Fix 2," "Fix 3," "Fix:"
+labels throughout, matching the pattern this review has found repeatedly), and its very first comment block
+already explicitly states the exact bug class found twice below: *"a user can belong to more than one workspace —
+without this filter, a multi-workspace user's stats bleed across workspaces."*
+
+**Real, HIGH-severity finding, fixed — found twice:** `GET /achievements` and `GET /practice/summary`'s badge
+count both queried `practice_badges` (and `/achievements` also `practice_drills`) filtered only by `.eq('user_id',
+userId)` — with **no `workspace_id` filter at all**, unlike every other one of the ~28 other handlers in this
+file. Confirmed both tables have a `NOT NULL workspace_id` column in `schema.sql`. This is not a
+defense-in-depth gap like the "verified-then-unscoped mutation" pattern found in the four prior files (1.15–1.18)
+— there was no scoping here to begin with. For any user who belongs to more than one workspace, both endpoints
+would return badges/drills earned across *every* workspace they're a member of, combined — a real, live,
+cross-workspace data leak, reachable by any authenticated user with multi-workspace membership, exactly the
+scenario this file's own top-of-file comment already identified as the reason to scope by workspace elsewhere.
+
+**Fix:** added `.eq('workspace_id', workspaceId)` to both `practice_badges` queries and the `practice_drills`
+query in `/achievements`.
+
+**Resolved a self-flagged open question:** the workspace leaderboard scoring formula (`/workspace/leaderboard`)
+carried a comment explicitly saying `skill_score`'s 0–10 scale assumption was "worth double-checking against how
+skill_progression is actually populated." Traced it: confirmed genuinely 0–10, by design — conversation-derived
+axes come straight from already-0–10 fields, and practice-derived axes are explicitly divided by 10 before being
+blended in, a deliberate, separately-documented normalization (`FIX HIGH-12`) specifically because the raw
+practice axes are natively 0–100. The formula's `* 2` scaling is correct. Updated the comment to record this as
+resolved rather than leave it open for the next reader to redo.
+
+**Dead code removed:** a local `generateRuleBasedInsights(profile, pipeline, goals, objections, patterns,
+stalledDeals)` function had zero call sites anywhere in this file. Its own comment described a fix to its call
+signature from "the `/intelligence` catch block" — but there's no `/intelligence` route in this file; that route
+now lives in `insights.js` (confirmed while auditing that file, 1.18) and imports a *different*,
+differently-signatured `generateRuleBasedInsights(context, metrics)` from `services/intelligenceReport.js`.
+Genuinely orphaned by whatever refactor moved `/intelligence` out of this file, never cleaned up. Removed —
+verified zero references in the file or its test file before removing.
+
+**Fix status:** fixed and verified (syntax check, full test suite including the file's own existing
+`metrics.test.js`, which covers the three exported pure helpers unaffected by these changes).
+
+### 1.20 — INFO — `routes/onboarding.js` full read (full audit, file 7 of 80)
+**Location:** `backend/src/routes/onboarding.js`
+
+Full read against the checklist. This file is explicitly protected per the project owner's instructions
+(calendar, metrics, insights, onboarding — don't remove or restructure). Treated accordingly: only genuinely
+risk-free cosmetic cleanups made, nothing touching actual onboarding logic or behavior.
+
+Every query correctly scoped by `workspace_id`+`user_id`. The `ConcurrencyGuard` section documents a real, subtle,
+already-fixed distributed-systems bug (a local-pending-array deadlock under multi-instance load) — read carefully,
+confirmed the fix described matches the current implementation, not touched further.
+
+**This is also the file containing both `SEED_MEMORY` call sites** flagged but not resolved in milestone 7
+(AUDIT.md 1.13). Reading both in full context sharpens that flag:
+- `POST /rebuild-voice-profile` enqueues with `isRebuild: true`. Re-checked `seedMemoryFromOnboarding`
+  (`groq-onboarding.js`): the `isRebuild: true` path already clears stale onboarding-seeded memories before
+  reseeding — genuinely redelivery-safe, a real retry just clears-and-reseeds again, no duplication. Not a gap.
+- `POST /answers` (fresh onboarding completion) enqueues with `isRebuild: false` — this is the path with no
+  redelivery protection, confirmed precisely now rather than inferred. Bounded, not unbounded: `MEMORY_CAP = 100`,
+  and a single seeding run inserts "8-10 key facts" per its own prompt, so a worst-case single redelivery adds
+  roughly 8-10 duplicate-ish facts out of a 100-fact cap, not uncontrolled growth. Milestone 7's framing of this
+  as a bounded, product-judgment-call item (skip-if-already-seeded vs. the current re-extract-and-cap behavior)
+  stands, now with this more precise severity bound. Still not fixed — still the person's call, inside protected
+  functionality.
+
+**Two trivial, zero-behavior-change cleanups made:** a comment (`// GET /api/onboarding/status`) was accidentally
+duplicated on two consecutive lines above the route it describes; both `SEED_MEMORY` enqueue calls had a stray
+`// ✅ ADD THIS` edit-marker comment and slightly inconsistent indentation left over from whatever edit added the
+`workspaceId` field. Fixed purely as whitespace/comment hygiene — no logic, query, or behavior touched.
+
+**Flagged, not acted on:** a comment header `// POST /api/onboarding/voice-profile/regenerate` has no route
+beneath it. Unlike the clearly-dead leftover comment found and removed in `auth.js` (1.14) — where the real route
+was confirmed to still exist elsewhere in that file — this reads more like a planned-but-never-built feature
+marker than cruft from a completed refactor. Given the explicit protection on this file, left alone rather than
+guessing which case it is.
+
+**Fix status:** two trivial cosmetic fixes made and verified (syntax check, full test suite). `SEED_MEMORY`'s
+flag sharpened with precise severity bound, not independently resolved — still awaiting the person's decision from
+milestone 7.
+
+### 1.21 — LOW — `routes/pipeline.js` full read (full audit, file 8 of 80)
+**Location:** `backend/src/routes/pipeline.js`
+
+Full read against the checklist. File's own comments document three real prior fixes ("FIX 1" route-ordering,
+"FIX 2" workspace-wide manager assignment scope, "FIX 3" manager-vs-member deal visibility, "FIX 5" removing
+member-level delete access) — same pattern of genuine prior care seen throughout this audit. `GET /:id`'s and
+`PATCH /:id/deal-value`'s cross-table `feedback` queries (filtered only by `opportunity_id`, not re-stating
+`workspace_id`) checked and confirmed safe: the `opportunity_id` used is only ever one already verified against
+`workspace_id` in a preceding query on the same request, same reasoning already established for similar patterns
+in `opportunities.js` (milestone 2).
+
+**Two real, low-severity findings, fixed:** `PUT /:id/stage` and `PUT /:id/assign` both had their final
+`update()` filtered only by `.eq('id', id)` — missing `workspace_id`, unlike `PATCH /:id/deal-value`'s update
+flow and `DELETE /:id` elsewhere in the same file (both correctly re-apply workspace scoping on the mutation).
+Same "verified-then-unscoped mutation" pattern now found in six files across this audit. Not exploitable as
+written (`id` only reaches each mutation via an already workspace-verified `select()` immediately above); tightened
+both to match the file's own established pattern.
+
+**Fix status:** fixed and verified (syntax check, full test suite).
+
+### 1.22 — INFO — `routes/prospects.js` full read (full audit, file 9 of 80) — clean
+**Location:** `backend/src/routes/prospects.js`
+
+Full read against the checklist. **No issue found** — the cleanest file reviewed in this pass so far. Every
+mutation correctly re-applies `workspace_id`+`user_id` on the actual write statement, not just a preceding check
+(the pattern six other files in this audit needed fixing). `DELETE /:id` doesn't even need a prior `select()` —
+it deletes directly with full scoping, correctly fail-safe if the row doesn't match. `PUT /:id` uses a Zod
+`.strict()` schema with an explicit comment explaining why: rejecting any key not explicitly listed is the actual
+guard against a client smuggling `workspace_id`/`user_id` into the body to overwrite them. The merge-candidate
+routes carry a correct comment about Express route-registration order (`/merge-candidates` must be registered
+before `/:id`, or the param route would swallow it) — verified this ordering is indeed correct in the file as
+written.
+
+**Fix status:** no fix needed. Reviewed clean.
+
+### 1.23 — LOW — `routes/suggestions.js` full read (full audit, file 10 of 80)
+**Location:** `backend/src/routes/suggestions.js`
+
+Full read against the checklist. Scoping correct throughout (`workspace_id`+`user_id` on both the cache read and
+upsert). `userData` possibly being `null` from its `select()` is handled correctly (`userData || {}` at both
+downstream call sites).
+
+**One real, low-severity finding, fixed:** this file's AI-response JSON parsing did a manual markdown-fence strip
+(`.replace(/\`\`\`json|\`\`\`/g, '')`) followed by a raw `JSON.parse()` — unlike every other AI-JSON-parsing call
+site in this codebase, which uses `utils/parser.js`'s `parseJSON`/`parseJSONArray`/`parseJSONObject` (already
+test-covered, handles the same fence-stripping plus additional recovery like unwrapping an array nested inside an
+object, and never throws). Not a live crash as written: the raw `JSON.parse()`'s throw on malformed AI output was
+already being caught by this function's own surrounding `try/catch`, correctly falling through to the
+stale-cache-or-defaults path. Switched to `parseJSONArray` for consistency and because it's more robust than the
+manual version, not because the manual version was actually broken.
+
+**Noted, not acted on:** there are two separate JSON-parsing utilities in this codebase —
+`utils/parser.js` (`parseJSON`/`parseJSONArray`/`parseJSONObject`, test-covered) and `utils/parseAIJson.js`
+(`parseAIJson`, a differently-shaped single function). Worth knowing this duplication exists; not consolidating
+them in this pass — that's a larger, cross-cutting refactor (would need to trace every call site of both to do
+safely) better suited to a dedicated pass once `utils/parseAIJson.js` itself has been read as part of this audit
+(not yet reached).
+
+**Fix status:** fixed and verified (syntax check, full test suite).
+
+### 1.24 — INFO — `jobs/conversationAnalysisJob.js` full read (full audit, file 11 of 80) — clean
+**Location:** `backend/src/jobs/conversationAnalysisJob.js`
+
+Full read against the checklist. **No issue found.** Correct idempotency (an explicit "already analyzed this
+feedback" check before doing any work). Correct trust model for a job: `workspaceId`/`userId` are trusted
+parameters from the enqueuing caller rather than independently re-verified here, which is appropriate — confirmed
+its only call site (`practiceWorker.js`) passes `job.data.*` values that were set when `routes/feedback.js`
+enqueued the job, meaning the actual authorization happened at that enqueue point, not here. `feedback.js`'s own
+comments confirm this was a deliberate refactor from an inline fire-and-forget call to a proper queued job.
+
+The AI-response JSON parsing here (raw `JSON.parse()` in its own dedicated `try/catch` with a clean early return)
+is actually a cleaner, more explicit pattern than the one just fixed in `suggestions.js` (1.23) — not flagged, no
+change needed. `updateObjectionTracker`'s RPC-with-fallback pattern is correctly scoped on both paths.
+`classifyObjection`'s regex-based heuristic classifier is substantial but not a correctness/security boundary —
+not independently verified line-by-line, appropriately so for a heuristic.
+
+**Fix status:** no fix needed. Reviewed clean.
+
+### 1.25 — INFO — `jobs/coreJobs.js` full read (full audit, file 12 of 80) — clean
+**Location:** `backend/src/jobs/coreJobs.js`
+
+Full read of all 7 scheduled jobs against the checklist. **No issue found.** Only the `runOpportunitiesRefreshForUser`
+call site had been seen before this pass; the full file (468 lines) had not.
+
+Several genuinely strong patterns, verified against their own header comments rather than taken on faith:
+- `runCalendarPrepJob`'s header claims it was refactored from a second, duplicate prep-generation implementation
+  into a thin scan-and-enqueue using the same job type/implementation as every other prep trigger — confirmed in
+  the actual code, not just the comment.
+- `runCalendarReminderScan` uses an atomic `UPDATE user_events SET reminder_sent=true WHERE id=... AND
+  reminder_sent=false ... RETURNING id` as its idempotency mechanism — a genuine database-level compare-and-swap,
+  avoiding per-event BullMQ job scheduling entirely. `if (!claimed) continue` correctly handles the case where a
+  concurrent scan tick already claimed the event. This is exactly the kind of "use database constraints and atomic
+  operations" pattern the mission asks for, already correctly implemented.
+- `runFeedbackPromptJob` cross-references candidate opportunities against `workspace_members.status = 'active'`
+  before notifying, correctly excluding stale data for users who've since left the workspace.
+- `runCalendarDebriefDigest`'s header explicitly clarifies it is NOT the Slack/email digest feature (which the
+  comment says was deliberately excluded from that implementation pass) — worth noting for anyone looking for
+  that feature and not finding it here.
+
+All database queries across all 7 jobs correctly scoped by `workspace_id`+`user_id` where applicable.
+
+**Fix status:** no fix needed. Reviewed clean.
+
+### 1.26 — HIGH — `jobs/emailDigestJob.js`: unescaped AI/user content interpolated into raw email HTML (full audit, file 13 of 80)
+**Location:** `backend/src/jobs/emailDigestJob.js`
+
+Full read against the checklist. File's own header documents two real, previously-fatal bugs already fixed by a
+prior pass: `CRIT-02` (a missing `import supabaseAdmin` meant this job crashed on every single run before writing
+a row — the email digest feature likely never worked at all until this was fixed) and `HIGH-12` (a double
+`.data` access bug that silently showed no skill-movement data in every digest). Both verified fixed in the
+current code, not just claimed fixed by a stale comment.
+
+**Real, HIGH-severity finding, fixed:** `digest.headline`, `digest.one_thing`, `digest.whats_working`,
+`digest.skill_summary`, `digest.encouragement` (all LLM-generated JSON fields), `user.name`, and
+`patterns[].pattern_label`/`pattern_detail` were all interpolated directly into this email's raw HTML template
+string with **zero escaping anywhere in the pipeline** — confirmed by grep, no `escapeHtml`/`sanitize`/`DOMPurify`
+call exists anywhere near this code path, and no such utility existed anywhere in the codebase to have been
+skipped by mistake. Since the digest content is model-generated text whose prompt context includes
+seller-entered profile data and detected pattern labels, any HTML/script-like content that makes it into that
+chain becomes live markup in a weekly email every enabled user receives — a real content-injection risk, not
+theoretical (email clients do have their own rendering sandboxes, but malicious links, tracking pixels, or
+visually-deceptive markup are still a genuine concern in an HTML email body).
+
+**Fix:** added a small, local `escapeHtml4` helper (standard `&`/`<`/`>`/`"`/`'` entity encoding, `null`/`undefined`
+→ empty string) and applied it to every interpolation point in the HTML template. Manually verified against a
+concrete `<script>` payload and a mixed-special-character string before relying on it.
+
+**Second, lower-severity finding, fixed in the same pass:** the digest JSON response used a raw
+`JSON.parse(content.replace(/\`\`\`json|\`\`\`/g, '').trim())` — the same unsafe pattern already found and fixed
+in `routes/suggestions.js` (1.23). Here, unlike that route, a parse failure wasn't caught by a local `try/catch`
+with a graceful fallback — it would throw, get caught by `runEmailDigestJob`'s `Promise.allSettled` (so not a
+process crash), but silently give up on that one user's digest entirely for the week with only a generic error
+log. Switched to the tested `parseJSONObject` utility (never throws) with an explicit check for a usable result
+and a clear log message when the AI response genuinely can't be parsed.
+
+**Fix status:** both fixed and verified (syntax check, full test suite, manual verification of the escaping
+helper against adversarial input).
+
+### 1.27 — LOW — `jobs/followupSequenceJob.js` full read (full audit, file 14 of 80)
+**Location:** `backend/src/jobs/followupSequenceJob.js`
+
+Full read against the checklist. This file has existing test coverage (`matchWorkspaceProfile`, the pure
+array-disambiguation helper, 3 tests) but the actual job logic had never been read. File's own header documents
+two real, previously-fatal bugs already fixed (`CRIT-03`: missing import crashed every run; `HIGH-03`:
+`follow_up_count` was never actually incremented, so the "max 2 follow-ups" business rule silently never applied)
+— both verified fixed in the current code.
+
+This job is architecturally a deliberate cross-workspace sweep (processes all opportunities across all workspaces
+meeting stage/timing criteria, correctly joining each opportunity's own `workspace_profiles` for context) — unlike
+most other jobs reviewed, which iterate scoped-by-construction per-user/per-workspace pairs. Worth noting since it
+changes what "correctly scoped" means here: there's no workspace-level pre-filter anywhere in the main query by
+design, which is appropriate for a sweep, but means downstream mutations have less structural protection than in
+other files.
+
+**One real, low-severity finding, fixed:** the final `update()` in `generateFollowup` filtered only by
+`.eq('id', opp.id)` — missing `workspace_id`. Given this job's lack of any workspace-level pre-filter (see above),
+this `id` filter was the *only* thing preventing a cross-workspace write if `opp.id`/`opp.workspace_id` were ever
+to disagree — not currently exploitable (`opp.id` comes from this job's own system query, not external input), but
+worth tightening given the weaker surrounding protection than other files had. Added `.eq('workspace_id',
+workspaceId)`.
+
+**One stale, misleading comment, fixed:** the file's `MED-08` header entry claimed `FOLLOW_UP_THRESHOLDS` "does
+not exist in constants.js" and was "defined inline" in this file. Checked both claims directly: neither was true.
+`FOLLOW_UP_THRESHOLDS` is genuinely exported from `constants.js` (confirmed by that file's own `MED-01` entry,
+which fixed exactly this — it used to be a non-exported `const`), and there's no inline definition anywhere in
+this file. The comment predated that fix in the other file and was never updated. Removed the stale claim rather
+than leave a future reader searching for a definition that was never actually here.
+
+**Fix status:** both fixed and verified (syntax check, full test suite including the file's own existing tests).
+
+### 1.28 — MEDIUM — `jobs/growthIntelligenceScheduler.js` full read (full audit, file 15 of 80)
+**Location:** `backend/src/jobs/growthIntelligenceScheduler.js`
+
+Full read of all 7 exported jobs (614 lines) against the checklist — only `detectAndSaveArchetype`'s call site had
+been seen before this pass. This file's own header documents a substantial, genuinely well-explained prior fix
+(`IMPL-ARCHETYPE-01`): `detectAndSaveArchetype` used to also write the detected archetype to the global `users`
+table in addition to `workspace_profiles`, and that second write was the actual source of cross-workspace data
+pollution for multi-workspace users — whichever workspace's detection ran most recently would silently overwrite
+a single shared value. This independently confirms and explains the `archetype_detected_at` finding already
+resolved in milestone 4 (AUDIT.md, the schema/migration consistency check) — two separate investigations arriving
+at the same conclusion from different angles.
+
+**Three real findings, same root pattern, fixed:**
+1. `generateAndStoreTip`'s `daily_check_ins` and `practice_sessions` queries filtered only by `user_id`, missing
+   `workspace_id` — confirmed both tables have a `NOT NULL workspace_id` column. Same bug class as `metrics.js`
+   (1.19), but a different kind of consequence since this is job-internal data fetching, not a direct API
+   response: the impact is AI context contamination, not a direct leak to a client. A multi-workspace user's
+   growth tips in Workspace B could be generated using check-in answers or practice sessions from Workspace A.
+2. `generateWeeklyPlanForUser`'s `daily_check_ins` query had the identical gap, sitting directly next to a
+   `user_performance_profiles` query on the same line that *was* already correctly fixed for precisely this issue
+   (comment: `"FIX: added workspace_id filter"`) — the fix was applied to one query but not its neighbor.
+3. `runGoalNudgeJob`'s `user_goals` update (`last_goal_nudge_at`) filtered only by `.eq('id', goal.id)` — same
+   "sweep job, no workspace pre-filter, so the id-only mutation filter is the only protection" pattern already
+   found and fixed in `followupSequenceJob.js` (1.27). Not exploitable (`goal.id` is system-sourced), tightened
+   for consistency with that reasoning.
+
+All three fixed by adding `.eq('workspace_id', ...)` to the affected queries. Notably, two of the three correctly-
+scoped sibling functions in this same file (`scheduleCheckIn`'s insert, `runCheckInScheduler`'s existence check)
+already had this right, one with an explicit `FIX HIGH-06` comment for the exact same table — this bug kept
+recurring in new call sites even after being fixed once elsewhere in the same file.
+
+**Fix status:** fixed and verified (syntax check, full test suite).
+
+### 1.29 — LOW — `jobs/growthPushNotificationJob.js` full read (full audit, file 16 of 80)
+**Location:** `backend/src/jobs/growthPushNotificationJob.js`
+
+Full read against the checklist. Every `growth_cards`/`opportunities`/`skill_progression` query in this file is
+explicitly comment-labeled "workspace-scoped" and correctly is. Checked whether `push_notification_log`'s
+user-only (no `workspace_id`) anti-spam queries were a gap: confirmed the table genuinely has no `workspace_id`
+column at all in `schema.sql` — this is a deliberate design choice (a global, per-user daily push cap and cooldown
+regardless of which workspace triggered it, which is sensible: a multi-workspace user shouldn't get double the
+notifications just for being in two workspaces), not an oversight.
+
+**One real, low-severity finding, fixed:** `buildEveningNotification2`'s `practice_sessions` existence check (used
+to decide whether to suppress the "you haven't practiced your weakest skill" reminder) filtered only by
+`user_id`, missing `workspace_id` — inconsistent with every other query in this file. Consequence: a
+multi-workspace user who practiced in one workspace within the last 2 days would incorrectly suppress this
+reminder for a different workspace too — a notification-logic leak (wrong UX), not a data exposure. Fixed by
+adding `workspace_id`.
+
+**Fix status:** fixed and verified (syntax check, full test suite).
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

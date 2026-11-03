@@ -141,8 +141,18 @@ const buildEveningNotification2 = async (user) => {
   if (latestProgression?.top_weakness) {
     const weakness = latestProgression.top_weakness;
     const twoDaysAgo = new Date(Date.now() - 2 * 86400000).toISOString();
+    // NOTE (docs/backend-takeover/AUDIT.md, full audit): this used to
+    // filter only by user_id, missing workspace_id, unlike every other
+    // query in this file (all explicitly comment-labeled
+    // "workspace-scoped"). practice_sessions has a NOT NULL workspace_id
+    // column. Narrower consequence than similar findings elsewhere in
+    // this audit: a multi-workspace user who practiced in one workspace
+    // within the last 2 days would incorrectly suppress this weakness
+    // reminder for a DIFFERENT workspace too — a notification-logic
+    // leak, not a data exposure, but inconsistent with this file's own
+    // stated intent.
     const { data: recentPractice } = await supabaseAdmin.from('practice_sessions')
-      .select('id').eq('user_id', userId).eq('completed', true).gte('created_at', twoDaysAgo).limit(1).maybeSingle();
+      .select('id').eq('workspace_id', workspaceId).eq('user_id', userId).eq('completed', true).gte('created_at', twoDaysAgo).limit(1).maybeSingle();
     if (!recentPractice) {
       return { title: `3 minutes to fix your ${DIMENSION_LABELS2[weakness] || weakness} 💪`, body: `This is your #1 skill gap. A quick practice session could move the needle tonight.`, data: { type: 'practice_weakness', weakness } };
     }

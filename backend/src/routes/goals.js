@@ -41,7 +41,12 @@ router.put('/:id', requirePermission('member'), asyncHandler(async (req, res) =>
   const updates = {};
   for (const key of allowed) { if (req.body[key] !== undefined) updates[key] = req.body[key]; }
   if (!Object.keys(updates).length) return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Nothing to update' });
-  const { error } = await supabaseAdmin.from('user_goals').update(updates).eq('id', id);
+  // NOTE (docs/backend-takeover/AUDIT.md, full audit): tightened to match
+  // the select() above — not exploitable as written (id only reaches
+  // here via that ownership-verified select), but kept consistent so a
+  // future refactor reusing this update() doesn't silently lose the
+  // check.
+  const { error } = await supabaseAdmin.from('user_goals').update(updates).eq('id', id).eq('workspace_id', workspaceId).eq('user_id', userId);
   if (error) throw error;
   res.json({ success: true });
 }));
@@ -52,7 +57,8 @@ router.delete('/:id', requirePermission('member'), asyncHandler(async (req, res)
   const userId = req.user.id, workspaceId = req.workspace.id;
   const { data: goal } = await supabaseAdmin.from('user_goals').select('id').eq('id', id).eq('workspace_id', workspaceId).eq('user_id', userId).single();
   if (!goal) return res.status(404).json({ error: 'NOT_FOUND' });
-  await supabaseAdmin.from('user_goals').delete().eq('id', id);
+  // Same tightening as PUT /:id above.
+  await supabaseAdmin.from('user_goals').delete().eq('id', id).eq('workspace_id', workspaceId).eq('user_id', userId);
   res.json({ success: true });
 }));
 
@@ -118,7 +124,17 @@ router.delete('/:goalId/notes/:noteId', requirePermission('member'), asyncHandle
   const userId = req.user.id, workspaceId = req.workspace.id;
   const { data: goal } = await supabaseAdmin.from('user_goals').select('id').eq('id', goalId).eq('workspace_id', workspaceId).eq('user_id', userId).single();
   if (!goal) return res.status(404).json({ error: 'NOT_FOUND' });
-  await supabaseAdmin.from('goal_notes').delete().eq('id', noteId).eq('user_id', userId);
+  // NOTE (docs/backend-takeover/AUDIT.md, full audit): this used to
+  // filter only by .eq('id', noteId).eq('user_id', userId) — it verified
+  // the goal belongs to this user/workspace, but never verified noteId
+  // actually belongs to goalId. The URL shape (:goalId/notes/:noteId)
+  // implies that relationship; the code didn't enforce it, so a request
+  // for a valid goalId the user owns, paired with a noteId belonging to
+  // one of their OTHER goals, would still delete it. Scoped to the
+  // same user only (not a cross-user issue), but still a real logic gap.
+  // Added goal_id to the filter to actually enforce the URL's implied
+  // relationship.
+  await supabaseAdmin.from('goal_notes').delete().eq('id', noteId).eq('goal_id', goalId).eq('user_id', userId);
   res.json({ success: true });
 }));
 

@@ -390,16 +390,16 @@ router.post('/logout', asyncHandler(async (req, res) => {
     }
   }
 
-  // If we have a refresh token, try to revoke it too
-  if (refresh_token) {
-    try {
-      // Attempt to sign out with refresh token
-      await supabaseAdmin.auth.refreshSession({ refresh_token });
-    } catch (err) {
-      // Ignore errors here
-    }
-  }
-
+  // NOTE (docs/backend-takeover/AUDIT.md, full audit): this used to also
+  // call supabaseAdmin.auth.refreshSession({ refresh_token }) here, with
+  // a comment claiming it was "trying to revoke" the refresh token.
+  // refreshSession() does not revoke anything — it mints a brand new
+  // access/refresh token pair, which was then immediately discarded.
+  // Removed as dead weight (an extra, unnecessary Supabase Auth API call
+  // on every logout); the admin.signOut(token) call above already
+  // correctly revokes the refresh token. Confirmed against Supabase's own
+  // docs: refreshSession's only documented purpose is obtaining a new
+  // access token, with no revocation semantics.
   res.json({ 
     success: true, 
     message: 'Logged out successfully' 
@@ -831,11 +831,6 @@ router.post('/forgot-password', LIMITERS.authEmailLimiter, asyncHandler(async (r
     message: 'Password reset email sent. Please check your inbox.',
   });
 }));
-
-// ──────────────────────────────────────────
-// POST /api/auth/reset-password
-// ──────────────────────────────────────────
-
 
 // ── Internal helpers ─────────────────────────────────────────
 

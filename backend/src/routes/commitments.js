@@ -121,10 +121,22 @@ router.post('/:id/generate-message', requirePermission('member'), asyncHandler(a
     sourceJob:   'generate_commitment_message',
   });
 
+  // NOTE (docs/backend-takeover/AUDIT.md, full audit): this used to
+  // filter only by .eq('id', commitment.id), unlike every other query in
+  // this file (which all scope by workspace_id/user_id too, including
+  // the FIX MED-04 precedent in updateCommitmentProspectHealth below for
+  // this exact category of bug). Not actually exploitable as written —
+  // commitment.id only ever gets here via the select() above, which
+  // already verified workspace_id/user_id ownership — but tightened for
+  // defense-in-depth and consistency with the rest of this file, so a
+  // future refactor that reorders or reuses this update() in a different
+  // context doesn't silently lose that protection.
   await supabaseAdmin
     .from('conversation_commitments')
     .update({ follow_up_message: content.trim() })
-    .eq('id', commitment.id);
+    .eq('id', commitment.id)
+    .eq('workspace_id', workspaceId)
+    .eq('user_id', req.user.id);
 
   res.json({ success: true, message: content.trim() });
 }));

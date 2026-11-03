@@ -8,6 +8,7 @@ import { asyncHandler } from '../middleware/errorHandler.js';
 import { callWithFallbackGroq } from '../services/multiProvider.js';
 import { createLogger } from '../utils/logger.js';
 import { createHash } from 'crypto';
+import { parseJSONArray } from '../utils/parser.js';
 import supabaseAdmin from '../config/supabase.js';
 
 const router = Router();
@@ -142,13 +143,20 @@ router.get('/', asyncHandler(async (req, res) => {
     });
     
     // Parse JSON response
-    let suggestions = DEFAULT_SUGGESTIONS;
-    const cleanedContent = content.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(cleanedContent);
-    
-    if (Array.isArray(parsed) && parsed.length >= 3) {
-      suggestions = parsed.slice(0, 5);
-    }
+    // NOTE (docs/backend-takeover/AUDIT.md, full audit): this used to do
+    // a manual markdown-fence strip + raw JSON.parse(), which throws on
+    // malformed AI output. That throw was already being caught by this
+    // function's surrounding try/catch (falling through to stale-cache-
+    // or-defaults below), so this wasn't a live crash — but it was
+    // reinventing, less robustly, what utils/parser.js's parseJSONArray
+    // already does (markdown-fence handling, object-wrapping-an-array
+    // recovery, never throws), and that utility already has test
+    // coverage. Switched to it for consistency with how every other AI
+    // JSON-parsing call site in this codebase handles this.
+    const parsed = parseJSONArray(content, DEFAULT_SUGGESTIONS);
+    const suggestions = Array.isArray(parsed) && parsed.length >= 3
+      ? parsed.slice(0, 5)
+      : DEFAULT_SUGGESTIONS;
     
     // Calculate expiry (7 days from now)
     const expiresAt = new Date();

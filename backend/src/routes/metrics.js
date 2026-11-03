@@ -468,10 +468,15 @@ router.get('/workspace/leaderboard', requirePermission('manager'), asyncHandler(
       goal_completion_pct: Math.round(goalPct),
       // Weights: outreach volume 15, reply quality 30, deals closed 20,
       // current skill level 20, active goal progress 15 — sums to 100.
-      // NOTE: skill_score is assumed to be on a 0–10 scale (consistent with
-      // the other AI-scored numeric(4,2) fields in conversation_analyses) —
-      // worth double-checking against how skill_progression is actually
-      // populated.
+      // RESOLVED (docs/backend-takeover/AUDIT.md, full audit): confirmed
+      // skill_score (composite_score_avg) is genuinely on a 0–10 scale.
+      // Traced to jobs/skillProgressionJob.js: conversation-derived axes
+      // (hook/clarity/value/personalization/cta/tone) come straight from
+      // conversation_analyses' *_score fields (already 0–10), and
+      // practice-derived axes are explicitly divided by 10 before being
+      // blended in (practiceProfile.*_avg / 10) — a deliberate, separately
+      // documented normalization (FIX HIGH-12) precisely because the raw
+      // practice axes are natively 0–100. The *2 scaling here is correct.
       score: Math.round(
         Math.min(15, sent30d * 0.5) +
         Math.min(30, Math.round((perf.positive_rate || 0) * 100)) +
@@ -1109,17 +1114,30 @@ router.get('/practice-skill-profile', asyncHandler(async (req, res) => {
 // Surfaces practice_badges (gamification) and practice_drills (focused
 // before/after drill scores) — both previously unused.
 router.get('/achievements', asyncHandler(async (req, res) => {
-  const userId = req.user.id;
+  const userId = req.user.id, workspaceId = req.workspace.id;
 
+  // NOTE (docs/backend-takeover/AUDIT.md, full audit): this used to
+  // filter only by .eq('user_id', userId), unlike every other handler in
+  // this file (see this file's own top-of-file comment on daily_metrics
+  // for the exact same class of bug fixed previously: "a user can belong
+  // to more than one workspace — without this filter, a multi-workspace
+  // user's stats bleed across workspaces"). Both practice_badges and
+  // practice_drills have a NOT NULL workspace_id column in schema.sql, so
+  // this was a real, live cross-workspace data leak for any user in more
+  // than one workspace, not a defense-in-depth gap like the other
+  // findings in this pass — there was no scoping at all here to begin
+  // with. Added workspace_id to both queries.
   const [{ data: badges }, { data: drills }] = await Promise.all([
     supabaseAdmin.from('practice_badges')
       .select('badge_type, badge_label, badge_description, earned_at')
+      .eq('workspace_id', workspaceId)
       .eq('user_id', userId)
       .order('earned_at', { ascending: false })
       .limit(20),
 
     supabaseAdmin.from('practice_drills')
       .select('drill_type, target_axis, score_before, score_after, completed_at')
+      .eq('workspace_id', workspaceId)
       .eq('user_id', userId)
       .not('completed_at', 'is', null)
       .order('completed_at', { ascending: false })
@@ -1238,9 +1256,11 @@ router.get('/practice/summary', asyncHandler(async (req, res) => {
   }
   const pressureOut = Object.fromEntries(Object.entries(byPressure).map(([k, v]) => [k, Math.round(v.sum / v.count)]));
 
+  // Same workspace-scoping gap as /achievements above, same fix.
   const { count: badgesEarned } = await supabaseAdmin
     .from('practice_badges')
     .select('id', { count: 'exact', head: true })
+    .eq('workspace_id', workspaceId)
     .eq('user_id', userId)
     .gte('earned_at', cutoff);
 
@@ -1474,55 +1494,16 @@ export function buildChartData(dailyData, opportunities) {
     }));
 }
 
-// Fix: previously only accepted (profile, pipeline, goals) but was called
-// with 6 args from the /intelligence catch block — objections, patterns,
-// and stalledDeals were fetched and then silently dropped on the floor.
-// This fallback only fires when the AI call fails, but it should still use
-// the data already in hand.
-function generateRuleBasedInsights(profile, pipeline, goals, objections, patterns, stalledDeals) {
-  const insights = [];
-  const rate = Math.min(1, Math.max(0, profile?.positive_rate || 0));
-
-  if (rate > 0.25) {
-    insights.push({ type: 'pattern', icon: '📈', title: 'Strong reply rate', body: `Your ${Math.round(rate * 100)}% reply rate is above average.`, action: null });
-  } else if (rate > 0) {
-    insights.push({ type: 'pattern', icon: '📊', title: 'Reply rate opportunity', body: `At ${Math.round(rate * 100)}%, there's room to grow.`, action: 'Open Practice Mode and try a new opener' });
-  }
-
-  if (pipeline?.replied_count > 0 && pipeline?.call_demo_count === 0) {
-    insights.push({ type: 'opportunity', icon: '💡', title: 'Move replies forward', body: `${pipeline.replied_count} interested contact${pipeline.replied_count > 1 ? 's' : ''} replied but no meetings yet.`, action: 'Follow up with interested contacts' });
-  }
-
-  const topPattern = patterns?.[0];
-  if (topPattern && topPattern.affected_outcome === 'negative') {
-    insights.push({
-      type: 'warning', icon: '⚠️',
-      title: `Watch for "${topPattern.pattern_label}"`,
-      body: `This pattern is correlated with negative outcomes at ${Math.round((topPattern.confidence_score || 0) * 100)}% confidence.`,
-      action: 'Review recent messages for this pattern',
-    });
-  }
-
-  const topObjection = objections?.[0];
-  if (topObjection && topObjection.occurrence_count > 2 && !topObjection.best_response) {
-    insights.push({
-      type: 'coaching', icon: '💬',
-      title: `No saved response for "${topObjection.objection_phrase}"`,
-      body: `This objection has come up ${topObjection.occurrence_count} times.`,
-      action: 'Practice and save a response',
-    });
-  }
-
-  if (stalledDeals?.length) {
-    insights.push({
-      type: 'warning', icon: '⏳',
-      title: `${stalledDeals.length} stalled deal${stalledDeals.length > 1 ? 's' : ''}`,
-      body: 'These opportunities have had no follow-up activity in over a week.',
-      action: 'Review stalled deals',
-    });
-  }
-
-  return insights.slice(0, 5);
-}
+// NOTE (docs/backend-takeover/AUDIT.md, full audit): a local
+// generateRuleBasedInsights(profile, pipeline, goals, objections,
+// patterns, stalledDeals) function used to live here, with a comment
+// describing a fix to its call signature from "the /intelligence catch
+// block." There is no /intelligence route in this file — that route now
+// lives in routes/insights.js, and (confirmed while auditing that file)
+// it imports its own, differently-signatured
+// generateRuleBasedInsights(context, metrics) from
+// services/intelligenceReport.js. This function had zero call sites
+// anywhere in this file — genuinely orphaned by whatever refactor moved
+// /intelligence out of metrics.js, not cleaned up afterward. Removed.
 
 export default router;

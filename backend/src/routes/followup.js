@@ -78,10 +78,22 @@ followupRouter.get('/', requirePermission('member'), asyncHandler(async (req, re
   if (opps?.length) {
     const ids = opps.map(o => o.id);
     log(`list → marking ${ids.length} opportunities as viewed`);
+    // NOTE (docs/backend-takeover/AUDIT.md, full audit): this used to
+    // filter only by .in('id', ids), unlike /sent and /dismiss below
+    // (both .eq('workspace_id', workspaceId) on their updates). Not
+    // actually exploitable as written — ids only ever comes from the
+    // workspace-scoped select() just above — but tightened for
+    // consistency. Using a plain .eq('workspace_id', ...) here, not
+    // .or(...), since .or() combined with a mutation is a documented
+    // PostgREST bug (pre-14.4) that this file's /sent and /dismiss
+    // routes already correctly work around elsewhere — confirmed via
+    // Supabase's own troubleshooting docs, not just taking the existing
+    // comment on faith.
     const { error: viewError } = await supabaseAdmin
       .from('opportunities')
       .update({ follow_up_viewed_at: new Date().toISOString() })
-      .in('id', ids);
+      .in('id', ids)
+      .eq('workspace_id', workspaceId);
     if (viewError) logError(`list → mark-viewed error ${fmtErr(viewError)}`);
   }
 

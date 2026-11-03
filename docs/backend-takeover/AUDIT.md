@@ -814,6 +814,41 @@ All database queries across all 7 jobs correctly scoped by `workspace_id`+`user_
 
 **Fix status:** no fix needed. Reviewed clean.
 
+### 1.26 — HIGH — `jobs/emailDigestJob.js`: unescaped AI/user content interpolated into raw email HTML (full audit, file 13 of 80)
+**Location:** `backend/src/jobs/emailDigestJob.js`
+
+Full read against the checklist. File's own header documents two real, previously-fatal bugs already fixed by a
+prior pass: `CRIT-02` (a missing `import supabaseAdmin` meant this job crashed on every single run before writing
+a row — the email digest feature likely never worked at all until this was fixed) and `HIGH-12` (a double
+`.data` access bug that silently showed no skill-movement data in every digest). Both verified fixed in the
+current code, not just claimed fixed by a stale comment.
+
+**Real, HIGH-severity finding, fixed:** `digest.headline`, `digest.one_thing`, `digest.whats_working`,
+`digest.skill_summary`, `digest.encouragement` (all LLM-generated JSON fields), `user.name`, and
+`patterns[].pattern_label`/`pattern_detail` were all interpolated directly into this email's raw HTML template
+string with **zero escaping anywhere in the pipeline** — confirmed by grep, no `escapeHtml`/`sanitize`/`DOMPurify`
+call exists anywhere near this code path, and no such utility existed anywhere in the codebase to have been
+skipped by mistake. Since the digest content is model-generated text whose prompt context includes
+seller-entered profile data and detected pattern labels, any HTML/script-like content that makes it into that
+chain becomes live markup in a weekly email every enabled user receives — a real content-injection risk, not
+theoretical (email clients do have their own rendering sandboxes, but malicious links, tracking pixels, or
+visually-deceptive markup are still a genuine concern in an HTML email body).
+
+**Fix:** added a small, local `escapeHtml4` helper (standard `&`/`<`/`>`/`"`/`'` entity encoding, `null`/`undefined`
+→ empty string) and applied it to every interpolation point in the HTML template. Manually verified against a
+concrete `<script>` payload and a mixed-special-character string before relying on it.
+
+**Second, lower-severity finding, fixed in the same pass:** the digest JSON response used a raw
+`JSON.parse(content.replace(/\`\`\`json|\`\`\`/g, '').trim())` — the same unsafe pattern already found and fixed
+in `routes/suggestions.js` (1.23). Here, unlike that route, a parse failure wasn't caught by a local `try/catch`
+with a graceful fallback — it would throw, get caught by `runEmailDigestJob`'s `Promise.allSettled` (so not a
+process crash), but silently give up on that one user's digest entirely for the week with only a generic error
+log. Switched to the tested `parseJSONObject` utility (never throws) with an explicit check for a usable result
+and a clear log message when the AI response genuinely can't be parsed.
+
+**Fix status:** both fixed and verified (syntax check, full test suite, manual verification of the escaping
+helper against adversarial input).
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

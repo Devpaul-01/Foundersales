@@ -19,9 +19,27 @@ import { checkWorkspaceExaUsage } from '../services/tokenTracker.js';
 import { BATCH_DELAY_MS } from '../config/constants.js';
 import supabaseAdmin from '../config/supabase.js';
 import { sleep, logJob } from '../utils/jobHelpers.js';
+import { parseJSONObject } from '../utils/parser.js';
 
 const BATCH_SIZE4   = 10;
 const FRONTEND_URL4 = process.env.FRONTEND_URL || 'https://app.clutch.ai';
+
+// NOTE (docs/backend-takeover/AUDIT.md, full audit): digest.headline,
+// one_thing, whats_working, skill_summary, and encouragement are all
+// LLM-generated text that used to be interpolated directly into this
+// email's raw HTML with no escaping at all. If a model ever echoes back
+// HTML/script-like content from its context (seller-entered profile
+// data, pattern labels, etc. all flow into the prompt that produces
+// this JSON), that becomes live markup in an email every digest
+// recipient receives — a real stored-content injection risk, not
+// theoretical. No HTML-escaping utility existed anywhere in this
+// codebase to reuse, so this is a small, local, standard escaper.
+const escapeHtml4 = (str) => String(str ?? '')
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&#39;');
 
 let gmailTransport = null;
 let resendClient   = null;
@@ -204,34 +222,46 @@ Return ONLY JSON:
     tier: 'quality', workspaceId, userId, sourceJob: 'email_digest_brief',
   });
 
-  const digest = JSON.parse(content.replace(/```json|```/g, '').trim());
+  // NOTE (docs/backend-takeover/AUDIT.md, full audit): this used to be a
+  // raw JSON.parse() with a manual fence strip, same unsafe pattern
+  // already fixed in routes/suggestions.js. Here, unlike that route, a
+  // parse failure wasn't silently falling back to cached data — it would
+  // throw, be caught by runEmailDigestJob's Promise.allSettled (so not a
+  // crash, but failed++ for this one user, giving up on their digest
+  // entirely for the week) rather than degrading gracefully. Switched to
+  // the tested parseJSONObject utility, which never throws.
+  const digest = parseJSONObject(content, null);
+  if (!digest || !digest.headline) {
+    console.warn(`[EmailDigest] Unparseable digest response for ${user.email}, skipping this week`);
+    return;
+  }
 
   const htmlBody = `
 <!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>body{font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px;color:#1a1a1a}h2{margin:0 0 4px}h3{margin:16px 0 4px;color:#374151}.section{background:#f9fafb;border-radius:8px;padding:16px;margin:12px 0}.badge{display:inline-block;background:#6366f1;color:#fff;border-radius:4px;padding:2px 8px;font-size:12px;font-weight:600}a.cta{display:inline-block;background:#6366f1;color:#fff;text-decoration:none;padding:10px 20px;border-radius:6px;font-weight:600;margin-top:16px}</style></head>
 <body>
-<h2>Hi ${user.name || 'there'} 👋</h2>
+<h2>Hi ${escapeHtml4(user.name) || 'there'} 👋</h2>
 <p style="color:#6b7280;margin:0 0 20px">Your weekly sales intelligence brief</p>
 
 <div class="section">
   <span class="badge">THIS WEEK</span>
-  <p style="margin:8px 0 0"><strong>${digest.headline}</strong></p>
+  <p style="margin:8px 0 0"><strong>${escapeHtml4(digest.headline)}</strong></p>
 </div>
 
 <h3>🎯 The One Thing</h3>
-<p>${digest.one_thing}</p>
+<p>${escapeHtml4(digest.one_thing)}</p>
 
 <h3>✅ What's Working</h3>
-<p>${digest.whats_working}</p>
+<p>${escapeHtml4(digest.whats_working)}</p>
 
 <h3>📊 Skill Movement</h3>
-<p>${digest.skill_summary}</p>
+<p>${escapeHtml4(digest.skill_summary)}</p>
 
-${patterns?.length ? `<h3>🔍 Patterns Detected</h3><ul>${patterns.map(p => `<li><strong>${p.pattern_label}</strong> — ${p.recommendation || p.pattern_detail.slice(0, 100)}</li>`).join('')}</ul>` : ''}
+${patterns?.length ? `<h3>🔍 Patterns Detected</h3><ul>${patterns.map(p => `<li><strong>${escapeHtml4(p.pattern_label)}</strong> — ${escapeHtml4(p.recommendation || p.pattern_detail.slice(0, 100))}</li>`).join('')}</ul>` : ''}
 
-${marketIntel ? `<h3>🌐 Market Intel</h3><p>${marketIntel}</p>` : ''}
+${marketIntel ? `<h3>🌐 Market Intel</h3><p>${escapeHtml4(marketIntel)}</p>` : ''}
 
-<p style="color:#6b7280;font-style:italic">${digest.encouragement}</p>
+<p style="color:#6b7280;font-style:italic">${escapeHtml4(digest.encouragement)}</p>
 
 <a href="${FRONTEND_URL4}/insights" class="cta">View Full Intelligence Report →</a>
 

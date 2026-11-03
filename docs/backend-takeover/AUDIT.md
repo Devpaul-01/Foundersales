@@ -881,6 +881,39 @@ than leave a future reader searching for a definition that was never actually he
 
 **Fix status:** both fixed and verified (syntax check, full test suite including the file's own existing tests).
 
+### 1.28 — MEDIUM — `jobs/growthIntelligenceScheduler.js` full read (full audit, file 15 of 80)
+**Location:** `backend/src/jobs/growthIntelligenceScheduler.js`
+
+Full read of all 7 exported jobs (614 lines) against the checklist — only `detectAndSaveArchetype`'s call site had
+been seen before this pass. This file's own header documents a substantial, genuinely well-explained prior fix
+(`IMPL-ARCHETYPE-01`): `detectAndSaveArchetype` used to also write the detected archetype to the global `users`
+table in addition to `workspace_profiles`, and that second write was the actual source of cross-workspace data
+pollution for multi-workspace users — whichever workspace's detection ran most recently would silently overwrite
+a single shared value. This independently confirms and explains the `archetype_detected_at` finding already
+resolved in milestone 4 (AUDIT.md, the schema/migration consistency check) — two separate investigations arriving
+at the same conclusion from different angles.
+
+**Three real findings, same root pattern, fixed:**
+1. `generateAndStoreTip`'s `daily_check_ins` and `practice_sessions` queries filtered only by `user_id`, missing
+   `workspace_id` — confirmed both tables have a `NOT NULL workspace_id` column. Same bug class as `metrics.js`
+   (1.19), but a different kind of consequence since this is job-internal data fetching, not a direct API
+   response: the impact is AI context contamination, not a direct leak to a client. A multi-workspace user's
+   growth tips in Workspace B could be generated using check-in answers or practice sessions from Workspace A.
+2. `generateWeeklyPlanForUser`'s `daily_check_ins` query had the identical gap, sitting directly next to a
+   `user_performance_profiles` query on the same line that *was* already correctly fixed for precisely this issue
+   (comment: `"FIX: added workspace_id filter"`) — the fix was applied to one query but not its neighbor.
+3. `runGoalNudgeJob`'s `user_goals` update (`last_goal_nudge_at`) filtered only by `.eq('id', goal.id)` — same
+   "sweep job, no workspace pre-filter, so the id-only mutation filter is the only protection" pattern already
+   found and fixed in `followupSequenceJob.js` (1.27). Not exploitable (`goal.id` is system-sourced), tightened
+   for consistency with that reasoning.
+
+All three fixed by adding `.eq('workspace_id', ...)` to the affected queries. Notably, two of the three correctly-
+scoped sibling functions in this same file (`scheduleCheckIn`'s insert, `runCheckInScheduler`'s existence check)
+already had this right, one with an explicit `FIX HIGH-06` comment for the exact same table — this bug kept
+recurring in new call sites even after being fixed once elsewhere in the same file.
+
+**Fix status:** fixed and verified (syntax check, full test suite).
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

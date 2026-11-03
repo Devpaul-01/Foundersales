@@ -101,9 +101,20 @@ const generateAndStoreTip = async (user) => {
       .eq('status', 'active')
       .limit(2);
 
+    // NOTE (docs/backend-takeover/AUDIT.md, full audit): daily_check_ins
+    // and practice_sessions below used to filter only by user_id, missing
+    // workspace_id, unlike every other query in this function — both
+    // tables have a NOT NULL workspace_id column in schema.sql. Unlike a
+    // route handler, the impact here isn't a direct data leak to an
+    // attacker; it's AI context contamination — a multi-workspace user's
+    // check-ins/practice sessions from one workspace could bleed into the
+    // content used to generate growth tips for a DIFFERENT workspace,
+    // meaning that workspace's tips could be built on answers the user
+    // gave in a workspace unrelated to it. Added workspace_id to both.
     const { data: recentCheckIns } = await supabaseAdmin
       .from('daily_check_ins')
       .select('answers, mood_score, ai_response')
+      .eq('workspace_id', workspaceId)
       .eq('user_id', userId)
       .not('answers', 'eq', '{}')
       .order('date', { ascending: false })
@@ -111,7 +122,7 @@ const generateAndStoreTip = async (user) => {
 
     const [sentResult, practiceResult, analysisResult] = await Promise.allSettled([
       supabaseAdmin.from('opportunities').select('platform, target_context, marked_sent_at').eq('workspace_id', workspaceId).eq('user_id', userId).not('marked_sent_at', 'is', null).order('marked_sent_at', { ascending: false }).limit(3),
-      supabaseAdmin.from('practice_sessions').select('scenario_type, skill_scores, session_debrief, created_at').eq('user_id', userId).eq('completed', true).order('created_at', { ascending: false }).limit(3),
+      supabaseAdmin.from('practice_sessions').select('scenario_type, skill_scores, session_debrief, created_at').eq('workspace_id', workspaceId).eq('user_id', userId).eq('completed', true).order('created_at', { ascending: false }).limit(3),
       supabaseAdmin.from('conversation_analyses').select('composite_score, top_weakness, top_strength').eq('workspace_id', workspaceId).eq('user_id', userId).order('created_at', { ascending: false }).limit(1),
     ]);
 
@@ -260,10 +271,19 @@ const generateWeeklyPlanForUser = async (user) => {
     // FIX: user_performance_profiles was fetched without workspace_id filter.
     // For multi-workspace users the wrong workspace's performance data
     // (different products, different audiences) could drive the plan.
+    // NOTE (docs/backend-takeover/AUDIT.md, full audit): daily_check_ins
+    // below had the same gap the user_performance_profiles query right
+    // above it was already fixed for (comment: "FIX: added workspace_id
+    // filter") — missing workspace_id, same reasoning, same fix. This was
+    // the third instance of this exact gap found in this one file (also
+    // in generateAndStoreTip above), even though scheduleCheckIn's own
+    // daily_check_ins insert and runCheckInScheduler's existence check
+    // both already correctly scope by workspace_id (that one has an
+    // explicit FIX HIGH-06 comment for precisely this issue).
     const [{ data: goals }, { data: metrics }, { data: recentCheckIns }] = await Promise.all([
       supabaseAdmin.from('user_goals').select('*').eq('workspace_id', workspaceId).eq('user_id', userId).eq('status', 'active').limit(3),
       supabaseAdmin.from('user_performance_profiles').select('*').eq('user_id', userId).eq('workspace_id', workspaceId).maybeSingle(),  // FIX: added workspace_id filter
-      supabaseAdmin.from('daily_check_ins').select('answers, mood_score, date').eq('user_id', userId).not('processed_at', 'is', null).order('date', { ascending: false }).limit(3),
+      supabaseAdmin.from('daily_check_ins').select('answers, mood_score, date').eq('workspace_id', workspaceId).eq('user_id', userId).not('processed_at', 'is', null).order('date', { ascending: false }).limit(3),
     ]);
 
     const plan = await groqService.generateWeeklyPlan(
@@ -358,9 +378,14 @@ export const runGoalNudgeJob = async () => {
         data:  { type: 'goal_nudge', goal_id: goal.id },
       }).catch(() => {});
 
+      // Same tightening rationale as followupSequenceJob.js's equivalent
+      // update: this job sweeps goals cross-workspace by design (no
+      // workspace-level pre-filter above), so this id-only filter was
+      // the only thing standing between a correct write and a wrong one.
+      // goal.workspace_id is already selected in the query above.
       await supabaseAdmin.from('user_goals')
         .update({ last_goal_nudge_at: new Date().toISOString() })
-        .eq('id', goal.id);
+        .eq('id', goal.id).eq('workspace_id', goal.workspace_id);
 
       nudged++;
       await sleep(200);

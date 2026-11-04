@@ -1008,6 +1008,36 @@ the push-notification gate — correctly scoped throughout.
 
 **Fix status:** fixed and verified (syntax check, full test suite).
 
+### 1.33 — MEDIUM — `jobs/practiceWeaknessDetector.js`: resolves workspace from current state, not the triggering session's actual workspace (full audit, file 20 of 80)
+**Location:** `backend/src/jobs/practiceWeaknessDetector.js`, `backend/src/jobs/messageQueueWorker.js`
+
+Full read against the checklist. File's own header documents a real prior fix — practice history used to be
+treated as a cross-workspace personal asset, inconsistent with every other consumer of `practice_sessions`
+(`metrics.js`, `skillProgressionJob.js`, `growthIntelligenceScheduler.js`), now correctly workspace-scoped
+throughout this file.
+
+**Real, cross-file finding, flagged rather than fixed:** `checkAndGenerateWeaknessCard` resolves `workspaceId` by
+looking up the user's **current** `users.active_workspace_id`, not the workspace the triggering practice session
+actually happened in. Traced its only call site (`handleSkillScores` in `messageQueueWorker.js`, confirmed during
+an earlier milestone's idempotency trace): the `session` object it already has access to carries its own correct
+`workspace_id` (`practice_sessions` is workspace-scoped), but the call only passes `{ user_id, session_id,
+skillScores }` — not `workspace_id`. Since this runs as an asynchronous background job, there's a real, if
+narrow, timing window: a user who switches their active workspace between finishing a practice session and this
+job actually running would get their weakness card — and the `communication_patterns` upsert and
+conversation-analyses cross-reference it's built on — generated under the *wrong*, currently-active workspace
+rather than the one the practice session happened in.
+
+Not fixed in this pass: the correct fix touches two files, including changing what `handleSkillScores` passes as
+BullMQ job payload data, not just this function's own internal logic — a cross-cutting change that deserves to be
+seen and decided on together rather than patched unilaterally in just one of the two files mid-audit.
+
+**One raw `JSON.parse()` switched to the tested utility:** already safely caught locally with a sensible fallback
+card, not a live crash — switched to `parseJSONObject` for consistency, restructured slightly so the fallback is
+defined once and reused rather than duplicated inside the catch block.
+
+**Fix status:** JSON parsing fixed and verified (syntax check, full test suite). Workspace-resolution timing gap
+flagged with a clear comment at the exact point it matters, not fixed — see IMPLEMENTATION_PLAN.md.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

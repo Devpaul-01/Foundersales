@@ -958,6 +958,31 @@ inside an object) the manual versions didn't.
 
 **Fix status:** fixed and verified (syntax check, full test suite).
 
+### 1.31 — LOW — `jobs/patternDetectionJob.js` full read (full audit, file 18 of 80)
+**Location:** `backend/src/jobs/patternDetectionJob.js`
+
+Full read against the checklist. This file was previously only read for the `pattern_insights` enqueue-call
+confirmation (milestone 3's finding about the missing handler registration), not the full detection/enrichment
+logic. Confirmed again here that both `scheduledQueue.add('pattern_insights', ...)` call sites (the early-return
+path and the end-of-function path) are genuinely mutually exclusive, not a double-enqueue — consistent with the
+earlier finding.
+
+**One real, low-severity finding, fixed:** `detectPatternsForUser`'s `user_skill_profile` query filtered only by
+`user_id`, missing `workspace_id` — confirmed the table has a `NOT NULL workspace_id` column. Same AI-context-
+contamination risk already found in `growthIntelligenceScheduler.js` (1.28): a multi-workspace user's practice
+skill scores from one workspace could bleed into the pattern-detection prompt used to generate communication
+insights for a different workspace. Fixed by adding the scope.
+
+**One raw `JSON.parse()` switched to the tested utility:** already safely caught locally (a `return 0` on parse
+failure), not a live crash — switched to `parseJSONArray` for consistency with the rest of the codebase.
+
+Everything else correctly scoped: `conversation_analyses`, `workspace_profiles`, `communication_patterns` (upsert
+with a correct `onConflict` composite key), `growth_cards` inserts, and `enrichWithMarketIntelligence`'s dedup
+check all correctly carry both `workspace_id` and `user_id`.
+
+**Fix status:** fixed and verified (syntax check, full test suite including `scheduledWorker.test.js`, which
+specifically validates the `pattern_insights` handler registration this file's enqueue call depends on).
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

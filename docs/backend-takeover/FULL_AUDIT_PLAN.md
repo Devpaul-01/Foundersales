@@ -91,7 +91,7 @@ ownership-scoping check; a route file does):
 | index.js | ✅ (prior pass) | Reviewed in milestone 3 |
 | memoryExtractionJob.js | 🔧 | Five unscoped mutations tightened, two unsafe JSON.parse calls switched to the tested utility. See AUDIT.md 1.30. |
 | messageQueueWorker.js | ✅ (prior pass) | Full idempotency trace + dead code removal, milestone 3 |
-| patternDetectionJob.js | 🔧 (prior pass, partial) | Read for the pattern_insights enqueue bug; not fully read otherwise |
+| patternDetectionJob.js | 🔧 | Now fully read. One unscoped query fixed (AI context contamination). JSON.parse switched. pattern_insights enqueue logic re-confirmed correct. See AUDIT.md 1.31. |
 | patternInsightsJob.js | ⏳ | Only the first ~30 lines were sanity-checked, not fully read |
 | practiceWeaknessDetector.js | ⏳ | Only checkAndGenerateWeaknessCard's cooldown logic seen |
 | practiceWorker.js | ✅ (prior pass) | Reviewed in milestone 3 |

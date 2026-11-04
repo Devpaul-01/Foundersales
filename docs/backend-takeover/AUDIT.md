@@ -983,6 +983,31 @@ check all correctly carry both `workspace_id` and `user_id`.
 **Fix status:** fixed and verified (syntax check, full test suite including `scheduledWorker.test.js`, which
 specifically validates the `pattern_insights` handler registration this file's enqueue call depends on).
 
+### 1.32 — LOW — `jobs/patternInsightsJob.js` full read (full audit, file 19 of 80)
+**Location:** `backend/src/jobs/patternInsightsJob.js`
+
+Full read against the checklist. This is `runPatternInsightsJob` — the function milestone 3 found had no
+registered handler in `scheduledWorker.js` and had therefore likely never run in production, despite being fully
+implemented. Only its first ~30 lines were sanity-checked at the time; the full logic had not been read. Good
+validation that fixing the handler registration was worthwhile: the function is genuinely well-built and
+correctly scoped, not accidentally wiring up something broken.
+
+Verified, not just trusted, the file header's claim that `markOverdueCommitments` deliberately needs no workspace
+filter: confirmed this is a correct, deliberate design — each row already carries its own `workspace_id`, and the
+update only recalculates a derived status field from `due_date`, the same "recompute from source data" pattern
+already independently verified correct for `CALENDAR_UPDATE_PROSPECT_HEALTH` in `backgroundWorker.js` (milestone
+7). Added a comment recording this verification rather than leaving the claim as just asserted.
+
+**One real, low-severity finding, fixed:** `refreshStaleProspectSummaries`'s final `prospects` update filtered
+only by `.eq('id', prospect.id)` — missing `workspace_id`/`user_id`, even though `prospect` already carries both
+(selected and used elsewhere in the same loop). Same "verified-then-unscoped mutation" pattern found across this
+audit; not exploitable as written, tightened for consistency.
+
+Everything else — `processUserInsights`'s five source queries, the `prospect_insights` dismiss-then-insert flow,
+the push-notification gate — correctly scoped throughout.
+
+**Fix status:** fixed and verified (syntax check, full test suite).
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

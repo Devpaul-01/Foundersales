@@ -15,6 +15,7 @@
 import supabaseAdmin from '../config/supabase.js';
 import { callWithFallbackGroq } from '../services/multiProvider.js';
 import { sleep, logJob } from '../utils/jobHelpers.js';
+import { parseJSONArray } from '../utils/parser.js';
 
 const MEMORY_CAP = 30;
 const BATCH_SIZE = 10;
@@ -148,26 +149,35 @@ Return format:
     workspaceId, userId, sourceJob: 'memory_extraction',
   });
 
-  let newFacts;
-  try {
-    const clean = extractContent.replace(/```json|```/g, '').trim();
-    newFacts = JSON.parse(clean);
-    if (!Array.isArray(newFacts)) throw new Error('Not an array');
-
-    newFacts = newFacts.map(f => {
-      if (typeof f === 'string') return { fact: f, category: 'business_context' };
-      if (f.fact) return { fact: f.fact, category: f.category || 'business_context' };
-      return null;
-    }).filter(Boolean);
-  } catch {
-    newFacts = [];
-  }
+  // NOTE (docs/backend-takeover/AUDIT.md, full audit): this used to be a
+  // raw JSON.parse() on a manually fence-stripped string, same pattern
+  // already fixed in routes/suggestions.js and jobs/emailDigestJob.js.
+  // Here it was already wrapped in a local try/catch with a safe []
+  // fallback, so not a live crash — switched to the tested
+  // parseJSONArray utility anyway for consistency and because it handles
+  // a couple of recovery cases (e.g. an array nested in an object) this
+  // manual version didn't.
+  let newFacts = parseJSONArray(extractContent, []);
+  newFacts = newFacts.map(f => {
+    if (typeof f === 'string') return { fact: f, category: 'business_context' };
+    if (f?.fact) return { fact: f.fact, category: f.category || 'business_context' };
+    return null;
+  }).filter(Boolean);
 
   if (!newFacts.length) {
+    // NOTE (docs/backend-takeover/AUDIT.md, full audit): this job's main
+    // query (runMemoryExtractionJob, top of file) has no workspace-level
+    // pre-filter — it's a deliberate cross-workspace sweep over all
+    // eligible chats system-wide, same pattern as followupSequenceJob.js
+    // and growthIntelligenceScheduler.js's sweep jobs. That means this
+    // chat.id-only update was the only protection against a wrong write
+    // if chat.id/workspace_id ever disagreed; not currently exploitable
+    // (chat comes from this job's own query), tightened for consistency
+    // with how those other sweep jobs' mutations were tightened.
     await supabaseAdmin
       .from('chats')
       .update({ memory_last_extracted_at: new Date().toISOString() })
-      .eq('id', chat.id);
+      .eq('id', chat.id).eq('workspace_id', workspaceId);
     return;
   }
 
@@ -206,16 +216,22 @@ Return ONLY a JSON array:
       workspaceId, userId, sourceJob: 'memory_dedup',
     });
 
-    try {
-      const clean = dedupContent.replace(/```json|```/g, '').trim();
-      decisions   = JSON.parse(clean);
-    } catch {
+    // Same switch as the extraction parse above.
+    decisions = parseJSONArray(dedupContent, null);
+    if (!decisions) {
       decisions = newFacts.map(f => ({ action: 'insert', fact: f.fact, category: f.category, replace_id: null }));
     }
   }
 
   for (const decision of (decisions || [])) {
     try {
+      // NOTE (docs/backend-takeover/AUDIT.md, full audit): both updates
+      // below used to filter only by .eq('id', target.id) — missing
+      // workspace_id/user_id, even though `target` only ever comes from
+      // existingFacts, which was correctly scoped by both when fetched
+      // above. Same "verified-then-unscoped mutation" pattern found and
+      // tightened across many files in this audit. Not exploitable as
+      // written; tightened for consistency.
       if (decision.action === 'skip' && decision.replace_id) {
         const target = existingFacts[decision.replace_id - 1];
         if (target) {
@@ -225,7 +241,7 @@ Return ONLY a JSON array:
               reinforcement_count: (target.reinforcement_count || 1) + 1,
               last_reinforced_at:  new Date().toISOString(),
             })
-            .eq('id', target.id);
+            .eq('id', target.id).eq('workspace_id', workspaceId).eq('user_id', userId);
         }
       } else if (decision.action === 'replace' && decision.replace_id) {
         const target = existingFacts[decision.replace_id - 1];
@@ -238,7 +254,7 @@ Return ONLY a JSON array:
               reinforcement_count: (target.reinforcement_count || 1) + 1,
               last_reinforced_at:  new Date().toISOString(),
             })
-            .eq('id', target.id);
+            .eq('id', target.id).eq('workspace_id', workspaceId).eq('user_id', userId);
         }
       } else if (decision.action === 'insert') {
         const activeCount = existingFacts.filter(f => f.is_active !== false).length;
@@ -259,10 +275,11 @@ Return ONLY a JSON array:
     }
   }
 
+  // Same sweep-job tightening as the early-return path above.
   await supabaseAdmin
     .from('chats')
     .update({ memory_last_extracted_at: new Date().toISOString() })
-    .eq('id', chat.id);
+    .eq('id', chat.id).eq('workspace_id', workspaceId);
 };
 
 // ──────────────────────────────────────────
@@ -307,9 +324,11 @@ const evictLowestPriorityFact = async (userId, workspaceId, facts) => {
   const toEvict = scored[0];
 
   if (toEvict) {
+    // Same tightening as the skip/replace updates above — toEvict only
+    // ever comes from `facts`, which the caller already scoped.
     await supabaseAdmin
       .from('user_memory')
       .update({ is_active: false })
-      .eq('id', toEvict.id);
+      .eq('id', toEvict.id).eq('workspace_id', workspaceId).eq('user_id', userId);
   }
 };

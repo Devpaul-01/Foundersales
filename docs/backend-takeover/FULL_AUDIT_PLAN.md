@@ -89,7 +89,7 @@ ownership-scoping check; a route file does):
 | growthIntelligenceScheduler.js | 🔧 | Three instances of the same unscoped-query pattern fixed (AI context contamination risk, not a direct leak). See AUDIT.md 1.28. |
 | growthPushNotificationJob.js | 🔧 | One unscoped query fixed (notification-logic leak, not data exposure). push_notification_log's user-only design confirmed deliberate. See AUDIT.md 1.29. |
 | index.js | ✅ (prior pass) | Reviewed in milestone 3 |
-| memoryExtractionJob.js | ⏳ | |
+| memoryExtractionJob.js | 🔧 | Five unscoped mutations tightened, two unsafe JSON.parse calls switched to the tested utility. See AUDIT.md 1.30. |
 | messageQueueWorker.js | ✅ (prior pass) | Full idempotency trace + dead code removal, milestone 3 |
 | patternDetectionJob.js | 🔧 (prior pass, partial) | Read for the pattern_insights enqueue bug; not fully read otherwise |
 | patternInsightsJob.js | ⏳ | Only the first ~30 lines were sanity-checked, not fully read |

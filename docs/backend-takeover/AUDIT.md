@@ -933,6 +933,31 @@ adding `workspace_id`.
 
 **Fix status:** fixed and verified (syntax check, full test suite).
 
+### 1.30 — LOW — `jobs/memoryExtractionJob.js` full read (full audit, file 17 of 80)
+**Location:** `backend/src/jobs/memoryExtractionJob.js`
+
+Full read against the checklist. File's own header documents two real, previously-fixed issues
+(`HIGH-05`: `user_memory` wasn't workspace-scoped on insert/reads, `MED-10`: token usage was being recorded at
+user level instead of workspace level, undercounting workspace cost reporting) — both verified fixed in the
+current code.
+
+This job's main query is a deliberate cross-workspace sweep (all eligible chats system-wide, no workspace
+pre-filter), same architecture as `followupSequenceJob.js` and `growthIntelligenceScheduler.js`'s sweep jobs.
+
+**Five instances of the now-familiar "verified-then-unscoped mutation" pattern, fixed:** two `chats` updates
+(`memory_last_extracted_at`) filtered only by `chat.id`, and three `user_memory` updates (reinforcement, replace,
+eviction) filtered only by the target fact's `id` — all despite their source objects (`chat`, `target`, `toEvict`)
+coming from already correctly-scoped queries earlier in the same function. Not exploitable as written in any
+instance; tightened all five to match this codebase's own established pattern, consistent with roughly ten other
+files in this audit.
+
+**Two raw `JSON.parse()` calls switched to the tested utility:** both AI-response parses already had a local
+`try/catch` with a safe fallback, so neither was a live crash — switched to `parseJSONArray` anyway for
+consistency with the rest of the codebase and because it handles a couple of recovery cases (e.g. an array nested
+inside an object) the manual versions didn't.
+
+**Fix status:** fixed and verified (syntax check, full test suite).
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

@@ -1061,6 +1061,18 @@ card generation in the other file.
 
 **Fix status:** no fix needed. Reviewed clean.
 
+### 1.35 — INFO — `services/calendarAiGate.js` full read (full audit, file 22 of 80) — clean
+**Location:** `backend/src/services/calendarAiGate.js`
+
+Full read against the checklist. **No issue found.** A dedicated, well-designed cost-control rule engine
+("is this AI call worth making") with centralized audit logging to `calendar_ai_events` for every gate decision.
+`shouldRunResearch`'s cross-event prospect-reuse lookup correctly scopes by both `prospect_id` and `workspace_id`.
+`shouldExtractCommitmentsSignals`'s own comment documents consolidating a length-threshold check that previously
+existed ad hoc in two separate places — consistent with this audit's broader observation that this codebase has
+had real, deliberate consolidation passes, not just accumulation of duplicated logic.
+
+**Fix status:** no fix needed. Reviewed clean.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

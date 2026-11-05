@@ -103,7 +103,7 @@ ownership-scoping check; a route file does):
 ### Services (26)
 | File | Status | Note |
 |---|---|---|
-| calendarAiGate.js | ⏳ | Only shouldGenerateFollowUp/recordGateDecision call sites seen |
+| calendarAiGate.js | ✅ | Clean — well-designed cost-control gate, correctly scoped, consolidates previously-duplicated logic. See AUDIT.md 1.35. |
 | calendarCommitmentsSignals.js | ⏳ | Only extractCommitmentsAndSignals's call sites seen |
 | calendarPrep.js | ⏳ | Only generateAndPersistPrep's call site seen |
 | email.js | ⏳ | Only env-var usage checked |

@@ -1073,6 +1073,28 @@ had real, deliberate consolidation passes, not just accumulation of duplicated l
 
 **Fix status:** no fix needed. Reviewed clean.
 
+### 1.36 — INFO — `services/calendarCommitmentsSignals.js` full read (full audit, file 23 of 80)
+**Location:** `backend/src/services/calendarCommitmentsSignals.js`
+
+Full read against the checklist. Genuinely clean implementation: already uses `parseJSONObject` (the tested
+utility, no raw `JSON.parse` to fix here), wrapped in its own `try/catch` with a safe empty-arrays fallback,
+correctly gated via `calendarAiGate.js`. Header comment's claim of consolidating two previously-separate Groq
+calls into one (the single highest-value AI cost optimization identified for the Calendar feature, per the
+comment) is a real, legitimate, well-reasoned optimization.
+
+**One finding, flagged for follow-up rather than fixed here:** the header comment claims
+`extractCommitmentsFromText`/`generateSignalAnalysis` (in `groqCalendarIntelligence.js`, not yet read as part of
+this audit) are "left in place... still used by `synthesizeMeetingNotes` and any other call sites outside
+Calendar's debrief flow." Repo-wide grep found **zero call sites of either function anywhere** — not in
+`synthesizeMeetingNotes`, not anywhere else. If this holds once `groqCalendarIntelligence.js` is read directly,
+both functions are genuinely dead code, and this comment's claim is stale. Not removing anything in that other
+file based on a cross-reference alone — flagged here, to be confirmed and acted on when that file is reached
+directly in this audit.
+
+**Fix status:** no functional fix needed in this file. Updated this file's own comment to flag the
+cross-reference finding rather than let it stand unverified. The actual dead-code question will be resolved when
+`groqCalendarIntelligence.js` is read.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

@@ -14,6 +14,16 @@
 // synthesizeMeetingNotes and any other call sites outside Calendar's
 // debrief flow) — this module is additive, not a replacement of those
 // exports.
+//
+// FLAGGED (docs/backend-takeover/AUDIT.md, full audit): the claim above
+// no longer appears accurate. A repo-wide grep found zero call sites of
+// extractCommitmentsFromText or generateSignalAnalysis anywhere — not in
+// synthesizeMeetingNotes, not anywhere else. If that holds once
+// groqCalendarIntelligence.js itself is read in full as part of this
+// audit, both functions are genuinely dead code, not "left in place for
+// other callers" as this comment claims. Not removed here — that's a
+// change to make in groqCalendarIntelligence.js itself, once read
+// directly, not inferred from this file's comment alone.
 // ============================================================
 
 import { callWithFallbackGroq } from './multiProvider.js';

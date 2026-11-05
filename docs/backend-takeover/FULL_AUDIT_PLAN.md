@@ -104,7 +104,7 @@ ownership-scoping check; a route file does):
 | File | Status | Note |
 |---|---|---|
 | calendarAiGate.js | ✅ | Clean — well-designed cost-control gate, correctly scoped, consolidates previously-duplicated logic. See AUDIT.md 1.35. |
-| calendarCommitmentsSignals.js | ⏳ | Only extractCommitmentsAndSignals's call sites seen |
+| calendarCommitmentsSignals.js | 🚩 | Clean implementation. Flagged a stale comment claiming two functions in groqCalendarIntelligence.js are still used elsewhere — grep found zero call sites; to confirm when that file is read. See AUDIT.md 1.36. |
 | calendarPrep.js | ⏳ | Only generateAndPersistPrep's call site seen |
 | email.js | ⏳ | Only env-var usage checked |
 | exa.js | ⏳ | |

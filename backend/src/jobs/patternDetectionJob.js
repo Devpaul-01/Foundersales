@@ -11,6 +11,7 @@ import supabaseAdmin from '../config/supabase.js';
 import { scheduledQueue } from './queues.js';
 import { callWithFallbackGroq } from '../services/multiProvider.js';
 import { sleep, logJob } from '../utils/jobHelpers.js';
+import { parseJSONArray } from '../utils/parser.js';
 
 const MIN_ANALYSES_REQUIRED = 5;
 
@@ -106,9 +107,16 @@ const detectPatternsForUser = async (userId, workspaceId) => {
   const user = { ...wp, tier: userTierRow?.tier || 'free' };
   if (!user.product_description) return 0;
 
+  // NOTE (docs/backend-takeover/AUDIT.md, full audit): this used to
+  // filter only by user_id, missing workspace_id — same AI-context-
+  // contamination risk already found in growthIntelligenceScheduler.js:
+  // a multi-workspace user's practice skill scores from one workspace
+  // could bleed into the pattern-detection prompt for a different
+  // workspace. user_skill_profile has a NOT NULL workspace_id column.
   const { data: skillRows } = await supabaseAdmin
     .from('user_skill_profile')
     .select('clarity_avg, value_avg, discovery_avg, objection_avg, brevity_avg, cta_avg, weakest_axis')
+    .eq('workspace_id', workspaceId)
     .eq('user_id', userId)
     .order('period_start', { ascending: false })
     .limit(2);
@@ -174,15 +182,11 @@ Return ONLY a JSON array:
     workspaceId, userId, sourceJob: 'pattern_detection',
   });
 
-  let patterns;
-  try {
-    const clean = content.replace(/```json|```/g, '').trim();
-    patterns = JSON.parse(clean);
-    if (!Array.isArray(patterns)) throw new Error('Not an array');
-  } catch {
-    return 0;
-  }
-
+  // NOTE (docs/backend-takeover/AUDIT.md, full audit): switched from a
+  // raw JSON.parse() (already safely caught here, not a live crash) to
+  // the tested parseJSONArray utility, consistent with every other file
+  // in this audit that had the same manual pattern.
+  const patterns = parseJSONArray(content, []);
   if (!patterns.length) return 0;
 
   // Perplexity enrichment for pro users

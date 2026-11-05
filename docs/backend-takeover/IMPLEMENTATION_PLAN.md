@@ -136,6 +136,10 @@ protected onboarding flow, where the correct fix shape is a product judgment cal
 - **Recommend validating the `schema.sql` changes (AUDIT.md 1.9, 1.10) against a real Postgres instance** before
   relying on them for an actual fresh deployment — this sandbox has no Postgres available to execute and confirm
   them.
+- **`practiceWeaknessDetector.js` resolves workspace from current state, not the triggering session's actual
+  workspace** (AUDIT.md 1.33) — a real, narrow timing-window correctness gap, not fixed because the proper fix
+  spans two files (changing `messageQueueWorker.js`'s BullMQ job payload shape, not just this function's internal
+  logic). Worth a dedicated, deliberate pass rather than a mid-audit unilateral change to job payload data.
 
 
 - **Duplicate workspace-switch endpoints** (AUDIT.md 1.4) — see DECISIONS.md. Not removing either without

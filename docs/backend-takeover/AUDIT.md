@@ -933,6 +933,111 @@ adding `workspace_id`.
 
 **Fix status:** fixed and verified (syntax check, full test suite).
 
+### 1.30 — LOW — `jobs/memoryExtractionJob.js` full read (full audit, file 17 of 80)
+**Location:** `backend/src/jobs/memoryExtractionJob.js`
+
+Full read against the checklist. File's own header documents two real, previously-fixed issues
+(`HIGH-05`: `user_memory` wasn't workspace-scoped on insert/reads, `MED-10`: token usage was being recorded at
+user level instead of workspace level, undercounting workspace cost reporting) — both verified fixed in the
+current code.
+
+This job's main query is a deliberate cross-workspace sweep (all eligible chats system-wide, no workspace
+pre-filter), same architecture as `followupSequenceJob.js` and `growthIntelligenceScheduler.js`'s sweep jobs.
+
+**Five instances of the now-familiar "verified-then-unscoped mutation" pattern, fixed:** two `chats` updates
+(`memory_last_extracted_at`) filtered only by `chat.id`, and three `user_memory` updates (reinforcement, replace,
+eviction) filtered only by the target fact's `id` — all despite their source objects (`chat`, `target`, `toEvict`)
+coming from already correctly-scoped queries earlier in the same function. Not exploitable as written in any
+instance; tightened all five to match this codebase's own established pattern, consistent with roughly ten other
+files in this audit.
+
+**Two raw `JSON.parse()` calls switched to the tested utility:** both AI-response parses already had a local
+`try/catch` with a safe fallback, so neither was a live crash — switched to `parseJSONArray` anyway for
+consistency with the rest of the codebase and because it handles a couple of recovery cases (e.g. an array nested
+inside an object) the manual versions didn't.
+
+**Fix status:** fixed and verified (syntax check, full test suite).
+
+### 1.31 — LOW — `jobs/patternDetectionJob.js` full read (full audit, file 18 of 80)
+**Location:** `backend/src/jobs/patternDetectionJob.js`
+
+Full read against the checklist. This file was previously only read for the `pattern_insights` enqueue-call
+confirmation (milestone 3's finding about the missing handler registration), not the full detection/enrichment
+logic. Confirmed again here that both `scheduledQueue.add('pattern_insights', ...)` call sites (the early-return
+path and the end-of-function path) are genuinely mutually exclusive, not a double-enqueue — consistent with the
+earlier finding.
+
+**One real, low-severity finding, fixed:** `detectPatternsForUser`'s `user_skill_profile` query filtered only by
+`user_id`, missing `workspace_id` — confirmed the table has a `NOT NULL workspace_id` column. Same AI-context-
+contamination risk already found in `growthIntelligenceScheduler.js` (1.28): a multi-workspace user's practice
+skill scores from one workspace could bleed into the pattern-detection prompt used to generate communication
+insights for a different workspace. Fixed by adding the scope.
+
+**One raw `JSON.parse()` switched to the tested utility:** already safely caught locally (a `return 0` on parse
+failure), not a live crash — switched to `parseJSONArray` for consistency with the rest of the codebase.
+
+Everything else correctly scoped: `conversation_analyses`, `workspace_profiles`, `communication_patterns` (upsert
+with a correct `onConflict` composite key), `growth_cards` inserts, and `enrichWithMarketIntelligence`'s dedup
+check all correctly carry both `workspace_id` and `user_id`.
+
+**Fix status:** fixed and verified (syntax check, full test suite including `scheduledWorker.test.js`, which
+specifically validates the `pattern_insights` handler registration this file's enqueue call depends on).
+
+### 1.32 — LOW — `jobs/patternInsightsJob.js` full read (full audit, file 19 of 80)
+**Location:** `backend/src/jobs/patternInsightsJob.js`
+
+Full read against the checklist. This is `runPatternInsightsJob` — the function milestone 3 found had no
+registered handler in `scheduledWorker.js` and had therefore likely never run in production, despite being fully
+implemented. Only its first ~30 lines were sanity-checked at the time; the full logic had not been read. Good
+validation that fixing the handler registration was worthwhile: the function is genuinely well-built and
+correctly scoped, not accidentally wiring up something broken.
+
+Verified, not just trusted, the file header's claim that `markOverdueCommitments` deliberately needs no workspace
+filter: confirmed this is a correct, deliberate design — each row already carries its own `workspace_id`, and the
+update only recalculates a derived status field from `due_date`, the same "recompute from source data" pattern
+already independently verified correct for `CALENDAR_UPDATE_PROSPECT_HEALTH` in `backgroundWorker.js` (milestone
+7). Added a comment recording this verification rather than leaving the claim as just asserted.
+
+**One real, low-severity finding, fixed:** `refreshStaleProspectSummaries`'s final `prospects` update filtered
+only by `.eq('id', prospect.id)` — missing `workspace_id`/`user_id`, even though `prospect` already carries both
+(selected and used elsewhere in the same loop). Same "verified-then-unscoped mutation" pattern found across this
+audit; not exploitable as written, tightened for consistency.
+
+Everything else — `processUserInsights`'s five source queries, the `prospect_insights` dismiss-then-insert flow,
+the push-notification gate — correctly scoped throughout.
+
+**Fix status:** fixed and verified (syntax check, full test suite).
+
+### 1.33 — MEDIUM — `jobs/practiceWeaknessDetector.js`: resolves workspace from current state, not the triggering session's actual workspace (full audit, file 20 of 80)
+**Location:** `backend/src/jobs/practiceWeaknessDetector.js`, `backend/src/jobs/messageQueueWorker.js`
+
+Full read against the checklist. File's own header documents a real prior fix — practice history used to be
+treated as a cross-workspace personal asset, inconsistent with every other consumer of `practice_sessions`
+(`metrics.js`, `skillProgressionJob.js`, `growthIntelligenceScheduler.js`), now correctly workspace-scoped
+throughout this file.
+
+**Real, cross-file finding, flagged rather than fixed:** `checkAndGenerateWeaknessCard` resolves `workspaceId` by
+looking up the user's **current** `users.active_workspace_id`, not the workspace the triggering practice session
+actually happened in. Traced its only call site (`handleSkillScores` in `messageQueueWorker.js`, confirmed during
+an earlier milestone's idempotency trace): the `session` object it already has access to carries its own correct
+`workspace_id` (`practice_sessions` is workspace-scoped), but the call only passes `{ user_id, session_id,
+skillScores }` — not `workspace_id`. Since this runs as an asynchronous background job, there's a real, if
+narrow, timing window: a user who switches their active workspace between finishing a practice session and this
+job actually running would get their weakness card — and the `communication_patterns` upsert and
+conversation-analyses cross-reference it's built on — generated under the *wrong*, currently-active workspace
+rather than the one the practice session happened in.
+
+Not fixed in this pass: the correct fix touches two files, including changing what `handleSkillScores` passes as
+BullMQ job payload data, not just this function's own internal logic — a cross-cutting change that deserves to be
+seen and decided on together rather than patched unilaterally in just one of the two files mid-audit.
+
+**One raw `JSON.parse()` switched to the tested utility:** already safely caught locally with a sensible fallback
+card, not a live crash — switched to `parseJSONObject` for consistency, restructured slightly so the fallback is
+defined once and reused rather than duplicated inside the catch block.
+
+**Fix status:** JSON parsing fixed and verified (syntax check, full test suite). Workspace-resolution timing gap
+flagged with a clear comment at the exact point it matters, not fixed — see IMPLEMENTATION_PLAN.md.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

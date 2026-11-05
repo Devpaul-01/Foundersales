@@ -20,6 +20,7 @@
 import supabaseAdmin from '../config/supabase.js';
 import { notifyUser } from '../services/notifications.js';
 import { createLogger } from '../utils/logger.js';
+import { parseJSONObject } from '../utils/parser.js';
 
 const AXIS_LABEL = {
   clarity:            'Clarity',
@@ -38,7 +39,23 @@ const { log } = createLogger('WeaknessDetector');
 export const checkAndGenerateWeaknessCard = async ({ user_id, session_id, skillScores }) => {
   if (!skillScores?.axes) return;
 
-  // Resolve workspace for this user
+  // FLAGGED (docs/backend-takeover/AUDIT.md, full audit, not fixed): this
+  // resolves workspaceId via the user's CURRENT active_workspace_id, not
+  // the workspace the practice session actually happened in.
+  // handleSkillScores (messageQueueWorker.js) already has the session's
+  // own, correct workspace_id (practice_sessions is workspace-scoped),
+  // but its call to this function only passes { user_id, session_id,
+  // skillScores } — not workspace_id. Since this runs asynchronously as
+  // a background job after the practice session, there's a real (if
+  // narrow) timing window where a user who switches their active
+  // workspace between finishing a session and this job running would
+  // get their weakness card, and the communication_patterns/
+  // conversation-analyses cross-reference it's based on, generated under
+  // the wrong workspace. Not fixed here — the correct fix changes the
+  // job payload shape in messageQueueWorker.js too (BullMQ job data, not
+  // just this function's signature), so it deserves to be seen and
+  // decided on as a cross-file change rather than patched unilaterally
+  // in just one of the two files.
   const { data: userRow } = await supabaseAdmin
     .from('users').select('active_workspace_id').eq('id', user_id).single();
   const workspaceId = userRow?.active_workspace_id;
@@ -134,7 +151,19 @@ Write a Growth Card that:
 Return ONLY JSON:
 {"title":"...","body":"2-3 sentences","action_label":"Practice This Now","action_scenario":"${persistentWeakness.axis === 'objection_handling' ? 'price_objection' : persistentWeakness.axis === 'discovery' ? 'not_right_time' : 'skeptical'}","tip":"one-sentence drill","evidence":"one specific data point"}`;
 
-  let cardContent = null;
+  // NOTE (docs/backend-takeover/AUDIT.md, full audit): switched the
+  // raw JSON.parse() (already safely caught here, not a live crash) to
+  // the tested parseJSONObject utility, consistent with the rest of this
+  // codebase. The fallback card content is unchanged.
+  const fallbackCard = {
+    title:           `Your ${axisLabel} score is your biggest gap (${persistentWeakness.avg}/100)`,
+    body:            `Across your last ${persistentWeakness.sessions} practice sessions, ${axisLabel} is consistently below ${LOW_SCORE_THRESHOLD}/100. This directly affects how prospects perceive your outreach.`,
+    action_label:    'Practice This Now',
+    action_scenario: null,
+    tip:             `In your next session, focus exclusively on ${axisLabel} — let everything else be imperfect.`,
+    evidence:        `${persistentWeakness.sessions} sessions at ${persistentWeakness.avg}/100 average`,
+  };
+  let cardContent = fallbackCard;
   try {
     const { callWithFallbackGroq } = await import('../services/multiProvider.js');
     const { content } = await callWithFallbackGroq({
@@ -143,16 +172,10 @@ Return ONLY JSON:
       temperature:  0.3, maxTokens: 400,
       tier: 'fast', workspaceId, userId: user_id, sourceJob: 'practice_weakness_card',
     });
-    cardContent = JSON.parse(content.replace(/```json|```/g, '').trim());
+    const parsed = parseJSONObject(content, null);
+    if (parsed?.title) cardContent = parsed;
   } catch {
-    cardContent = {
-      title:           `Your ${axisLabel} score is your biggest gap (${persistentWeakness.avg}/100)`,
-      body:            `Across your last ${persistentWeakness.sessions} practice sessions, ${axisLabel} is consistently below ${LOW_SCORE_THRESHOLD}/100. This directly affects how prospects perceive your outreach.`,
-      action_label:    'Practice This Now',
-      action_scenario: null,
-      tip:             `In your next session, focus exclusively on ${axisLabel} — let everything else be imperfect.`,
-      evidence:        `${persistentWeakness.sessions} sessions at ${persistentWeakness.avg}/100 average`,
-    };
+    // cardContent already defaults to fallbackCard above.
   }
 
   // 7. Insert growth card — WORKSPACE SCOPED

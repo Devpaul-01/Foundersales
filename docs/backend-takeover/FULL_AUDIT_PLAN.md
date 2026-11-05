@@ -89,11 +89,11 @@ ownership-scoping check; a route file does):
 | growthIntelligenceScheduler.js | 🔧 | Three instances of the same unscoped-query pattern fixed (AI context contamination risk, not a direct leak). See AUDIT.md 1.28. |
 | growthPushNotificationJob.js | 🔧 | One unscoped query fixed (notification-logic leak, not data exposure). push_notification_log's user-only design confirmed deliberate. See AUDIT.md 1.29. |
 | index.js | ✅ (prior pass) | Reviewed in milestone 3 |
-| memoryExtractionJob.js | ⏳ | |
+| memoryExtractionJob.js | 🔧 | Five unscoped mutations tightened, two unsafe JSON.parse calls switched to the tested utility. See AUDIT.md 1.30. |
 | messageQueueWorker.js | ✅ (prior pass) | Full idempotency trace + dead code removal, milestone 3 |
-| patternDetectionJob.js | 🔧 (prior pass, partial) | Read for the pattern_insights enqueue bug; not fully read otherwise |
-| patternInsightsJob.js | ⏳ | Only the first ~30 lines were sanity-checked, not fully read |
-| practiceWeaknessDetector.js | ⏳ | Only checkAndGenerateWeaknessCard's cooldown logic seen |
+| patternDetectionJob.js | 🔧 | Now fully read. One unscoped query fixed (AI context contamination). JSON.parse switched. pattern_insights enqueue logic re-confirmed correct. See AUDIT.md 1.31. |
+| patternInsightsJob.js | 🔧 | Now fully read — genuinely well-built, good validation of the milestone 3 handler-registration fix. One unscoped mutation tightened. See AUDIT.md 1.32. |
+| practiceWeaknessDetector.js | 🚩 | JSON.parse switched. Real cross-file workspace-resolution timing gap flagged, not fixed (spans messageQueueWorker.js too). See AUDIT.md 1.33. |
 | practiceWorker.js | ✅ (prior pass) | Reviewed in milestone 3 |
 | queues.js | ✅ (prior pass) | Reviewed in milestone 3 |
 | registerSchedules.js | ✅ (prior pass) | Reviewed + fixed in milestones 3-4 |

@@ -246,9 +246,16 @@ const refreshStaleProspectSummaries = async () => {
         .eq('workspace_id', prospect.workspace_id).eq('user_id', prospect.user_id).single();
 
       const summary = await generateProspectSummary(wp || {}, prospect, timeline);
+      // NOTE (docs/backend-takeover/AUDIT.md, full audit): tightened —
+      // used to filter only by .eq('id', prospect.id), even though
+      // prospect already carries workspace_id/user_id (selected above,
+      // used elsewhere in this same loop). Not exploitable as written
+      // (prospect comes from this job's own system query); tightened for
+      // consistency with the rest of this codebase's established
+      // pattern.
       await supabaseAdmin.from('prospects')
         .update({ ai_summary: summary, ai_summary_updated_at: new Date().toISOString() })
-        .eq('id', prospect.id);
+        .eq('id', prospect.id).eq('workspace_id', prospect.workspace_id).eq('user_id', prospect.user_id);
 
       await sleep(1000);
     } catch (err) {
@@ -257,6 +264,13 @@ const refreshStaleProspectSummaries = async () => {
   }
 };
 
+// VERIFIED (docs/backend-takeover/AUDIT.md, full audit): the file
+// header's claim that this needs no workspace filter is correct, not
+// just asserted. Each row already carries its own correct workspace_id;
+// this update only recalculates a derived status field (overdue vs.
+// pending) from due_date, the same "recompute from source data, not a
+// per-workspace accumulation" pattern already verified correct for
+// CALENDAR_UPDATE_PROSPECT_HEALTH in jobs/backgroundWorker.js.
 const markOverdueCommitments = async () => {
   const today = new Date().toISOString().split('T')[0];
   await supabaseAdmin.from('conversation_commitments')

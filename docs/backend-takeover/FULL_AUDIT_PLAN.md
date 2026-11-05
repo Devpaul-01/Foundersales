@@ -98,7 +98,7 @@ ownership-scoping check; a route file does):
 | queues.js | ✅ (prior pass) | Reviewed in milestone 3 |
 | registerSchedules.js | ✅ (prior pass) | Reviewed + fixed in milestones 3-4 |
 | scheduledWorker.js | ✅ (prior pass) | Reviewed + fixed in milestone 3 |
-| skillProgressionJob.js | ⏳ | |
+| skillProgressionJob.js | ✅ | Clean — authoritative source of composite_score_avg, confirms the earlier 0-10 scale trace. See AUDIT.md 1.34. |
 
 ### Services (26)
 | File | Status | Note |

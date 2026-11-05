@@ -1038,6 +1038,29 @@ defined once and reused rather than duplicated inside the catch block.
 **Fix status:** JSON parsing fixed and verified (syntax check, full test suite). Workspace-resolution timing gap
 flagged with a clear comment at the exact point it matters, not fixed — see IMPLEMENTATION_PLAN.md.
 
+### 1.34 — INFO — `jobs/skillProgressionJob.js` full read (full audit, file 21 of 80) — clean
+**Location:** `backend/src/jobs/skillProgressionJob.js`
+
+Full read against the checklist. **No issue found.** This is the authoritative source of `composite_score_avg` —
+the exact field whose 0–10 scale was traced here and confirmed during an earlier milestone (resolving a
+self-flagged open question in `metrics.js`'s leaderboard formula). Reading the full file now directly confirms
+what that earlier trace found: the `/10` normalization of practice-derived axes (lines 125–130) is real,
+deliberate, and correctly applied — consistent, not just plausible.
+
+File's own header documents two real prior fixes: `HIGH-12` (discovery/objection/brevity axes were previously
+omitted from the composite score and weakness detection entirely) and a workspace-scoping fix on the
+`user_skill_profile` query (previously could merge the wrong workspace's practice data into a snapshot) — both
+verified fixed in the current code.
+
+Considered whether `practiceUserIds`'s workspace resolution via `users.active_workspace_id` (lines 36-43) is the
+same "current state vs. triggering-event state" issue flagged in `practiceWeaknessDetector.js` (1.33) — concluded
+it is not: this job runs as a periodic weekly aggregate over the last 7 days of activity, with no single
+triggering event to be inconsistent with, so resolving against current workspace state is a reasonable design for
+a periodic snapshot rather than a timing-window correctness gap like the per-event, immediately-triggered weakness
+card generation in the other file.
+
+**Fix status:** no fix needed. Reviewed clean.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

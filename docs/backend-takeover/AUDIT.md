@@ -1095,6 +1095,24 @@ directly in this audit.
 cross-reference finding rather than let it stand unverified. The actual dead-code question will be resolved when
 `groqCalendarIntelligence.js` is read.
 
+### 1.37 — INFO — `services/calendarPrep.js` full read (full audit, file 24 of 80) — clean
+**Location:** `backend/src/services/calendarPrep.js`
+
+Full read against the checklist. **No issue found.** Header comment documents a substantial, genuinely real
+consolidation: prep-generation logic used to exist independently in three places, one of which (`calendar.js`'s
+`generateAndSaveEnrichedPrep` helper) is explicitly called out as having been dead code the whole time, "never
+actually called by the worker despite the comment claiming it was." This cross-references and is consistent with
+`jobs/backgroundWorker.js`'s own `CALENDAR_PREP_GENERATE` consolidation already verified correct back in an
+earlier milestone.
+
+Every query in `buildPrepContext` correctly carries `workspace_id`+`user_id` (and `prospect_id` where relevant),
+including the slightly unusual `opportunities.feedback(deal_value_usd)` embedded-relation select, which correctly
+handles both possible PostgREST return shapes (array vs. single object) when extracting `deal_value_usd`.
+`generateAndPersistPrep`'s AI-cost-gate integration and schema-validated-with-fallback persistence are both
+correctly scoped on their final `update()` calls.
+
+**Fix status:** no fix needed. Reviewed clean.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

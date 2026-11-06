@@ -98,15 +98,15 @@ ownership-scoping check; a route file does):
 | queues.js | ✅ (prior pass) | Reviewed in milestone 3 |
 | registerSchedules.js | ✅ (prior pass) | Reviewed + fixed in milestones 3-4 |
 | scheduledWorker.js | ✅ (prior pass) | Reviewed + fixed in milestone 3 |
-| skillProgressionJob.js | ⏳ | |
+| skillProgressionJob.js | ✅ | Clean — authoritative source of composite_score_avg, confirms the earlier 0-10 scale trace. See AUDIT.md 1.34. |
 
 ### Services (26)
 | File | Status | Note |
 |---|---|---|
-| calendarAiGate.js | ⏳ | Only shouldGenerateFollowUp/recordGateDecision call sites seen |
-| calendarCommitmentsSignals.js | ⏳ | Only extractCommitmentsAndSignals's call sites seen |
-| calendarPrep.js | ⏳ | Only generateAndPersistPrep's call site seen |
-| email.js | ⏳ | Only env-var usage checked |
+| calendarAiGate.js | ✅ | Clean — well-designed cost-control gate, correctly scoped, consolidates previously-duplicated logic. See AUDIT.md 1.35. |
+| calendarCommitmentsSignals.js | 🚩 | Clean implementation. Flagged a stale comment claiming two functions in groqCalendarIntelligence.js are still used elsewhere — grep found zero call sites; to confirm when that file is read. See AUDIT.md 1.36. |
+| calendarPrep.js | ✅ | Clean — real, substantial three-way consolidation, correctly scoped throughout. See AUDIT.md 1.37. |
+| email.js | 🔧 | HIGH: unescaped user-controlled content in two HTML email templates, fixed (more directly exploitable than the AI-content version). .env.example corrected. See AUDIT.md 1.38. |
 | exa.js | ⏳ | |
 | exaCalendar.js | ✅ (prior pass) | Fully read for idempotency, milestone 7 |
 | groq-client.js | ⏳ | |

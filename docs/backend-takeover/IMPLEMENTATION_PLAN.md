@@ -140,6 +140,17 @@ protected onboarding flow, where the correct fix shape is a product judgment cal
   workspace** (AUDIT.md 1.33) — a real, narrow timing-window correctness gap, not fixed because the proper fix
   spans two files (changing `messageQueueWorker.js`'s BullMQ job payload shape, not just this function's internal
   logic). Worth a dedicated, deliberate pass rather than a mid-audit unilateral change to job payload data.
+- **Consolidate the HTML-escaping helper duplicated across `jobs/emailDigestJob.js` and `services/email.js`**
+  (AUDIT.md 1.26, 1.38) — two files now carry an identical small escaping function. Worth extracting into a real
+  `utils/escapeHtml.js`, deferred since the fix's urgency was the vulnerability itself, not the duplication.
+- **`jobs/emailDigestJob.js` and `services/email.js` use two entirely separate email-sending code paths**
+  (AUDIT.md 1.38) — `emailDigestJob.js` has its own independent nodemailer/Gmail transport logic
+  (`GMAIL_USER`/`GMAIL_APP_PASSWORD`), while `email.js` is the shared service everything else uses
+  (`EMAIL_PROVIDER`-selected Resend/SMTP/console). Also corrected `backend/.env.example`'s wrong claim that
+  `GMAIL_USER`/`GMAIL_APP_PASSWORD` were an alternative to `email.js`'s generic `SMTP_*` vars — traced directly,
+  they're read only by `emailDigestJob.js`'s own separate transport, not `email.js`. Not consolidated here —
+  worth checking with the person whether this split is intentional (e.g. digest emails specifically needing a
+  different sending path) before unifying them.
 
 
 - **Duplicate workspace-switch endpoints** (AUDIT.md 1.4) — see DECISIONS.md. Not removing either without

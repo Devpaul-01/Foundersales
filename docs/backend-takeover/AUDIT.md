@@ -1038,6 +1038,118 @@ defined once and reused rather than duplicated inside the catch block.
 **Fix status:** JSON parsing fixed and verified (syntax check, full test suite). Workspace-resolution timing gap
 flagged with a clear comment at the exact point it matters, not fixed — see IMPLEMENTATION_PLAN.md.
 
+### 1.34 — INFO — `jobs/skillProgressionJob.js` full read (full audit, file 21 of 80) — clean
+**Location:** `backend/src/jobs/skillProgressionJob.js`
+
+Full read against the checklist. **No issue found.** This is the authoritative source of `composite_score_avg` —
+the exact field whose 0–10 scale was traced here and confirmed during an earlier milestone (resolving a
+self-flagged open question in `metrics.js`'s leaderboard formula). Reading the full file now directly confirms
+what that earlier trace found: the `/10` normalization of practice-derived axes (lines 125–130) is real,
+deliberate, and correctly applied — consistent, not just plausible.
+
+File's own header documents two real prior fixes: `HIGH-12` (discovery/objection/brevity axes were previously
+omitted from the composite score and weakness detection entirely) and a workspace-scoping fix on the
+`user_skill_profile` query (previously could merge the wrong workspace's practice data into a snapshot) — both
+verified fixed in the current code.
+
+Considered whether `practiceUserIds`'s workspace resolution via `users.active_workspace_id` (lines 36-43) is the
+same "current state vs. triggering-event state" issue flagged in `practiceWeaknessDetector.js` (1.33) — concluded
+it is not: this job runs as a periodic weekly aggregate over the last 7 days of activity, with no single
+triggering event to be inconsistent with, so resolving against current workspace state is a reasonable design for
+a periodic snapshot rather than a timing-window correctness gap like the per-event, immediately-triggered weakness
+card generation in the other file.
+
+**Fix status:** no fix needed. Reviewed clean.
+
+### 1.35 — INFO — `services/calendarAiGate.js` full read (full audit, file 22 of 80) — clean
+**Location:** `backend/src/services/calendarAiGate.js`
+
+Full read against the checklist. **No issue found.** A dedicated, well-designed cost-control rule engine
+("is this AI call worth making") with centralized audit logging to `calendar_ai_events` for every gate decision.
+`shouldRunResearch`'s cross-event prospect-reuse lookup correctly scopes by both `prospect_id` and `workspace_id`.
+`shouldExtractCommitmentsSignals`'s own comment documents consolidating a length-threshold check that previously
+existed ad hoc in two separate places — consistent with this audit's broader observation that this codebase has
+had real, deliberate consolidation passes, not just accumulation of duplicated logic.
+
+**Fix status:** no fix needed. Reviewed clean.
+
+### 1.36 — INFO — `services/calendarCommitmentsSignals.js` full read (full audit, file 23 of 80)
+**Location:** `backend/src/services/calendarCommitmentsSignals.js`
+
+Full read against the checklist. Genuinely clean implementation: already uses `parseJSONObject` (the tested
+utility, no raw `JSON.parse` to fix here), wrapped in its own `try/catch` with a safe empty-arrays fallback,
+correctly gated via `calendarAiGate.js`. Header comment's claim of consolidating two previously-separate Groq
+calls into one (the single highest-value AI cost optimization identified for the Calendar feature, per the
+comment) is a real, legitimate, well-reasoned optimization.
+
+**One finding, flagged for follow-up rather than fixed here:** the header comment claims
+`extractCommitmentsFromText`/`generateSignalAnalysis` (in `groqCalendarIntelligence.js`, not yet read as part of
+this audit) are "left in place... still used by `synthesizeMeetingNotes` and any other call sites outside
+Calendar's debrief flow." Repo-wide grep found **zero call sites of either function anywhere** — not in
+`synthesizeMeetingNotes`, not anywhere else. If this holds once `groqCalendarIntelligence.js` is read directly,
+both functions are genuinely dead code, and this comment's claim is stale. Not removing anything in that other
+file based on a cross-reference alone — flagged here, to be confirmed and acted on when that file is reached
+directly in this audit.
+
+**Fix status:** no functional fix needed in this file. Updated this file's own comment to flag the
+cross-reference finding rather than let it stand unverified. The actual dead-code question will be resolved when
+`groqCalendarIntelligence.js` is read.
+
+### 1.37 — INFO — `services/calendarPrep.js` full read (full audit, file 24 of 80) — clean
+**Location:** `backend/src/services/calendarPrep.js`
+
+Full read against the checklist. **No issue found.** Header comment documents a substantial, genuinely real
+consolidation: prep-generation logic used to exist independently in three places, one of which (`calendar.js`'s
+`generateAndSaveEnrichedPrep` helper) is explicitly called out as having been dead code the whole time, "never
+actually called by the worker despite the comment claiming it was." This cross-references and is consistent with
+`jobs/backgroundWorker.js`'s own `CALENDAR_PREP_GENERATE` consolidation already verified correct back in an
+earlier milestone.
+
+Every query in `buildPrepContext` correctly carries `workspace_id`+`user_id` (and `prospect_id` where relevant),
+including the slightly unusual `opportunities.feedback(deal_value_usd)` embedded-relation select, which correctly
+handles both possible PostgREST return shapes (array vs. single object) when extracting `deal_value_usd`.
+`generateAndPersistPrep`'s AI-cost-gate integration and schema-validated-with-fallback persistence are both
+correctly scoped on their final `update()` calls.
+
+**Fix status:** no fix needed. Reviewed clean.
+
+### 1.38 — HIGH — `services/email.js`: unescaped user-controlled content in two HTML email templates (full audit, file 25 of 80)
+**Location:** `backend/src/services/email.js`
+
+Full read against the checklist. This is the shared email-sending service (console/Resend/SMTP providers,
+selected by `EMAIL_PROVIDER`).
+
+**Real, HIGH-severity finding, fixed — found twice, more directly exploitable than 1.26:** both
+`sendWorkspaceInviteEmail` and `sendDealAssignedEmail` interpolated genuinely user-controlled values directly into
+raw HTML templates with zero escaping. Traced every value to its actual source, not assumed:
+- `sendWorkspaceInviteEmail`'s `workspaceName`/`inviterName`: confirmed via `routes/workspaces.js`'s only call
+  site to be `req.workspace.name` and `req.user.name` — a workspace name and display name any signed-up user can
+  set themselves.
+- `sendDealAssignedEmail`'s `assigneeName`/`assignerName`/`dealName`: confirmed via both call sites
+  (`routes/pipeline.js`, `routes/opportunities.js`) to be real user display names and
+  `opp.target_name || extractName(opp.target_context)` — prospect-derived text, not a fixed system string.
+
+This is more directly exploitable than the AI-content version of the same issue already fixed in
+`jobs/emailDigestJob.js` (1.26): it needs no model cooperation at all. Any authenticated user could set their
+display name or a workspace name to malicious markup, then send an invite to anyone — including someone with no
+account on the platform — and that markup renders in the recipient's real email client.
+
+**Fix:** added the same `escapeHtml5` helper (identical approach to `emailDigestJob.js`'s `escapeHtml4`, kept
+file-local rather than extracted into a shared utility for now — see note below) and applied it to every
+HTML-body interpolation point in both templates. Left the two email subject-line interpolations alone, correctly
+— subject lines aren't HTML-rendered, so escaping them isn't needed and would just show literal `&amp;` etc. to
+the recipient. Manually verified against a realistic `onerror` payload and a normal ampersand-containing string
+before relying on it.
+
+**Noted, not acted on:** this is now the second near-identical HTML-escaping helper added in this audit
+(`emailDigestJob.js`'s `escapeHtml4`, this file's `escapeHtml5`). Worth extracting into a real shared
+`utils/escapeHtml.js` at some point — not done in this pass, since consolidating them is a separate, lower-urgency
+cleanup from fixing the actual vulnerability, and doing so now would mean touching a third file mid-fix rather
+than focusing this commit on the security issue itself.
+
+**Fix status:** fixed and verified (syntax check, full test suite, manual verification of the escaping helper
+against adversarial input).
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

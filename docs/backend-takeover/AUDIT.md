@@ -1113,6 +1113,43 @@ correctly scoped on their final `update()` calls.
 
 **Fix status:** no fix needed. Reviewed clean.
 
+### 1.38 — HIGH — `services/email.js`: unescaped user-controlled content in two HTML email templates (full audit, file 25 of 80)
+**Location:** `backend/src/services/email.js`
+
+Full read against the checklist. This is the shared email-sending service (console/Resend/SMTP providers,
+selected by `EMAIL_PROVIDER`).
+
+**Real, HIGH-severity finding, fixed — found twice, more directly exploitable than 1.26:** both
+`sendWorkspaceInviteEmail` and `sendDealAssignedEmail` interpolated genuinely user-controlled values directly into
+raw HTML templates with zero escaping. Traced every value to its actual source, not assumed:
+- `sendWorkspaceInviteEmail`'s `workspaceName`/`inviterName`: confirmed via `routes/workspaces.js`'s only call
+  site to be `req.workspace.name` and `req.user.name` — a workspace name and display name any signed-up user can
+  set themselves.
+- `sendDealAssignedEmail`'s `assigneeName`/`assignerName`/`dealName`: confirmed via both call sites
+  (`routes/pipeline.js`, `routes/opportunities.js`) to be real user display names and
+  `opp.target_name || extractName(opp.target_context)` — prospect-derived text, not a fixed system string.
+
+This is more directly exploitable than the AI-content version of the same issue already fixed in
+`jobs/emailDigestJob.js` (1.26): it needs no model cooperation at all. Any authenticated user could set their
+display name or a workspace name to malicious markup, then send an invite to anyone — including someone with no
+account on the platform — and that markup renders in the recipient's real email client.
+
+**Fix:** added the same `escapeHtml5` helper (identical approach to `emailDigestJob.js`'s `escapeHtml4`, kept
+file-local rather than extracted into a shared utility for now — see note below) and applied it to every
+HTML-body interpolation point in both templates. Left the two email subject-line interpolations alone, correctly
+— subject lines aren't HTML-rendered, so escaping them isn't needed and would just show literal `&amp;` etc. to
+the recipient. Manually verified against a realistic `onerror` payload and a normal ampersand-containing string
+before relying on it.
+
+**Noted, not acted on:** this is now the second near-identical HTML-escaping helper added in this audit
+(`emailDigestJob.js`'s `escapeHtml4`, this file's `escapeHtml5`). Worth extracting into a real shared
+`utils/escapeHtml.js` at some point — not done in this pass, since consolidating them is a separate, lower-urgency
+cleanup from fixing the actual vulnerability, and doing so now would mean touching a third file mid-fix rather
+than focusing this commit on the security issue itself.
+
+**Fix status:** fixed and verified (syntax check, full test suite, manual verification of the escaping helper
+against adversarial input).
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

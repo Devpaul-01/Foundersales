@@ -27,6 +27,27 @@ const EMAIL_FROM     = process.env.EMAIL_FROM    || 'noreply@app.local';
 const EMAIL_PROVIDER = process.env.EMAIL_PROVIDER || 'console';
 const FRONTEND_URL   = process.env.FRONTEND_URL  || 'http://localhost:5173';
 
+// NOTE (docs/backend-takeover/AUDIT.md, full audit): sendWorkspaceInviteEmail
+// below used to interpolate workspaceName and inviterName directly into
+// raw HTML with no escaping. Confirmed by tracing the only call site
+// (routes/workspaces.js's invite route): both values are genuinely
+// user-controlled — req.workspace.name (a workspace name any user can
+// set when creating one) and req.user.name (a display name any user can
+// set at signup). This was a real, directly exploitable HTML-injection
+// vector with no AI step in the middle — any authenticated user could
+// set either value to malicious markup and invite anyone, including
+// people with no account on the platform, and that markup would render
+// in the recipient's actual email client. More directly exploitable than
+// the AI-content version of this same issue already fixed in
+// jobs/emailDigestJob.js, since this one needs no model cooperation at
+// all — just a signup form.
+const escapeHtml5 = (str) => String(str ?? '')
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&#39;');
+
 // ── Send via Resend ──────────────────────────────────────────
 const sendViaResend = async ({ to, subject, html, correlationId }) => {
   const startTime = Date.now();
@@ -261,18 +282,21 @@ export const sendWorkspaceInviteEmail = async ({
       throw new Error('token is required');
     }
     
-    const html = `
+    const safeWorkspaceName = escapeHtml5(workspaceName);
+  const safeInviterName   = escapeHtml5(inviterName) || 'Someone';
+
+  const html = `
 <!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Invitation to ${workspaceName}</title>
+  <title>Invitation to ${safeWorkspaceName}</title>
 </head>
 <body style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px;color:#1a1a1a">
-  <h2 style="margin:0 0 8px">You've been invited to join ${workspaceName}</h2>
+  <h2 style="margin:0 0 8px">You've been invited to join ${safeWorkspaceName}</h2>
   <p style="color:#555;margin:0 0 24px">
-    ${inviterName || 'Someone'} has invited you to collaborate on <strong>${workspaceName}</strong>.
+    ${safeInviterName} has invited you to collaborate on <strong>${safeWorkspaceName}</strong>.
   </p>
   <a href="${inviteLink}"
      style="display:inline-block;background:#6366f1;color:#fff;text-decoration:none;
@@ -394,6 +418,16 @@ export const sendDealAssignedEmail = async ({
   const cid = correlationId || generateCorrelationId();
   const dealUrl = `${FRONTEND_URL}/pipeline/${opportunityId}`;  // fix path if needed
 
+  // NOTE (docs/backend-takeover/AUDIT.md, full audit): same unescaped-
+  // interpolation issue as sendWorkspaceInviteEmail above, same fix.
+  // dealName in particular (opp.target_name || extractName(opp.target_
+  // context), confirmed by tracing both call sites in routes/pipeline.js
+  // and routes/opportunities.js) is prospect-derived text, not a fixed
+  // system string.
+  const safeAssigneeName = escapeHtml5(assigneeName) || 'there';
+  const safeAssignerName = escapeHtml5(assignerName) || 'A manager';
+  const safeDealName     = escapeHtml5(dealName);
+
   const html = `
 <!DOCTYPE html>
 <html>
@@ -405,13 +439,13 @@ export const sendDealAssignedEmail = async ({
 <body style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px;color:#1a1a1a">
   <h2 style="margin:0 0 8px">A deal has been assigned to you</h2>
   <p style="color:#555;margin:0 0 4px">
-    Hi ${assigneeName || 'there'},
+    Hi ${safeAssigneeName},
   </p>
   <p style="color:#555;margin:0 0 24px">
-    <strong>${assignerName || 'A manager'}</strong> has assigned you the following deal:
+    <strong>${safeAssignerName}</strong> has assigned you the following deal:
   </p>
   <div style="background:#f5f5f5;border-radius:8px;padding:16px;margin:0 0 24px">
-    <p style="margin:0;font-size:16px;font-weight:600">${dealName}</p>
+    <p style="margin:0;font-size:16px;font-weight:600">${safeDealName}</p>
   </div>
   <a href="${dealUrl}"
      style="display:inline-block;background:#6366f1;color:#fff;text-decoration:none;

@@ -106,7 +106,7 @@ ownership-scoping check; a route file does):
 | calendarAiGate.js | ✅ | Clean — well-designed cost-control gate, correctly scoped, consolidates previously-duplicated logic. See AUDIT.md 1.35. |
 | calendarCommitmentsSignals.js | 🚩 | Clean implementation. Flagged a stale comment claiming two functions in groqCalendarIntelligence.js are still used elsewhere — grep found zero call sites; to confirm when that file is read. See AUDIT.md 1.36. |
 | calendarPrep.js | ✅ | Clean — real, substantial three-way consolidation, correctly scoped throughout. See AUDIT.md 1.37. |
-| email.js | ⏳ | Only env-var usage checked |
+| email.js | 🔧 | HIGH: unescaped user-controlled content in two HTML email templates, fixed (more directly exploitable than the AI-content version). .env.example corrected. See AUDIT.md 1.38. |
 | exa.js | ⏳ | |
 | exaCalendar.js | ✅ (prior pass) | Fully read for idempotency, milestone 7 |
 | groq-client.js | ⏳ | |

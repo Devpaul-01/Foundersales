@@ -50,7 +50,7 @@
 // ============================================================
 
 import Exa from 'exa-js';
-import { parseJSONArray } from '../utils/parser.js';
+import { parseJSONArray, parseJSONObject } from '../utils/parser.js';
 import {
   OPPORTUNITIES_PER_RUN,
   SUPPORTED_PLATFORMS,
@@ -209,9 +209,14 @@ OR
       temperature: 0.1, maxTokens: 200, tier: 'fast',
       workspaceId: user.workspace_id, userId: user.id, sourceJob: 'needs_real_time_search',
     });
-    const clean  = content.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
-    if (typeof parsed.needed === 'boolean') return parsed;
+    // NOTE (docs/backend-takeover/AUDIT.md, full audit): switched from a
+    // raw JSON.parse() (already safely caught by this function's own
+    // try/catch, not a live crash) to the tested parseJSONObject utility
+    // (already imported — parseJSONArray was, used elsewhere in this
+    // file; added parseJSONObject alongside it), for consistency with
+    // the rest of this codebase.
+    const parsed = parseJSONObject(content, null);
+    if (typeof parsed?.needed === 'boolean') return parsed;
     return { needed: true, reason: 'parse_fallback' };
   } catch (err) {
     console.warn('[SmartRouter] Decision failed, defaulting to Groq fallback:', err.message);

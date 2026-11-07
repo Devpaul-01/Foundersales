@@ -107,7 +107,7 @@ ownership-scoping check; a route file does):
 | calendarCommitmentsSignals.js | 🚩 | Clean implementation. Flagged a stale comment claiming two functions in groqCalendarIntelligence.js are still used elsewhere — grep found zero call sites; to confirm when that file is read. See AUDIT.md 1.36. |
 | calendarPrep.js | ✅ | Clean — real, substantial three-way consolidation, correctly scoped throughout. See AUDIT.md 1.37. |
 | email.js | 🔧 | HIGH: unescaped user-controlled content in two HTML email templates, fixed (more directly exploitable than the AI-content version). .env.example corrected. See AUDIT.md 1.38. |
-| exa.js | ⏳ | |
+| exa.js | 🔧 | Well-architected, explicit scope-boundary reasoning in its own comments. One JSON.parse switched. See AUDIT.md 1.39. |
 | exaCalendar.js | ✅ (prior pass) | Fully read for idempotency, milestone 7 |
 | groq-client.js | ⏳ | |
 | groq-coaching.js | ⏳ | |

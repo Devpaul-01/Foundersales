@@ -1150,6 +1150,32 @@ than focusing this commit on the security issue itself.
 **Fix status:** fixed and verified (syntax check, full test suite, manual verification of the escaping helper
 against adversarial input).
 
+### 1.39 — INFO — `services/exa.js` full read (full audit, file 26 of 80)
+**Location:** `backend/src/services/exa.js`
+
+Full read against the checklist. Header comment (`IMPL-EXA-01`) documents a substantial, genuinely well-reasoned
+prior refactor: this file used to implement its own independent, in-memory-only key-cooldown mechanism (a
+duplicate of `multiProvider.js`'s, with the exact same cross-instance correctness gap — one instance's "key N
+failed" knowledge never reached any other instance) and now delegates to the shared `providerCooldown.js` module
+instead. The comment is also explicit about a deliberate scope boundary *not* taken — Exa's error classification
+stayed as message-substring matching rather than being migrated to `utils/providerErrors.js`'s structured
+taxonomy, with a clearly stated reason (the SDK doesn't reliably expose a raw status code) rather than silence.
+This kind of explicit "here's what we chose not to do and why" is useful, and rare enough to be worth noting when
+seen.
+
+Usage-gating sequence in `discoverOpportunities` (workspace quota check → AI cost-router decision → Exa search →
+Groq fallback on any failure at any stage) is correctly ordered and every fallback path is reachable and sensible.
+Not a route/job with direct DB scoping concerns — this file's "scoping" is workspace-aware usage tracking, which
+is correctly threaded through every exported function (`discoverOpportunities`, `searchForChat` both require and
+pass `workspaceId`/`userId` to `recordExaUsage`).
+
+**One real, low-severity finding, fixed:** `needsRealTimeSearch`'s AI-router-decision parse used a raw
+`JSON.parse()` despite `parseJSONArray` already being imported and used elsewhere in this same file — already
+safely caught by its own `try/catch`, not a live crash. Switched to `parseJSONObject` (added to the existing
+import) for consistency.
+
+**Fix status:** fixed and verified (syntax check, full test suite).
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

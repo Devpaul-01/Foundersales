@@ -110,7 +110,7 @@ ownership-scoping check; a route file does):
 | exa.js | 🔧 | Well-architected, explicit scope-boundary reasoning in its own comments. One JSON.parse switched. See AUDIT.md 1.39. |
 | exaCalendar.js | ✅ (prior pass) | Fully read for idempotency, milestone 7 |
 | groq-client.js | ✅ | Clean — correct selective retry logic, SSE parsing correctly not routed through the AI-JSON utilities. See AUDIT.md 1.40. |
-| groq-coaching.js | ⏳ | |
+| groq-coaching.js | 🔧 | Well-built prompt logic, no scoping concerns. Five JSON.parse calls switched. Flagged a possible duplication with groq-practice.js to check later. See AUDIT.md 1.41. |
 | groq-onboarding.js | 🚩 (prior pass, partial) | seedMemoryFromOnboarding read + flagged; rest of file not read |
 | groq-outreach.js | ⏳ | |
 | groq-practice.js | ⏳ | |

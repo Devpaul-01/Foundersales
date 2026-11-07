@@ -1192,6 +1192,31 @@ protocol-level chunks of a well-formed streaming API's wire format. Already corr
 
 **Fix status:** no fix needed. Reviewed clean.
 
+### 1.41 — LOW — `services/groq-coaching.js` full read (full audit, file 28 of 80)
+**Location:** `backend/src/services/groq-coaching.js`
+
+Full read of all 7 exported functions (656 lines) against the checklist. Pure prompt-construction/business logic —
+no DB queries, no workspace/user scoping concerns in this file. Notably consistent prompt-engineering discipline
+throughout: explicit mood-sensitivity branching (`generateDailyTips`, `generateCheckInResponse` both deliberately
+soften tone and reduce ask-size for a low mood score), concrete, situation-matched fallback content for every
+single AI call rather than generic placeholders, and an explicit "no generic advice" instruction baked into
+several prompts.
+
+**Five raw `JSON.parse()` calls, all switched to the tested utilities:** `generateCoachingTip`,
+`generateDailyTips`, `generateCheckInQuestions`, `generateCheckInResponse`, `generateWeeklyPlan` each had a manual
+markdown-fence-strip + raw `JSON.parse()`. All five were already safely caught by their own local `try/catch` with
+a sensible, situation-appropriate fallback — none was a live crash. Switched to `parseJSONObject`/`parseJSONArray`
+for consistency with the rest of the codebase, same low-risk mechanical change applied in roughly ten other files
+across this audit.
+
+**Noted for follow-up when reached directly:** `generateCoachingTip`'s inline message-quality heuristic
+(word count, metric detection, personalization detection) carries a comment saying it "mirrors
+`analyzeMessageQuality` in `groq-practice.js`" — flagging this cross-reference for verification once that file is
+read, same as the `calendarCommitmentsSignals.js`/`groqCalendarIntelligence.js` cross-reference flagged earlier
+(1.36), to check whether this is genuine, maintained duplication or something that should be consolidated.
+
+**Fix status:** fixed and verified (syntax check, full test suite).
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

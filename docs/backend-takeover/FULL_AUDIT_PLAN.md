@@ -109,7 +109,7 @@ ownership-scoping check; a route file does):
 | email.js | 🔧 | HIGH: unescaped user-controlled content in two HTML email templates, fixed (more directly exploitable than the AI-content version). .env.example corrected. See AUDIT.md 1.38. |
 | exa.js | 🔧 | Well-architected, explicit scope-boundary reasoning in its own comments. One JSON.parse switched. See AUDIT.md 1.39. |
 | exaCalendar.js | ✅ (prior pass) | Fully read for idempotency, milestone 7 |
-| groq-client.js | ⏳ | |
+| groq-client.js | ✅ | Clean — correct selective retry logic, SSE parsing correctly not routed through the AI-JSON utilities. See AUDIT.md 1.40. |
 | groq-coaching.js | ⏳ | |
 | groq-onboarding.js | 🚩 (prior pass, partial) | seedMemoryFromOnboarding read + flagged; rest of file not read |
 | groq-outreach.js | ⏳ | |

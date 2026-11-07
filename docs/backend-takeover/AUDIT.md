@@ -1176,6 +1176,22 @@ import) for consistency.
 
 **Fix status:** fixed and verified (syntax check, full test suite).
 
+### 1.40 — INFO — `services/groq-client.js` full read (full audit, file 27 of 80) — clean
+**Location:** `backend/src/services/groq-client.js`
+
+Full read against the checklist. **No issue found.** The low-level Groq HTTP client (non-streaming `callGroq`,
+streaming `streamGroq`) — small, correct, well-scoped to its job. Retry logic is correctly selective: 3 attempts
+with linear backoff, but auth (`401`/`403`) and bad-request (`400`) errors are deliberately not retried (retrying
+those can't succeed). Reasonable timeouts (30s non-streaming, 60s streaming).
+
+The one `JSON.parse()` in this file (parsing individual SSE chunks from the streaming response) is correctly
+*not* a candidate for the codebase's `parseJSONArray`/`parseJSONObject` utilities — those are built for recovering
+an LLM's free-form, possibly-fenced-or-malformed JSON *output*, a different problem than parsing individual
+protocol-level chunks of a well-formed streaming API's wire format. Already correctly wrapped in a per-chunk
+`try/catch` with a sensible "skip malformed chunks" fallback — exactly right for this context.
+
+**Fix status:** no fix needed. Reviewed clean.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

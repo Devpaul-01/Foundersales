@@ -4,7 +4,7 @@
 //                  weekly plan, coaching annotations, and reflection
 // ============================================================
 
-import { parseTextResponse }                from '../utils/parser.js';
+import { parseTextResponse, parseJSONArray, parseJSONObject } from '../utils/parser.js';
 import { callWithFallbackGroq }             from './multiProvider.js';
 import {
   SYSTEM_PROMPTS,
@@ -192,8 +192,12 @@ Provide coaching in this EXACT JSON format:
       tier:        'fast',
       workspaceId: user.workspace_id, userId: user.id, sourceJob: 'generate_coaching_tip',
     });
-    const clean  = content.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
+    // NOTE (docs/backend-takeover/AUDIT.md, full audit): switched from a
+    // raw JSON.parse() (already safely caught by this function's own
+    // try/catch, not a live crash) to the tested parseJSONObject
+    // utility, consistent with the rest of this codebase. Same switch
+    // applied to the other 4 JSON.parse() calls in this file.
+    const parsed = parseJSONObject(content, {});
     return {
       what_worked:      parsed.what_worked || 'N/A — keep iterating.',
       what_didnt:       parsed.what_didnt  || 'The value proposition wasn\'t specific enough to get a response.',
@@ -381,9 +385,8 @@ Return ONLY a JSON array of exactly 3 objects (no markdown):
       tier:        'quality',
       workspaceId: user.workspace_id, userId: user.id, sourceJob: 'generate_daily_tips',
     });
-    const clean  = content.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
-    if (!Array.isArray(parsed) || parsed.length === 0) return FALLBACK;
+    const parsed = parseJSONArray(content, []);
+    if (parsed.length === 0) return FALLBACK;
 
     return parsed.slice(0, 3).map((tip, i) => {
       if (!tip.title || !tip.body) return FALLBACK[i];
@@ -464,9 +467,8 @@ Return ONLY a JSON array of 3 question strings:
       tier:        'quality',
       workspaceId: user.workspace_id, userId: user.id, sourceJob: 'generate_check_in_questions',
     });
-    const clean     = content.replace(/```json|```/g, '').trim();
-    const questions = JSON.parse(clean);
-    if (!Array.isArray(questions) || questions.length < 2) return FALLBACK;
+    const questions = parseJSONArray(content, []);
+    if (questions.length < 2) return FALLBACK;
     return questions.slice(0, 3);
   } catch (err) {
     console.error('[Groq] generateCheckInQuestions FAILED:', err.message);
@@ -562,8 +564,7 @@ Return ONLY this JSON:
       tier:        'quality',
       workspaceId: user.workspace_id, userId: user.id, sourceJob: 'generate_check_in_response',
     });
-    const clean  = content.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
+    const parsed = parseJSONObject(content, {});
     if (!parsed.response_text) return FALLBACK;
     return parsed;
   } catch (err) {
@@ -644,8 +645,7 @@ Return ONLY this JSON:
       tier:        'quality',
       workspaceId: user.workspace_id, userId: user.id, sourceJob: 'generate_weekly_plan',
     });
-    const clean  = content.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
+    const parsed = parseJSONObject(content, {});
     if (!parsed.title || !parsed.body) return FALLBACK;
     return { ...FALLBACK, ...parsed };
   } catch (err) {

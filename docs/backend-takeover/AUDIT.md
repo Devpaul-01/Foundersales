@@ -1150,6 +1150,73 @@ than focusing this commit on the security issue itself.
 **Fix status:** fixed and verified (syntax check, full test suite, manual verification of the escaping helper
 against adversarial input).
 
+### 1.39 — INFO — `services/exa.js` full read (full audit, file 26 of 80)
+**Location:** `backend/src/services/exa.js`
+
+Full read against the checklist. Header comment (`IMPL-EXA-01`) documents a substantial, genuinely well-reasoned
+prior refactor: this file used to implement its own independent, in-memory-only key-cooldown mechanism (a
+duplicate of `multiProvider.js`'s, with the exact same cross-instance correctness gap — one instance's "key N
+failed" knowledge never reached any other instance) and now delegates to the shared `providerCooldown.js` module
+instead. The comment is also explicit about a deliberate scope boundary *not* taken — Exa's error classification
+stayed as message-substring matching rather than being migrated to `utils/providerErrors.js`'s structured
+taxonomy, with a clearly stated reason (the SDK doesn't reliably expose a raw status code) rather than silence.
+This kind of explicit "here's what we chose not to do and why" is useful, and rare enough to be worth noting when
+seen.
+
+Usage-gating sequence in `discoverOpportunities` (workspace quota check → AI cost-router decision → Exa search →
+Groq fallback on any failure at any stage) is correctly ordered and every fallback path is reachable and sensible.
+Not a route/job with direct DB scoping concerns — this file's "scoping" is workspace-aware usage tracking, which
+is correctly threaded through every exported function (`discoverOpportunities`, `searchForChat` both require and
+pass `workspaceId`/`userId` to `recordExaUsage`).
+
+**One real, low-severity finding, fixed:** `needsRealTimeSearch`'s AI-router-decision parse used a raw
+`JSON.parse()` despite `parseJSONArray` already being imported and used elsewhere in this same file — already
+safely caught by its own `try/catch`, not a live crash. Switched to `parseJSONObject` (added to the existing
+import) for consistency.
+
+**Fix status:** fixed and verified (syntax check, full test suite).
+
+### 1.40 — INFO — `services/groq-client.js` full read (full audit, file 27 of 80) — clean
+**Location:** `backend/src/services/groq-client.js`
+
+Full read against the checklist. **No issue found.** The low-level Groq HTTP client (non-streaming `callGroq`,
+streaming `streamGroq`) — small, correct, well-scoped to its job. Retry logic is correctly selective: 3 attempts
+with linear backoff, but auth (`401`/`403`) and bad-request (`400`) errors are deliberately not retried (retrying
+those can't succeed). Reasonable timeouts (30s non-streaming, 60s streaming).
+
+The one `JSON.parse()` in this file (parsing individual SSE chunks from the streaming response) is correctly
+*not* a candidate for the codebase's `parseJSONArray`/`parseJSONObject` utilities — those are built for recovering
+an LLM's free-form, possibly-fenced-or-malformed JSON *output*, a different problem than parsing individual
+protocol-level chunks of a well-formed streaming API's wire format. Already correctly wrapped in a per-chunk
+`try/catch` with a sensible "skip malformed chunks" fallback — exactly right for this context.
+
+**Fix status:** no fix needed. Reviewed clean.
+
+### 1.41 — LOW — `services/groq-coaching.js` full read (full audit, file 28 of 80)
+**Location:** `backend/src/services/groq-coaching.js`
+
+Full read of all 7 exported functions (656 lines) against the checklist. Pure prompt-construction/business logic —
+no DB queries, no workspace/user scoping concerns in this file. Notably consistent prompt-engineering discipline
+throughout: explicit mood-sensitivity branching (`generateDailyTips`, `generateCheckInResponse` both deliberately
+soften tone and reduce ask-size for a low mood score), concrete, situation-matched fallback content for every
+single AI call rather than generic placeholders, and an explicit "no generic advice" instruction baked into
+several prompts.
+
+**Five raw `JSON.parse()` calls, all switched to the tested utilities:** `generateCoachingTip`,
+`generateDailyTips`, `generateCheckInQuestions`, `generateCheckInResponse`, `generateWeeklyPlan` each had a manual
+markdown-fence-strip + raw `JSON.parse()`. All five were already safely caught by their own local `try/catch` with
+a sensible, situation-appropriate fallback — none was a live crash. Switched to `parseJSONObject`/`parseJSONArray`
+for consistency with the rest of the codebase, same low-risk mechanical change applied in roughly ten other files
+across this audit.
+
+**Noted for follow-up when reached directly:** `generateCoachingTip`'s inline message-quality heuristic
+(word count, metric detection, personalization detection) carries a comment saying it "mirrors
+`analyzeMessageQuality` in `groq-practice.js`" — flagging this cross-reference for verification once that file is
+read, same as the `calendarCommitmentsSignals.js`/`groqCalendarIntelligence.js` cross-reference flagged earlier
+(1.36), to check whether this is genuine, maintained duplication or something that should be consolidated.
+
+**Fix status:** fixed and verified (syntax check, full test suite).
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

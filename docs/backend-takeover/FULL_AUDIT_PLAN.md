@@ -107,10 +107,10 @@ ownership-scoping check; a route file does):
 | calendarCommitmentsSignals.js | 🚩 | Clean implementation. Flagged a stale comment claiming two functions in groqCalendarIntelligence.js are still used elsewhere — grep found zero call sites; to confirm when that file is read. See AUDIT.md 1.36. |
 | calendarPrep.js | ✅ | Clean — real, substantial three-way consolidation, correctly scoped throughout. See AUDIT.md 1.37. |
 | email.js | 🔧 | HIGH: unescaped user-controlled content in two HTML email templates, fixed (more directly exploitable than the AI-content version). .env.example corrected. See AUDIT.md 1.38. |
-| exa.js | ⏳ | |
+| exa.js | 🔧 | Well-architected, explicit scope-boundary reasoning in its own comments. One JSON.parse switched. See AUDIT.md 1.39. |
 | exaCalendar.js | ✅ (prior pass) | Fully read for idempotency, milestone 7 |
-| groq-client.js | ⏳ | |
-| groq-coaching.js | ⏳ | |
+| groq-client.js | ✅ | Clean — correct selective retry logic, SSE parsing correctly not routed through the AI-JSON utilities. See AUDIT.md 1.40. |
+| groq-coaching.js | 🔧 | Well-built prompt logic, no scoping concerns. Five JSON.parse calls switched. Flagged a possible duplication with groq-practice.js to check later. See AUDIT.md 1.41. |
 | groq-onboarding.js | 🚩 (prior pass, partial) | seedMemoryFromOnboarding read + flagged; rest of file not read |
 | groq-outreach.js | ⏳ | |
 | groq-practice.js | ⏳ | |

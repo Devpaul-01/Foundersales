@@ -358,8 +358,13 @@ Return ONLY this JSON:
       sourceJob:   'generate_next_burst',
     });
 
-    const clean = content.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
+    // NOTE (docs/backend-takeover/AUDIT.md, full audit): switched from a
+    // raw JSON.parse() — already safely caught by this function's own
+    // try/catch, not a live crash — to the tested parseJSONObject
+    // utility, which this same file already uses in several other
+    // functions. Same switch applied to detectUserArchetype's parse
+    // below, the only other raw JSON.parse() remaining in this file.
+    const parsed = parseJSONObject(content, {});
 
     if (
       Array.isArray(parsed.questions) &&
@@ -733,8 +738,7 @@ Return ONLY this JSON (no markdown):
       tier:        'fast',
       sourceJob:   'detect_user_archetype',
     });
-    const clean  = content.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
+    const parsed = parseJSONObject(content, FALLBACK);
     const validArchetypes = ['seller', 'builder', 'freelancer', 'creator', 'professional', 'learner'];
     if (!validArchetypes.includes(parsed.archetype)) return FALLBACK;
     return parsed;

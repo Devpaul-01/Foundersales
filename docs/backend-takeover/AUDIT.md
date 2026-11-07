@@ -1217,6 +1217,33 @@ read, same as the `calendarCommitmentsSignals.js`/`groqCalendarIntelligence.js` 
 
 **Fix status:** fixed and verified (syntax check, full test suite).
 
+### 1.42 — LOW — `services/groq-onboarding.js` full read (full audit, file 29 of 80)
+**Location:** `backend/src/services/groq-onboarding.js`
+
+Full read of all 6 exported functions (745 lines) against the checklist. This file backs the explicitly protected
+onboarding flow — treated with the same care as `routes/onboarding.js` (1.20): only mechanical, zero-behavior-
+change fixes made, nothing touching prompt content, business logic, or the memory-seeding redelivery question
+already flagged and left for the person's decision.
+
+Genuinely sophisticated, concrete prompt engineering throughout (`buildVoiceProfile`'s "keep the exact number/
+name/quote, don't genericize it" instructions with paired bad/good examples is a particularly good pattern). This
+is also the file whose `detectUserArchetype` is the function `growthIntelligenceScheduler.js`'s `IMPL-ARCHETYPE-01`
+fix (verified correct in an earlier pass of this audit) actually calls — confirms that fix was pointed at the
+right, real implementation.
+
+Re-confirmed `seedMemoryFromOnboarding`'s `isRebuild`/`MEMORY_CAP` logic matches exactly what was read and relied
+on when resolving the `SEED_MEMORY` flag in two earlier entries — no new information here, consistent with the
+prior read.
+
+**Two raw `JSON.parse()` calls, switched to the tested utility:** `generateNextBurst` and `detectUserArchetype`
+both had a manual fence-strip + raw `JSON.parse()`, despite `parseJSONObject` already being imported and used by
+several other functions in this same file — the same "already uses the utility elsewhere, missed a couple of
+spots" pattern found in `exa.js` (1.39). Both already safely caught by local `try/catch` with sensible fallbacks,
+neither a live crash. Switched for consistency.
+
+**Fix status:** fixed and verified (syntax check, full test suite). Purely mechanical — no prompt content,
+business logic, or protected onboarding behavior changed.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

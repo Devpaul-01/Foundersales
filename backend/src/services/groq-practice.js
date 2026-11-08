@@ -7,14 +7,22 @@
 // TARGETED CHANGE: only the generatePracticeProspectReplyV3 function is
 // modified. Everything else in this file remains exactly as uploaded.
 
-import { parseTextResponse }                        from '../utils/parser.js';
+import { parseTextResponse, parseJSONObject }       from '../utils/parser.js';
 import { callWithFallbackGroq }                     from './multiProvider.js';
 import { SYSTEM_PROMPTS, PRESSURE_MODIFIER_BLOCKS, getContactLabel } from './groq-prompts.js';
 
 // ──────────────────────────────────────────
-// INTERNAL: Message quality analyser
+// Message quality analyser
+// NOTE (docs/backend-takeover/AUDIT.md, full audit): exported (was a
+// local, unexported const) because groq-coaching.js's generateCoachingTip
+// carried a byte-for-byte copy of this exact logic, inlined with a
+// comment honestly acknowledging it "mirrors" this function. Confirmed
+// genuinely identical, not just conceptually similar, before
+// consolidating: same five regexes, same scoring formula. Two places
+// that had to be kept in lockstep by hand, with nothing enforcing that —
+// consolidated into this one, shared implementation.
 // ──────────────────────────────────────────
-const analyzeMessageQuality = (userMessage) => {
+export const analyzeMessageQuality = (userMessage) => {
   const words      = userMessage.trim().split(/\s+/).filter(Boolean);
   const wordCount  = words.length;
   const hasMetric  = /\d+%|\d+x|\$[\d,]+|\d+\s*(day|week|month|hour|minute|customer|user|client)/i.test(userMessage);
@@ -52,36 +60,41 @@ export const parseV3Reply = (content) => {
     needs_search: false,
   };
 
-  try {
-    const clean  = content.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
-
-    return {
-      reply:               parsed.reply              || FALLBACK_V3.reply,
-      internal_monologue:  parsed.internal_monologue || null,
-      monologue_severity:  parsed.monologue_severity || 'neutral',
-      conversation_outcome: {
-        type:              parsed.conversation_outcome?.type             || 'continuing',
-        reason:            parsed.conversation_outcome?.reason           || null,
-        internal_reaction: parsed.conversation_outcome?.internal_reaction || null,
-      },
-      goal_achieved: typeof parsed.goal_achieved === 'boolean' ? parsed.goal_achieved : false,
-      state_delta: {
-        interest_delta:  parsed.state_delta?.interest_delta  ?? 0,
-        trust_delta:     parsed.state_delta?.trust_delta     ?? 0,
-        confusion_delta: parsed.state_delta?.confusion_delta ?? 0,
-        reasoning:       parsed.state_delta?.reasoning       || '',
-      },
-      coaching_tip: parsed.coaching_tip || null,
-      needs_search: parsed.needs_search === true,
-    };
-  } catch {
+  // NOTE (docs/backend-takeover/AUDIT.md, full audit): switched from a
+  // raw JSON.parse() to parseJSONObject, which never throws — so the
+  // "could not parse at all" case (previously the catch block) is now an
+  // explicit check for a missing `reply` field rather than a thrown
+  // exception. Preserves the original fallback behavior exactly: fall
+  // back to any plain text before the JSON starts, or the generic
+  // default reply if there's nothing usable.
+  const parsed = parseJSONObject(content, null);
+  if (!parsed || !parsed.reply) {
     const textOnly = content.split('{')[0].trim();
     return {
       ...FALLBACK_V3,
       reply: textOnly || FALLBACK_V3.reply,
     };
   }
+
+  return {
+    reply:               parsed.reply              || FALLBACK_V3.reply,
+    internal_monologue:  parsed.internal_monologue || null,
+    monologue_severity:  parsed.monologue_severity || 'neutral',
+    conversation_outcome: {
+      type:              parsed.conversation_outcome?.type             || 'continuing',
+      reason:            parsed.conversation_outcome?.reason           || null,
+      internal_reaction: parsed.conversation_outcome?.internal_reaction || null,
+    },
+    goal_achieved: typeof parsed.goal_achieved === 'boolean' ? parsed.goal_achieved : false,
+    state_delta: {
+      interest_delta:  parsed.state_delta?.interest_delta  ?? 0,
+      trust_delta:     parsed.state_delta?.trust_delta     ?? 0,
+      confusion_delta: parsed.state_delta?.confusion_delta ?? 0,
+      reasoning:       parsed.state_delta?.reasoning       || '',
+    },
+    coaching_tip: parsed.coaching_tip || null,
+    needs_search: parsed.needs_search === true,
+  };
 };
 
 // ──────────────────────────────────────────
@@ -260,8 +273,12 @@ Return ONLY valid JSON, no markdown, no explanation:
 
   try {
     const { content } = await callWithFallbackGroq({ messages: [{ role: 'user', content: prompt }], temperature: 0.75, maxTokens: 500, tier: 'fast', workspaceId: user.workspace_id, userId: user.id, sourceJob: 'generate_buyer_profile' });
-    const clean = content.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
+    // NOTE (docs/backend-takeover/AUDIT.md, full audit): switched from a
+    // raw JSON.parse() (already safely caught by this function's own
+    // try/catch) to the tested parseJSONObject utility — same switch
+    // applied to the other 3 raw JSON.parse() calls remaining in this
+    // file.
+    const parsed = parseJSONObject(content, {});
     return {
       name:               parsed.name               || FALLBACK.name,
       role:               parsed.role               || FALLBACK.role,
@@ -408,8 +425,7 @@ Return ONLY valid JSON:
 
   try {
     const { content } = await callWithFallbackGroq({ messages: [{ role: 'user', content: prompt }], temperature: 0.3, maxTokens: 200, tier: 'fast' });
-    const clean  = content.replace(/```json|```/g, '').trim();
-    return { ...FALLBACK, ...JSON.parse(clean) };
+    return { ...FALLBACK, ...parseJSONObject(content, {}) };
   } catch (err) {
     console.error('[Groq] evaluateBuyerStateChange FAILED:', err.message);
     return FALLBACK;
@@ -452,8 +468,7 @@ Return ONLY valid JSON:
 
   try {
     const { content } = await callWithFallbackGroq({ messages: [{ role: 'user', content: prompt }], temperature: 0.3, maxTokens: 200, tier: 'fast', workspaceId: user.workspace_id, userId: user.id, sourceJob: 'evaluate_ghost_quality' });
-    const clean  = content.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
+    const parsed = parseJSONObject(content, {});
     return {
       quality_score: parsed.quality_score ?? 25,
       reply_worthy:  parsed.reply_worthy  ?? (parsed.quality_score >= 40),
@@ -574,21 +589,25 @@ Return ONLY valid JSON:
 
   try {
     const { content } = await callWithFallbackGroq({ messages: [{ role: 'user', content: prompt }], temperature: 0.88, maxTokens: 500, tier: 'quality', workspaceId: user.workspace_id, userId: user.id, sourceJob: 'practice_reply_v2' });
-    try {
-      const clean  = content.replace(/```json|```/g, '').trim();
-      const parsed = JSON.parse(clean);
+    // NOTE (docs/backend-takeover/AUDIT.md, full audit): switched the
+    // inner try/catch's raw JSON.parse() to parseJSONObject, which never
+    // throws. Preserves the original two-tier fallback exactly: if the
+    // response has no usable `reply` field, fall back to
+    // parseTextResponse's plain-text extraction, same as the original
+    // catch block did.
+    const parsed = parseJSONObject(content, null);
+    if (parsed?.reply) {
       return {
-        reply:        parsed.reply || "Not right now, but appreciate the message.",
+        reply:        parsed.reply,
         state_delta:  parsed.state_delta  || { interest_delta: 0, trust_delta: 0, confusion_delta: 0, reasoning: '' },
         coaching_tip: parsed.coaching_tip || null,
       };
-    } catch {
-      return {
-        reply:        parseTextResponse(content, "Not right now, but appreciate the message."),
-        state_delta:  { interest_delta: 0, trust_delta: 0, confusion_delta: 0, reasoning: '' },
-        coaching_tip: null,
-      };
     }
+    return {
+      reply:        parseTextResponse(content, "Not right now, but appreciate the message."),
+      state_delta:  { interest_delta: 0, trust_delta: 0, confusion_delta: 0, reasoning: '' },
+      coaching_tip: null,
+    };
   } catch (err) {
     console.error('[Groq] generatePracticeProspectReplyV2 FAILED:', err.message);
     return { reply: "Not right now, but appreciate the message.", state_delta: { interest_delta: 0, trust_delta: 0, confusion_delta: 0, reasoning: '' }, coaching_tip: null };

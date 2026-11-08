@@ -1263,6 +1263,38 @@ crash. Switched for consistency.
 
 **Fix status:** fixed and verified (syntax check, full test suite).
 
+### 1.44 — LOW — `services/groq-practice.js` full read, consolidates a real duplication (full audit, file 31 of 80)
+**Location:** `backend/src/services/groq-practice.js`, `backend/src/services/groq-coaching.js`
+
+Full read of all 9 exported functions (822 lines, the largest file read in this audit) against the checklist.
+Header comment's claim of a "Bug D" fix (an unused `patience` variable extracted but never referenced in the V3
+prompt) verified genuinely accurate — confirmed its absence in the current `generatePracticeProspectReplyV3`.
+Several functions show real, deliberate coaching-mechanics design (threshold-based buyer behavior at interest
+milestones, drill-type overrides for discovery/CTA practice, pressure-modifier blocks) rather than generic
+prompt templates.
+
+**Real finding, fixed — confirms and resolves the cross-reference flagged in `groq-coaching.js` (1.41):**
+`analyzeMessageQuality` here and `groq-coaching.js`'s inline "quality analysis" were confirmed to be a genuine,
+byte-for-byte duplication — same five regexes, same scoring formula — not just conceptually similar, with
+`groq-coaching.js`'s own comment honestly acknowledging the duplication rather than hiding it. Consolidated:
+exported `analyzeMessageQuality` from this file (was a local, unexported `const` with exactly one internal call
+site, confirmed safe to export), and `groq-coaching.js`'s `generateCoachingTip` now imports and calls it instead
+of maintaining its own copy. Verified the returned object shape matches every downstream field `groq-coaching.js`
+reads from it before making the switch. Checked for a circular-import risk between the two files before adding the
+new import — none exists.
+
+**Five raw `JSON.parse()` calls, switched to the tested utility:** unlike the last several files, this one had
+never adopted `parseJSONObject`/`parseJSONArray` at all (no partial adoption to extend, a first-time import).
+`parseV3Reply`, `generateBuyerProfile`, `evaluateBuyerStateChange`, `evaluateMessageQualityForGhost`,
+`generatePracticeProspectReplyV2` each had a manual fence-strip + raw `JSON.parse()`. All five were already safely
+caught by surrounding `try/catch` blocks with sensible fallbacks — `parseV3Reply`'s catch block had the most
+distinct behavior (falling back to any plain text found before the JSON starts), preserved exactly when switching
+it to a null-fallback-then-explicit-check pattern, since `parseJSONObject` never throws.
+
+**Fix status:** both the duplication consolidation and all five JSON-parsing switches fixed and verified (syntax
+check on both edited files, full test suite). Response shapes preserved exactly in every case — no change to what
+either function returns on success or on a parse failure.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

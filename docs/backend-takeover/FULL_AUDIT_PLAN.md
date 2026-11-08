@@ -113,7 +113,7 @@ ownership-scoping check; a route file does):
 | groq-coaching.js | 🔧 | Well-built prompt logic, no scoping concerns. Five JSON.parse calls switched. Flagged a possible duplication with groq-practice.js to check later. See AUDIT.md 1.41. |
 | groq-onboarding.js | 🔧 | Now fully read (protected — only mechanical fixes made). Two JSON.parse calls switched. Confirms the archetype and SEED_MEMORY findings from earlier files. See AUDIT.md 1.42. |
 | groq-outreach.js | 🔧 | Two JSON.parse calls switched. Good quality-control pattern noted (validate-then-regenerate). See AUDIT.md 1.43. |
-| groq-practice.js | ⏳ | |
+| groq-practice.js | 🔧 | Resolves the flagged groq-coaching.js duplication — confirmed byte-for-byte identical, consolidated. Five JSON.parse calls switched (first-time adoption). See AUDIT.md 1.44. |
 | groq-prompts.js | ⏳ | |
 | groq-session.js | ⏳ | |
 | groq.js | ⏳ | Only generateDailyTips/generateDailyTip/generateMultiAxisScores call sites seen |

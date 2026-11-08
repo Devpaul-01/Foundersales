@@ -5,6 +5,7 @@
 // ============================================================
 
 import { parseTextResponse, parseJSONArray, parseJSONObject } from '../utils/parser.js';
+import { analyzeMessageQuality } from './groq-practice.js';
 import { callWithFallbackGroq }             from './multiProvider.js';
 import {
   SYSTEM_PROMPTS,
@@ -120,19 +121,11 @@ ${backgroundFacts.map(f => `- ${f.fact}`).join('\n')}` : ''}`;
 export const generateCoachingTip = async (user, userMessage, scenarioType, prospectResponse) => {
   const vp = user.voice_profile || {};
 
-  // Inline quality analysis (mirrors analyzeMessageQuality in groq-practice.js)
-  const words      = userMessage.trim().split(/\s+/).filter(Boolean);
-  const wordCount  = words.length;
-  const hasMetric  = /\d+%|\d+x|\$[\d,]+|\d+\s*(day|week|month|hour|minute|customer|user|client)/i.test(userMessage);
-  const hasQuestion = userMessage.includes('?');
-  const hasResultWord = /(result|outcome|increase|decrease|improve|grow|save|double|triple|reduce|boost|generate|revenue|close)/i.test(userMessage);
-  const isPersonalized = /(you |your |noticed|saw|read|following|posted|mentioned|struggling|dealing with)/i.test(userMessage);
-  const q = {
-    wordCount, tooLong: wordCount > 50, veryLong: wordCount > 80,
-    vague: !hasMetric && !hasResultWord, noAsk: !hasQuestion,
-    noPersonalization: !isPersonalized, hasMetric, hasQuestion, hasResultWord, isPersonalized,
-    score: (hasMetric ? 1 : 0) + (hasQuestion ? 1 : 0) + (hasResultWord ? 1 : 0) + (isPersonalized ? 1 : 0),
-  };
+  // NOTE (docs/backend-takeover/AUDIT.md, full audit): this used to be a
+  // byte-for-byte inline copy of groq-practice.js's analyzeMessageQuality,
+  // with a comment honestly acknowledging the duplication. Consolidated
+  // into the one, now-exported, shared implementation instead.
+  const q = analyzeMessageQuality(userMessage);
 
   const outcomeContext = {
     interested:      'The prospect was curious and engaged.',

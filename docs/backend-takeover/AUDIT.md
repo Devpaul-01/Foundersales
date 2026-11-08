@@ -1244,6 +1244,25 @@ neither a live crash. Switched for consistency.
 **Fix status:** fixed and verified (syntax check, full test suite). Purely mechanical — no prompt content,
 business logic, or protected onboarding behavior changed.
 
+### 1.43 — LOW — `services/groq-outreach.js` full read (full audit, file 30 of 80)
+**Location:** `backend/src/services/groq-outreach.js`
+
+Full read of all 6 exported functions against the checklist. No DB queries — pure prompt-construction and
+non-AI business logic. `generateOutreachMessage`'s avoid-phrases validate-then-regenerate pattern (check the
+output against the user's own "don't sound like this" list, and if violated, retry once with an explicit
+correction instruction) is a genuinely good quality-control mechanism, not just generate-and-hope.
+`summarizePerformancePatterns`'s pure-JS stats derivation (platform/style/length win-rate bucketing) has a
+sensible minimum-sample-size guard (`sent >= 2`) before a bucket is allowed to be called "best."
+
+**Two raw `JSON.parse()` calls, switched to the tested utilities:** `scoreOpportunities` and
+`evaluateMessageStrength` both had a manual fence-strip + raw `JSON.parse()`, despite `parseJSONObject` already
+being imported and used elsewhere in this same file (`generateEventPrep`) — same "already uses the utility
+elsewhere, missed a couple of spots" pattern now found in three files in a row (`exa.js` 1.39,
+`groq-onboarding.js` 1.42, this file). Both already safely caught locally with sensible fallbacks, neither a live
+crash. Switched for consistency.
+
+**Fix status:** fixed and verified (syntax check, full test suite).
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

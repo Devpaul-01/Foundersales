@@ -4,7 +4,7 @@
 //                  performance summarization, and event prep
 // ============================================================
 
-import { parseTextResponse, parseJSONObject, validateAndFill } from '../utils/parser.js';
+import { parseTextResponse, parseJSONObject, parseJSONArray, validateAndFill } from '../utils/parser.js';
 import { callWithFallbackGroq } from './multiProvider.js';
 import { SYSTEM_PROMPTS }       from './groq-prompts.js';
 
@@ -130,8 +130,13 @@ Return ONLY: [{"index": 0, "fit_score": 7, "timing_score": 8, "intent_score": 6}
       tier:        'quality',
       workspaceId: user.workspace_id, userId: user.id, sourceJob: 'score_opportunities',
     });
-    const clean   = content.replace(/```json|```/g, '').trim();
-    const scores  = JSON.parse(clean);
+    // NOTE (docs/backend-takeover/AUDIT.md, full audit): switched from a
+    // raw JSON.parse() — already safely caught by this function's own
+    // try/catch, not a live crash — to the tested parseJSONArray
+    // utility, consistent with parseJSONObject already being used
+    // elsewhere in this same file (generateEventPrep). Same switch
+    // applied to evaluateMessageStrength's parse below.
+    const scores = parseJSONArray(content, []);
     return opportunities.map((o, i) => {
       const s = scores.find(x => x.index === i) || {};
       return {
@@ -179,8 +184,7 @@ Return ONLY: {"score": <0-100>, "strongest_element": "<one phrase from the messa
       tier:        'fast',
       workspaceId: user.workspace_id, userId: user.id, sourceJob: 'evaluate_message_strength',
     });
-    const clean  = content.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
+    const parsed = parseJSONObject(content, { score: 50 });
     return {
       score:             Math.min(100, Math.max(0, parsed.score || 50)),
       strongest_element: parsed.strongest_element || null,

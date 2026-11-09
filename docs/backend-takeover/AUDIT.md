@@ -1295,6 +1295,30 @@ it to a null-fallback-then-explicit-check pattern, since `parseJSONObject` never
 check on both edited files, full test suite). Response shapes preserved exactly in every case — no change to what
 either function returns on success or on a parse failure.
 
+### 1.45 — LOW — `services/groq-prompts.js` full read (full audit, file 32 of 80)
+**Location:** `backend/src/services/groq-prompts.js`
+
+Full read against the checklist. Pure constants/prompt-string builders — no DB queries, no AI-response JSON
+parsing to check (this file produces prompt text, it doesn't parse AI output). `buildChatSystemPrompt`'s
+mood-sensitivity and per-mode instruction blocks are well-built, consistent with the prompt-engineering quality
+seen in several other `groq-*` files this audit has read.
+
+**One real, low-severity finding, flagged rather than fixed:** `getGrowthStrategistPrompt`'s `archetypeOpenings`
+lookup map has 11 keys (`hunter`, `farmer`, `consultant`, `founder`, `freelancer`, `creator`, `closers`,
+`marketer`, `connector`, `operator`, `seller`), but the only function anywhere in this codebase that ever assigns
+`user.archetype` — `detectUserArchetype` in `groq-onboarding.js`, read earlier in this audit — can only ever
+produce one of 6 values (confirmed by that function's own `validArchetypes` allow-list: `seller`, `builder`,
+`freelancer`, `creator`, `professional`, `learner`). This means 6 of the 11 keys here (`hunter`, `farmer`,
+`consultant`, `closers`, `connector`, `operator`) — plus `founder` and `marketer`, which also aren't in the real
+set — can never actually be selected; they'd always silently fall through to the `seller` default. Confirmed
+`getGrowthStrategistPrompt` itself is genuinely live (called from four places in `groq-coaching.js`), so this
+isn't dead code overall — just unreachable branches inside a live function. Not changed: could represent a
+planned future archetype-set expansion rather than leftover cruft, and distinguishing those two possibilities is
+a product decision, not something to guess at. Flagged with a clear comment at the exact spot.
+
+**Fix status:** no functional change. Added a comment documenting the finding rather than leaving it silently
+unreachable for the next person to puzzle over independently.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

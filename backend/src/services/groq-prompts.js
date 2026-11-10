@@ -236,6 +236,21 @@ You sound like the smartest person this ${frame.identity} knows who actually und
 // ROLE-AWARE GROWTH STRATEGIST PROMPT HELPER
 // ──────────────────────────────────────────
 
+// FLAGGED (docs/backend-takeover/AUDIT.md, full audit, not changed):
+// archetypeOpenings below has 11 keys, but the only function in this
+// codebase that ever assigns user.archetype — detectUserArchetype in
+// groq-onboarding.js — can only ever produce one of 6 values ('seller',
+// 'builder', 'freelancer', 'creator', 'professional', 'learner'),
+// confirmed by that function's own validArchetypes allow-list. 'hunter',
+// 'farmer', 'consultant', 'closers', 'connector', 'operator' can never
+// be the stored value, so those 6 entries (and 'founder'/'marketer',
+// which also aren't in the real set) are unreachable — they'd always
+// silently fall through to the 'seller' default below. Not a live bug
+// (harmless, no error, just unreachable code), and getGrowthStrategistPrompt
+// itself is genuinely called from several places in groq-coaching.js, so
+// not removing these entries unilaterally — they may represent a
+// planned archetype-set expansion rather than leftover cruft, and that
+// distinction is a product decision, not an engineering one.
 export const getGrowthStrategistPrompt = (user) => {
   const archetype = user?.archetype?.toLowerCase() || 'seller';
   

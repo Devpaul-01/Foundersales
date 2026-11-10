@@ -5,6 +5,7 @@
 // ============================================================
 
 import { callWithFallbackGroq } from './multiProvider.js';
+import { parseJSONObject, parseJSONArray } from '../utils/parser.js';
 
 // ──────────────────────────────────────────
 // SESSION DEBRIEF — V1
@@ -68,8 +69,12 @@ Return ONLY this JSON:
       tier:        'quality',
       workspaceId: user.workspace_id, userId: user.id, sourceJob: 'generate_session_debrief',
     });
-    const clean  = content.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
+    // NOTE (docs/backend-takeover/AUDIT.md, full audit): switched from a
+    // raw JSON.parse() to the tested parseJSONObject utility, which
+    // never throws — consistent fix applied to every raw JSON.parse()
+    // call in this file (this file had never adopted the utility before
+    // this pass, same as groq-practice.js).
+    const parsed = parseJSONObject(content, {});
     if (!parsed.strength || !parsed.improvement) return FALLBACK;
     return { ...FALLBACK, ...parsed };
   } catch (err) {
@@ -165,8 +170,8 @@ Return ONLY this JSON:
       tier:        'quality',
       workspaceId: user.workspace_id, userId: user.id, sourceJob: 'generate_session_debrief_v3',
     });
-    const clean  = content.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
+    // Same switch as generateSessionDebrief above.
+    const parsed = parseJSONObject(content, {});
     if (!parsed.strength || !parsed.improvement) return FALLBACK;
     return { ...FALLBACK, ...parsed, monologue_insights: parsed.monologue_insights || [] };
   } catch (err) {
@@ -252,9 +257,8 @@ Only return the JSON array. No explanation, no markdown.`;
       tier:        'quality',
       workspaceId: user.workspace_id, userId: user.id, sourceJob: 'generate_coaching_annotations',
     });
-    const clean  = content.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
-    return Array.isArray(parsed) ? parsed : [];
+    // Same switch as generateSessionDebrief above, array variant.
+    return parseJSONArray(content, []);
   } catch (err) {
     console.error('[Groq] generateCoachingAnnotations FAILED:', err.message);
     return [];
@@ -338,8 +342,8 @@ Return ONLY this JSON:
       tier:        'quality',
       workspaceId: user.workspace_id, userId: user.id, sourceJob: 'generate_multi_axis_scores',
     });
-    const clean  = content.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
+    // Same switch as generateSessionDebrief above.
+    const parsed = parseJSONObject(content, {});
     if (!parsed.axes || parsed.session_score == null) return FALLBACK;
     return { ...FALLBACK, ...parsed };
   } catch (err) {
@@ -434,8 +438,8 @@ Return ONLY this JSON:
       tier:        'quality',
       workspaceId: user.workspace_id, userId: user.id, sourceJob: 'generate_multi_axis_scores_v3',
     });
-    const clean  = content.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(clean);
+    // Same switch as generateSessionDebrief above.
+    const parsed = parseJSONObject(content, {});
     if (!parsed.axes || parsed.session_score == null) return FALLBACK;
     return { ...FALLBACK, ...parsed };
   } catch (err) {
@@ -531,8 +535,22 @@ Return ONLY this JSON:
       tier:        'quality',
       workspaceId: user.workspace_id, userId: user.id, sourceJob: 'generate_adaptive_curriculum',
     });
-    const clean  = content.replace(/```json|```/g, '').trim();
-    return JSON.parse(clean);
+    // NOTE (docs/backend-takeover/AUDIT.md, full audit): this used to
+    // return the raw JSON.parse() result directly with no shape
+    // validation at all, unlike every sibling function in this file
+    // (generateSessionDebrief, generateMultiAxisScoresV3 both check for
+    // required fields before accepting the parsed result). Traced the
+    // only caller (growthIntelligenceScheduler.js): it only guards
+    // against a falsy return (`if (!curriculum) continue`), so a
+    // syntactically-valid but structurally-wrong response (e.g. {} or an
+    // object missing `sessions`) would have passed straight through and
+    // been upserted into practice_curriculum as a stored, broken
+    // curriculum the frontend would later need to render — a real
+    // data-quality gap, not just a crash risk. Added the same
+    // required-field check its siblings already use.
+    const parsed = parseJSONObject(content, null);
+    if (!parsed || !Array.isArray(parsed.sessions) || !parsed.weakness_identified) return null;
+    return parsed;
   } catch (err) {
     console.error('[Groq] generateAdaptiveCurriculum FAILED:', err.message);
     return null;
@@ -599,8 +617,16 @@ Return ONLY this JSON:
       tier:        'quality',
       workspaceId: user.workspace_id, userId: user.id, sourceJob: 'generate_playbook',
     });
-    const clean  = content.replace(/```json|```/g, '').trim();
-    return JSON.parse(clean);
+    // NOTE (docs/backend-takeover/AUDIT.md, full audit): same missing-
+    // validation issue found and fixed in generateAdaptiveCurriculum
+    // above. messageQueueWorker.js's handlePlaybook only checks
+    // `if (playbook)` — truthy — before storing this directly into
+    // practice_sessions.playbook and notifying the user it's ready, so a
+    // structurally-wrong-but-truthy parse would have been stored and
+    // shown as a real playbook. Added a required-field check.
+    const parsed = parseJSONObject(content, null);
+    if (!parsed || !parsed.opening_message || !Array.isArray(parsed.discovery_questions)) return null;
+    return parsed;
   } catch (err) {
     console.error('[Groq] generatePlaybook FAILED:', err.message);
     return null;
@@ -647,8 +673,13 @@ Return ONLY this JSON:
       tier:        'quality',
       workspaceId: user.workspace_id, userId: user.id, sourceJob: 'generate_retry_comparison',
     });
-    const clean  = content.replace(/```json|```/g, '').trim();
-    return JSON.parse(clean);
+    // Same missing-validation fix as generatePlaybook/
+    // generateAdaptiveCurriculum above. messageQueueWorker.js only
+    // checks `if (comparison)` before storing this into
+    // practice_sessions.retry_comparison.
+    const parsed = parseJSONObject(content, null);
+    if (!parsed || typeof parsed.improved !== 'boolean' || !parsed.verdict) return null;
+    return parsed;
   } catch (err) {
     console.error('[Groq] generateRetryComparison FAILED:', err.message);
     return null;

@@ -1319,6 +1319,46 @@ a product decision, not something to guess at. Flagged with a clear comment at t
 **Fix status:** no functional change. Added a comment documenting the finding rather than leaving it silently
 unreachable for the next person to puzzle over independently.
 
+### 1.46 — MEDIUM — `services/groq-session.js`: three functions could store malformed AI output as valid data (full audit, file 33 of 80)
+**Location:** `backend/src/services/groq-session.js`, `backend/src/jobs/messageQueueWorker.js`,
+`backend/src/jobs/growthIntelligenceScheduler.js`
+
+Full read of all 8 exported functions (688 lines) against the checklist. This file is the real implementation
+behind several functions already relied on elsewhere in this audit — `generateCoachingAnnotations` (the function
+`messageQueueWorker.js`'s `handleCoachingAnnotations` calls, idempotency-fixed in an earlier milestone) and
+`generateMultiAxisScores` (the one `handleSkillScores` calls, also idempotency-fixed earlier) — both read here in
+full for the first time and confirmed to match what those earlier reads assumed about them.
+
+**Real, MEDIUM-severity finding, found three times, fixed:** `generateAdaptiveCurriculum`, `generatePlaybook`,
+and `generateRetryComparison` all returned a raw `JSON.parse()` result directly with **no shape validation at
+all** — unlike every sibling function in this file (`generateSessionDebrief`, `generateSessionDebriefV3`,
+`generateMultiAxisScores`, `generateMultiAxisScoresV3` all check for required fields before accepting a parsed
+result). Traced every one of the three callers to confirm this was a real, not theoretical, gap:
+- `generateAdaptiveCurriculum` → `growthIntelligenceScheduler.js`'s weekly curriculum job only checks
+  `if (!curriculum) continue` (a falsy check) before `upsert`ing the result into `practice_curriculum`.
+- `generatePlaybook` → `messageQueueWorker.js`'s `handlePlaybook` only checks `if (playbook)` before storing it
+  into `practice_sessions.playbook` and notifying the user their playbook is ready.
+- `generateRetryComparison` → the same file's retry-comparison flow only checks `if (comparison)` before storing
+  it into `practice_sessions.retry_comparison`.
+
+In all three cases, a syntactically-valid but structurally-wrong AI response (e.g. `{}`, or an object missing the
+fields the frontend actually expects to render) would pass straight through these truthy-only checks and get
+persisted as if it were valid, user-facing content — a real data-quality gap, not a crash risk (the original code
+never threw), but a path to storing and displaying broken AI output.
+
+**Fix:** added the same required-field validation pattern already used by this file's own correctly-validated
+siblings to all three functions, so a malformed response now correctly falls back to `null` (matching what each
+caller's existing `if (x)`/`if (!x) continue` check already expected the failure case to look like — no caller
+logic needed to change).
+
+**Seven raw `JSON.parse()` calls total switched to the tested utility** across this file (the three above plus
+four already-validated siblings that just hadn't adopted the parser utility yet) — same mechanical consistency
+fix applied throughout this audit, this file having never adopted it before this pass (same situation as
+`groq-practice.js`, 1.44).
+
+**Fix status:** all fixed and verified (syntax check, full test suite). The three real validation gaps are the
+significant part of this finding — the other four are the now-familiar mechanical cleanup.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

@@ -1359,6 +1359,24 @@ fix applied throughout this audit, this file having never adopted it before this
 **Fix status:** all fixed and verified (syntax check, full test suite). The three real validation gaps are the
 significant part of this finding — the other four are the now-familiar mechanical cleanup.
 
+### 1.47 — INFO — `services/groq.js` full read (full audit, file 34 of 80) — clean, verified against real source exports
+**Location:** `backend/src/services/groq.js`
+
+Full read against the checklist. This is a pure barrel/re-export file aggregating all 6 `groq-*` modules (all
+now read in full earlier in this audit) into one surface, both as named exports and as a default `groqService`
+object. Header comment documents a real, previously-fixed bug: the default-export object used to completely omit
+the entire outreach module (`generateOutreachMessage`, `scoreOpportunities`, etc.), meaning any caller using
+`groqService.generateOutreachMessage(...)` style (rather than a named import) would have silently gotten
+`undefined` and crashed at call time — comment marks it `(ALL - was completely missing)`, confirming this was a
+deliberate, verified fix, not a guess.
+
+**Cross-checked every one of this file's 42 re-exported names against the real `export const` in its actual
+source module** (not spot-checked — every single one, across all 6 `groq-*` files already read in this audit),
+since a typo or stale export name here would be a genuine, if easily-reproduced, runtime bug. All 42 confirmed
+correct.
+
+**Fix status:** no fix needed. Reviewed clean, with a systematic cross-check rather than a surface read.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

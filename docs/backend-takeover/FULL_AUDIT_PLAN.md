@@ -116,7 +116,7 @@ ownership-scoping check; a route file does):
 | groq-practice.js | 🔧 | Resolves the flagged groq-coaching.js duplication — confirmed byte-for-byte identical, consolidated. Five JSON.parse calls switched (first-time adoption). See AUDIT.md 1.44. |
 | groq-prompts.js | 🚩 | Pure prompt builders, clean. Flagged 6 unreachable archetype keys in a live function (not fixed — may be planned expansion). See AUDIT.md 1.45. |
 | groq-session.js | 🔧 | MEDIUM: 3 functions could store malformed AI output as valid data, fixed. 7 JSON.parse calls switched total. See AUDIT.md 1.46. |
-| groq.js | ⏳ | Only generateDailyTips/generateDailyTip/generateMultiAxisScores call sites seen |
+| groq.js | ✅ | Clean barrel file — all 42 re-exports cross-checked against real source exports, all correct. See AUDIT.md 1.47. |
 | groqCalendarIntelligence.js | ⏳ | Only generatePostMeetingFollowUp's call site seen |
 | intelligenceReport.js | ⏳ | |
 | multiProvider.js | ⏳ | Only callWithFallbackGroq's call sites seen |

@@ -143,6 +143,10 @@ protected onboarding flow, where the correct fix shape is a product judgment cal
 - **Consolidate the HTML-escaping helper duplicated across `jobs/emailDigestJob.js` and `services/email.js`**
   (AUDIT.md 1.26, 1.38) — two files now carry an identical small escaping function. Worth extracting into a real
   `utils/escapeHtml.js`, deferred since the fix's urgency was the vulnerability itself, not the duplication.
+- **`synthesizeMeetingNotes` (`services/groqCalendarIntelligence.js`) has no route wired to call it** (AUDIT.md
+  1.48) — a complete, well-built feature (AI debrief + commitment/signal extraction from a live meeting-notes
+  session) with zero live callers. Worth asking the person whether this was meant to ship and got missed, or is
+  intentionally unused for now — not treated as dead code to remove, since it doesn't read like abandoned cruft.
 - **`jobs/emailDigestJob.js` and `services/email.js` use two entirely separate email-sending code paths**
   (AUDIT.md 1.38) — `emailDigestJob.js` has its own independent nodemailer/Gmail transport logic
   (`GMAIL_USER`/`GMAIL_APP_PASSWORD`), while `email.js` is the shared service everything else uses

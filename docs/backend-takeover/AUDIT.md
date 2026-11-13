@@ -1359,6 +1359,58 @@ fix applied throughout this audit, this file having never adopted it before this
 **Fix status:** all fixed and verified (syntax check, full test suite). The three real validation gaps are the
 significant part of this finding — the other four are the now-familiar mechanical cleanup.
 
+### 1.47 — INFO — `services/groq.js` full read (full audit, file 34 of 80) — clean, verified against real source exports
+**Location:** `backend/src/services/groq.js`
+
+Full read against the checklist. This is a pure barrel/re-export file aggregating all 6 `groq-*` modules (all
+now read in full earlier in this audit) into one surface, both as named exports and as a default `groqService`
+object. Header comment documents a real, previously-fixed bug: the default-export object used to completely omit
+the entire outreach module (`generateOutreachMessage`, `scoreOpportunities`, etc.), meaning any caller using
+`groqService.generateOutreachMessage(...)` style (rather than a named import) would have silently gotten
+`undefined` and crashed at call time — comment marks it `(ALL - was completely missing)`, confirming this was a
+deliberate, verified fix, not a guess.
+
+**Cross-checked every one of this file's 42 re-exported names against the real `export const` in its actual
+source module** (not spot-checked — every single one, across all 6 `groq-*` files already read in this audit),
+since a typo or stale export name here would be a genuine, if easily-reproduced, runtime bug. All 42 confirmed
+correct.
+
+**Fix status:** no fix needed. Reviewed clean, with a systematic cross-check rather than a surface read.
+
+### 1.48 — INFO — `services/groqCalendarIntelligence.js` full read; corrects a mistake from an earlier audit entry (full audit, file 35 of 80)
+**Location:** `backend/src/services/groqCalendarIntelligence.js`, `backend/src/services/calendarCommitmentsSignals.js`
+
+Full read of all 10 exported functions (660 lines) against the checklist. Already correctly uses
+`parseJSONObject`/`parseJSONArray` throughout — no raw `JSON.parse()` to fix in this file.
+
+**This corrects a mistake made earlier in this audit (1.36), stated plainly rather than quietly fixed:** that
+entry flagged `calendarCommitmentsSignals.js`'s comment — which claims `extractCommitmentsFromText` and
+`generateSignalAnalysis` (both in this file) are "still used by `synthesizeMeetingNotes`" — as inaccurate, based
+on a repo-wide grep that found no call sites. That grep was flawed: it excluded this function's own file from the
+search (`grep -v "groqCalendarIntelligence.js:\|..."`, meant to filter out comment-only mentions, but it filtered
+out the real call site too, since `synthesizeMeetingNotes` is defined in that same file). Having now read the file
+directly: `synthesizeMeetingNotes` (line 472) genuinely does call both functions, exactly as the original comment
+claimed. The original comment was correct; last pass's flag of it was wrong, caused by a search methodology
+mistake, not a reasoning mistake about what the grep result meant.
+
+**What is genuinely true, and the real (much narrower) finding:** `synthesizeMeetingNotes` itself has zero callers
+anywhere in the codebase — confirmed by a corrected, properly-scoped grep this time. So the two leaf functions are
+reachable in principle but the one thing that calls them is itself unreachable. Not treating this as dead code to
+remove: `synthesizeMeetingNotes` reads as a deliberately-built, complete feature (AI debrief + commitment/signal
+extraction from a live meeting-notes session, paired with `generateMeetingNotesResponse`'s live, in-session partner)
+that simply has no route wired to trigger it yet — not obviously-abandoned cruft the way the confirmed-dead
+`handleReply`/`handleGhost` in `messageQueueWorker.js` were. Corrected both this file's comment and the earlier
+audit entry rather than leaving the wrong conclusion on record.
+
+Everything else in this file reads well: `generatePostMeetingFollowUp`'s three-variant (brief/substantive/
+re-engagement) follow-up generation incorporates actual commitment and signal data into the prompt rather than
+generating generically, `generateWeeklyPatternInsights` has a sensible "not enough data" early return, and
+`generateMeetingNotesResponse`'s end-of-meeting detection and live-partner behavior is a genuinely interesting,
+well-built interaction pattern.
+
+**Fix status:** no functional code changed in this file. Corrected the stale/incorrect comment in
+`calendarCommitmentsSignals.js` and this audit's own earlier (wrong) entry about it.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

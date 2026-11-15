@@ -1487,6 +1487,49 @@ enabled, so with Redis down it would report in-memory-cooled keys as "healthy". 
 
 **Fix status:** fixed and verified (syntax check, regression test, live Redis check, full suite).
 
+### 1.51 — HIGH — `services/redis.js`: every Redis call hung forever when Redis was down; reopens a file earlier marked clean (found while auditing files 36-37)
+**Location:** `backend/src/services/redis.js` (`getClient`), `backend/src/config/limiters.js` (`buildLimiter`)
+
+This reopens `redis.js`, previously recorded as fully fixed and live-verified (1.12). That verification exercised the
+*working* Redis and the *unconfigured* (`REDIS_URL` unset) cases, never "configured but unreachable" or "Redis dies
+after connecting" — and the whole codebase is written to fail open on those. They did not.
+
+**Reproduced live (local `redis-server`, node-redis 5.12.1), two distinct hangs:**
+1. *Unreachable at startup* (`REDIS_URL=redis://127.0.0.1:1`): `getClient()` awaited `client.connect()` with no timeout.
+   node-redis' default reconnect strategy retries forever, so `connect()` never rejects; `getCache()` was still pending
+   after 12s, on two consecutive calls. Nothing was cached on failure, so each call also created a new client that
+   kept retrying in the background (a leak).
+2. *Redis dies after connecting:* with the default offline queue, commands issued while node-redis reconnects wait
+   until Redis returns; `getCache()` was still pending after 10s.
+
+**Impact:** every caller's `try/catch`-and-fail-open design was unreachable in a real outage; the request simply stalled.
+That includes `multiProvider.isKeyCooling` (called per key on every AI call), the auth/workspace caches, distributed
+locking in `concurrencyGuard`, and rate limiting. A Redis outage would have stalled the API rather than degrading it.
+
+**Fix (`redis.js`):** bound the initial connect (3s) and destroy the never-connected client; remember a failed attempt
+for 30s so requests don't each pay the timeout; coalesce concurrent callers onto one connect attempt; create the client
+with `disableOfflineQueue: true` so commands issued while reconnecting fail fast (reconnection still happens in the
+background). All existing helpers already catch and return null/false, so no caller changed.
+
+**Verified live, four scenarios:** unreachable -> `null` after 3.0s, then 0ms on later calls (was: hang); healthy -> 20
+concurrent first callers all round-trip with a single "Connected"; Redis killed mid-life -> `null` in 1ms (was: hang);
+Redis restarted -> auto-recovered without a process restart. New `src/services/__tests__/redis.test.js`: with the
+original file it times out (hangs); with the fix it passes. Full suite 27/27.
+
+**Second-order effect I introduced and had to handle (`limiters.js`):** making Redis fail fast turned the mid-life hang
+into an error for rate-limited routes. Tested with the real store: with the existing `buildLimiter` config, a Redis
+outage returned `500 {"err":"The client is offline"}`; with `passOnStoreError: true` it returned 200. Nearly every
+route (including `/login`) sits behind one of these limiters, so I added `passOnStoreError: true` to `buildLimiter`,
+consistent with `redis.js`'s own stated philosophy. **This is a deliberate tradeoff, flagged for the owner:** during a
+mid-life Redis outage requests are not rate limited at all (the boot-time fallback is per-instance in-memory limiting;
+this case has none). If you would rather fail closed on e.g. the auth limiter, remove that line (comment says how).
+Only `buildLimiter` was touched; `limiters.js` still gets its own full read.
+
+**Not changed / limits of verification:** the in-flight-command case (a connection that stalls without closing) is not
+covered by a command timeout; `config/bullmq.js` uses a separate IORedis client and was not touched.
+
+**Fix status:** fixed and verified live (see above).
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

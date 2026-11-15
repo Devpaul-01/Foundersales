@@ -105,6 +105,17 @@ async function buildLimiter({ namespace, windowMs, max, message, keyGenerator = 
     keyGenerator,
     message: { error: 'RATE_LIMIT_EXCEEDED', message },
     store,
+    // Full audit 1.51: fail OPEN if the Redis store errors mid-life (e.g.
+    // "The client is offline" while node-redis reconnects). Without this,
+    // express-rate-limit's default forwards the store error to the error
+    // handler and every rate-limited route (most of the API, including
+    // /login) returns 500 for the duration of a Redis outage. This matches
+    // redis.js's stated failure philosophy (an outage degrades the
+    // precision of rate limiting, never takes features down). Tradeoff, on
+    // purpose: during such an outage requests are not rate limited at all
+    // (the boot-time fallback is per-instance in-memory limiting; this
+    // mid-life case has no such fallback). Remove this line to fail closed.
+    passOnStoreError: true,
     ...(skip ? { skip } : {}),
   });
 }

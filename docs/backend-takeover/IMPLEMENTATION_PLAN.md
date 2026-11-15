@@ -163,6 +163,10 @@ protected onboarding flow, where the correct fix shape is a product judgment cal
   its whole catalog incl. paid models; (3) no explicit `fetch` timeout, and an unreadable/invalid 200 body aborts the
   chain as `NON_RETRYABLE`; (4) a 429 cools the whole key for 1h though limits may be per-model (unverified).
 
+- **Rate limiting fails OPEN during a mid-life Redis outage** (AUDIT.md 1.51) — I set `passOnStoreError: true` in
+  `limiters.js`'s `buildLimiter` because the alternative was 500s on nearly every route. Decision for the owner:
+  accept that (current), or fail closed / add an in-memory fallback for sensitive limiters such as auth.
+
 - **Duplicate workspace-switch endpoints** (AUDIT.md 1.4) — see DECISIONS.md. Not removing either without
   confirming the frontend's actual usage, since frontend changes are out of scope and I can't verify which one（s）
   it calls without reading frontend code, which is permitted to *read* for this purpose even though not to *change*.

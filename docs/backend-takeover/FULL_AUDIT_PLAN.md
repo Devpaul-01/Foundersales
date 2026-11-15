@@ -122,7 +122,7 @@ ownership-scoping check; a route file does):
 | multiProvider.js | 🚩 | Fully read. Stale header comment fixed (claimed old classifier functions were still present). Four design concerns flagged, not fixed (no provider-level short-circuit, unbounded OpenRouter discovery, no fetch timeout / unreadable-body handling, per-key vs per-model 429 cooldown). Duplicate-token-on-stream-failure suspicion traced and ruled out. See AUDIT.md 1.49. |
 | notifications.js | ⏳ | Only notifyUser's call sites seen |
 | prospectDedup.js | ✅ (prior pass) | Fully read for idempotency, milestone 7 |
-| providerCooldown.js | ⏳ | |
+| providerCooldown.js | 🔧 | MEDIUM: the in-memory fallback could never trigger (redis.js helpers never throw), so cooldown silently did nothing without Redis. Fixed, regression test added (fails on old code). Led to a bigger redis.js finding, see 1.51. See AUDIT.md 1.50. |
 | redis.js | ✅ (prior pass) | Full fix + live verification, milestone 6 |
 | storage.js | ⏳ | |
 | streaming.js | ⏳ | |

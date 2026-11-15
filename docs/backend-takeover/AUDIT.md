@@ -1452,6 +1452,41 @@ that was wrong because of `exa.js`, and I fixed the wording before committing.)
 
 **Fix status:** stale comment fixed and verified (syntax check, full suite 23/23). Items 1-4 flagged only.
 
+### 1.50 — MEDIUM — `services/providerCooldown.js`: the "fall back to in-memory" path could never trigger, so key cooldown silently did nothing without Redis (full audit, file 37/80)
+**Location:** `backend/src/services/providerCooldown.js` (also affects `multiProvider.js`, `exa.js`)
+
+Full read (116 lines). Shared Redis-backed (in-memory fallback) key-cooldown used by `multiProvider.js` and `exa.js`.
+
+**Real finding, fixed:** the public dispatchers (`markKeyFailed`, `isKeyCooling`) wrap the Redis path in `try/catch`
+and fall back to the in-memory implementation + `reportDegradedMode(...)` on a thrown error. But the Redis helpers
+they call (`hashIncrementField`, `hashSet`, `hashGetAll` in `redis.js`) catch their own errors and return `null`, and
+`getClient()` returns `null` when `REDIS_URL` is unset — none of them ever throw. So the fallback was unreachable for
+every real "Redis unavailable" case. Concretely, with `REDIS_URL` unset (a supported config: `validateEnv` classifies
+it optional) and the kill switch at its default (ON): `markKeyFailed` logged "cooling down (Redis, cross-instance)"
+while recording nothing anywhere, `isKeyCooling` always returned `false`, and `reportDegradedMode` never fired. A
+known-bad or rate-limited key was therefore retried on every request, on every model — worse than the kill-switch
+(in-memory) path the file claims to degrade to.
+
+**Reproduced, not inferred:** `REDIS_URL` unset, default env -> `isKeyCooling` is `false` right after
+`markKeyFailed`; the same script with `MULTIPROVIDER_REDIS_STATE_ENABLED=false` -> `true`.
+
+**Fix:** `markKeyFailedRedis` and `isKeyCoolingRedis` now call `getRawClient()` first and throw if it is `null`, and
+`markKeyFailedRedis` also throws if either write returns a failure value, so the existing dispatcher `catch` (in-memory
+fallback + degraded-mode report) now actually runs. No change to the Redis-available path.
+
+**Verified:** new `src/services/__tests__/providerCooldown.test.js` (3 tests). Confirmed it has teeth: with the
+original file restored it fails (`expected false to be true`); with the fix it passes. Also ran the working-Redis path
+against a real local Redis (`redis-server` 6399): key cooled, other key not, hash holds `failCount`/`failedAt`, TTL 3600.
+Full suite 26/26.
+
+**Related, discovered while checking the above — see AUDIT.md 1.51:** with `REDIS_URL` set but Redis *unreachable*,
+`redis.js`'s `getClient()` never returns (every Redis call hangs). That is outside this file and is recorded separately.
+
+**Minor, not changed:** `multiProvider.getProviderStatus` (no callers anywhere) reads cooldown state from Redis when
+enabled, so with Redis down it would report in-memory-cooled keys as "healthy". Moot while it has no callers.
+
+**Fix status:** fixed and verified (syntax check, regression test, live Redis check, full suite).
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

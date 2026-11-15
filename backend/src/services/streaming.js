@@ -164,7 +164,10 @@ export const streamAndSave = async ({
         ? content
         : '[Message generation returned an empty response. Please try again.]';
 
-      await supabase
+      // Full audit 1.56: this result used to be ignored. If the write fails
+      // the client is still told "complete" but the row stays empty, so the
+      // reply disappears on reload — and nothing was logged. Log it loudly.
+      const { error: saveError } = await supabase
         .from('chat_messages')
         .update({
           content:         finalContent,
@@ -174,6 +177,9 @@ export const streamAndSave = async ({
           model_used:      modelUsed,
         })
         .eq('id', messageRow.id);
+      if (saveError) {
+        console.error(`[Streaming] FAILED to persist completed message ${messageRow.id} (chat ${chatId}) — reply was streamed to the client but is not saved:`, saveError.message);
+      }
 
       // ─── Atomic message_count increment ──────────────────────────
       // FIX (audit §4.3): increment_chat_stats() takes ONLY p_chat_id.
@@ -232,13 +238,16 @@ export const streamAndSave = async ({
     onError: async (err) => {
       console.error('[Stream] Error:', err.message);
 
-      await supabase
+      const { error: failSaveError } = await supabase
         .from('chat_messages')
         .update({
           content:         '[Message generation failed. Please try again.]',
           delivery_status: 'failed',
         })
         .eq('id', messageRow.id);
+      if (failSaveError) {
+        console.error(`[Streaming] Failed to mark message ${messageRow.id} as failed:`, failSaveError.message);
+      }
 
       if (clientConnected) {
         sendSSE(res, 'error', { message: 'Generation failed. Please try again.' });

@@ -1661,6 +1661,37 @@ Cloudinary is touched); `GET /upload` is scoped by `user_id`, so the unvalidated
 
 **Fix status:** fixed and verified (mocked tests with teeth, full suite).
 
+### 1.56 — LOW — `services/streaming.js`: persistence failures were silent; main chat path now has tests (full audit, file 42/80)
+**Location:** `backend/src/services/streaming.js` (249 lines), traced through `multiProvider.streamWithFallback` and both `streamAndSave` call sites in `routes/chat.js`
+
+Full read. This is the main chat reply path (SSE streaming + persistence) and had no tests.
+
+**Defect, fixed (low severity):** the `UPDATE` that saves the finished reply (`delivery_status: 'delivered'`) and the `UPDATE` that marks a
+failed generation never checked their result. If the save failed, the client was still sent `complete`/`done` while the
+`chat_messages` row stayed empty (`content: ''`, status `sent`), so the reply vanished on reload and **nothing was logged**. Both now log
+the failure with the message and chat ids. Behavior otherwise unchanged (it does not retry; the user still sees the streamed text live).
+
+**Traced and ruled out (checked rather than assumed):**
+- *Crash from the fire-and-forget `onComplete`.* `streamProvider` calls `onComplete?.(...)` without awaiting it and `onComplete` is async, so a
+  rejection would be unhandled. `app.js` and `server.js` install `unhandledRejection` handlers that log and continue, so it cannot crash the process.
+- *`streamAndSave` throwing before any event.* Both `routes/chat.js` call sites wrap it in `try/catch`, send an SSE `error` and end the stream.
+- *`...metadata` spread overriding `role`/`user_id`/`chat_id` in the placeholder insert.* Neither caller passes `metadata`, so it is theoretical today
+  (it would become real if a caller ever passed request-derived data; spread order puts `metadata` last).
+- SSE framing: events carry fixed names and `JSON.stringify`d data, so newline injection is not possible via the current callers.
+
+**Verified:** new `src/services/__tests__/streaming.test.js` (6 tests, Supabase and response mocked): happy path event order and DB state, empty-output
+placeholder, error path, client-disconnect (no SSE but reply still saved), and the two new logging cases. The two logging tests fail on the
+original file; the other four pass on both (they characterize existing behavior). Full suite 42/42.
+
+**Observations, not changed:**
+- `await streamAndSave(...)` resolves **before** the message is persisted and before `done` is sent, because `streamWithFallback` returns as soon as the
+  provider stream ends and `onComplete`'s database work is not awaited. Nothing relies on the opposite today (`onSaved` is designed to fire later),
+  but any future code that assumes "the message is saved once `streamAndSave` returns" would be wrong.
+- If `streamAndSave` throws *after* inserting the placeholder, the row is left `content: ''` / `sent` (the route only closes the SSE stream).
+- An empty model response is saved as a bracketed apology string with status `delivered`, so it is later replayed to the model as a real assistant turn.
+
+**Fix status:** logging fix applied and verified; observations recorded only.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

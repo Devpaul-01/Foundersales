@@ -124,7 +124,7 @@ ownership-scoping check; a route file does):
 | prospectDedup.js | ✅ (prior pass) | Fully read for idempotency, milestone 7 |
 | providerCooldown.js | 🔧 | MEDIUM: the in-memory fallback could never trigger (redis.js helpers never throw), so cooldown silently did nothing without Redis. Fixed, regression test added (fails on old code). Led to a bigger redis.js finding, see 1.51. See AUDIT.md 1.50. |
 | redis.js | 🔧 | REOPENED: earlier live verification missed outage cases. HIGH: every Redis call hung forever when Redis was unreachable/died (node-redis retries forever). Fixed (connect timeout, failure cooldown, coalescing, fail-fast offline queue), verified live in 4 scenarios + regression test. See AUDIT.md 1.51. |
-| storage.js | ⏳ | |
+| storage.js | 🔧 | MEDIUM: extension came from client filename (not validated mime), orphaned Cloudinary object when the metadata insert failed, `deleteFile` ignored a failed row delete. Fixed with 7 mocked tests (4 fail on old code). Dead code noted (`buildAttachmentContext`, audio branch). See AUDIT.md 1.55. |
 | streaming.js | ⏳ | |
 | tokenTracker.js | 🚩 | Read in full, checked against the real SQL function. No code change. Four low-impact observations (quota checks fail open on DB error; non-atomic check/record; global-cap row limit at scale; all providers recorded as 'groq') and `getWorkspaceUsageSummary` has no callers. See AUDIT.md 1.53. |
 | transcription.js | ⏳ | Only transcribeAudio's call site seen |

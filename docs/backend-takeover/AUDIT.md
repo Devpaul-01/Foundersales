@@ -1623,6 +1623,44 @@ here. The scan covers `.from('literal')` and `.rpc(` chains; a `.from(variable)`
 
 **Fix status:** fixed and verified (real-client checks, regression guard with teeth, full suite).
 
+### 1.55 — MEDIUM — `services/storage.js`: client-controlled file extension, orphaned uploads, silent failed delete (full audit, file 41/80)
+**Location:** `backend/src/services/storage.js` (210 lines), traced through `routes/upload.js` and `config/constants.js`
+
+Full read, cross-checked against its two callers (`routes/upload.js`, `services/voiceMemoService.js`) and `UPLOAD_LIMITS`.
+Allowed types are jpeg/png/gif/webp, pdf, text/plain and text/csv; images go up as Cloudinary `image` resources
+(Cloudinary itself rejects non-images), while pdf/txt/csv go up as `raw`, which Cloudinary does not content-check.
+
+**Three real defects, all fixed:**
+1. **Client-controlled extension on raw uploads.** `ext` was taken from the filename (`originalFilename.split('.').pop()`) and
+   passed as Cloudinary's `format`, while the only validation is the *declared* mime type (a client-supplied header).
+   A file sent as `application/pdf` with the name `x.html` (or `.exe`, `.svg`) was stored and served with that extension.
+   It is served from Cloudinary's domain, not the app's origin, so this is not an app-origin XSS, but it let the app be
+   used to host arbitrary-extension content. Now derived from the validated mime type (`pdf`/`txt`/`csv`, else `bin`).
+2. **Orphaned uploads on metadata failure.** The object is uploaded to Cloudinary first, then the `file_uploads` row is
+   inserted. If the insert failed (for example an invalid `chat_id`, which `routes/upload.js` passes through from the request body
+   without checking), the exception was thrown but the Cloudinary object stayed forever, unreferenced. Now removed
+   best-effort (cleanup failure is logged and never masks the real error).
+3. **`deleteFile` reported success on a failed row delete.** The final `delete()` result was ignored, so a DB failure after the
+   Cloudinary object was already destroyed returned success and left a dangling row. Now surfaced as an error, and the delete
+   is also scoped `.eq('user_id', userId)` (ownership was already checked above; this is defense in depth).
+
+**Verified:** new `src/services/__tests__/storage.test.js` (7 tests, Cloudinary and Supabase mocked). Run against the original
+file, the four tests covering changed behavior fail; with the fix all pass. Full suite 36/36. Not verified against a live
+Cloudinary account (no credentials in this environment); the mime-to-extension map was checked only against the allowed-types list.
+
+**Checked and found fine:** `deleteFile` ownership check (row's `user_id` must equal the caller; mismatch rejects before
+Cloudinary is touched); `GET /upload` is scoped by `user_id`, so the unvalidated `chat_id` is not a cross-user exposure
+(`file_uploads` is read nowhere else); `uploadFile` enforces type and size even though `multer` also does.
+
+**Observations, not changed:**
+- `buildAttachmentContext` has **no callers** anywhere, and the `audio` branch in `uploadFile`/`getFileType` is unreachable because
+  `UPLOAD_LIMITS.ALLOWED_TYPES` has no audio types (voice memos use `uploadAudioBuffer`). Dead code, left in place.
+- `uploadAudioBuffer` does no type or size validation itself; it relies entirely on `voiceMemoService.js` (not yet audited, still pending).
+- Uploads are public by URL (default Cloudinary `upload` delivery type, unguessable UUID path). Reasonable for this design, but access
+  control is obscurity, not authorization; worth a conscious decision if any uploads are sensitive.
+
+**Fix status:** fixed and verified (mocked tests with teeth, full suite).
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

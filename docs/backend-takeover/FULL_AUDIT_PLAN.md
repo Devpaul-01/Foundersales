@@ -127,7 +127,7 @@ ownership-scoping check; a route file does):
 | storage.js | 🔧 | MEDIUM: extension came from client filename (not validated mime), orphaned Cloudinary object when the metadata insert failed, `deleteFile` ignored a failed row delete. Fixed with 7 mocked tests (4 fail on old code). Dead code noted (`buildAttachmentContext`, audio branch). See AUDIT.md 1.55. |
 | streaming.js | 🔧 | LOW: persistence UPDATE results were ignored (a failed save left an empty row with nothing logged); now logged. Crash and throw paths traced and ruled out. First tests for this path added (6; 2 fail on old code). Observations on ordering and placeholder rows. See AUDIT.md 1.56. |
 | tokenTracker.js | 🚩 | Read in full, checked against the real SQL function. No code change. Four low-impact observations (quota checks fail open on DB error; non-atomic check/record; global-cap row limit at scale; all providers recorded as 'groq') and `getWorkspaceUsageSummary` has no callers. See AUDIT.md 1.53. |
-| transcription.js | ⏳ | Only transcribeAudio's call site seen |
+| transcription.js | 🔧 | LOW: every failure retried on every key (bad audio re-uploaded up to 10x); now only key faults and transient failures move on. Stale 'cooldown' header claim fixed. 10 tests (4 fail on old code). Lead noted for voiceMemoService (no `r.ok` check on the audio download). See AUDIT.md 1.57. |
 | voiceMemoService.js | ✅ (prior pass) | Fully read for idempotency, milestone 7 |
 
 ### Middleware (5)

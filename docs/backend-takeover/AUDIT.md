@@ -1692,6 +1692,37 @@ original file; the other four pass on both (they characterize existing behavior)
 
 **Fix status:** logging fix applied and verified; observations recorded only.
 
+### 1.57 — LOW — `services/transcription.js`: bad audio re-uploaded to every key; header claimed a cooldown that does not exist (full audit, file 43/80)
+**Location:** `backend/src/services/transcription.js` (85 lines), traced through its only caller `services/voiceMemoService.js`
+
+Full read. A small Groq Whisper client that loops over `GROQ_API_KEY_1..10` and returns `{ text }`.
+
+**Defect, fixed:** every failure, whatever its cause, moved on to the next key. Audio the provider rejects outright (400 bad/empty
+format, 413 too large, 415 unsupported type, 422) was therefore re-uploaded once per configured key (up to 10 times, each a full
+audio upload) and could never succeed. It now reuses the already-audited `classifyProviderError`: only key faults
+(401/403/429) and provider-wide transient failures (5xx, network) go on to the next key; anything else stops after one request.
+The error message keeps its `TRANSCRIPTION_FAILED: ...` form (the caller only stores `err.message` and rethrows).
+
+**Stale comment, fixed:** the header said this module has "same cooldown-on-failure behavior" as `multiProvider.js`; the body (and the
+header's own next sentence) says there is no cooldown. Corrected. I did **not** add a cooldown: it would be a feature, and Groq's
+Whisper limits are probably separate from its chat limits, so sharing the chat key cooldown would be wrong.
+
+**Verified:** new `src/services/__tests__/transcription.test.js` (10 cases, `fetch` stubbed): success, fallback on 401/429, on 503, on a
+network reset, stop-after-one on 400/413/415/422, last-error reporting after all keys fail, and the no-key error. The four
+input-rejection cases fail on the original (it made 3 requests instead of 1); the rest pass on both. Full suite 52/52.
+Not verified against the real Groq API (no key here).
+
+**Behavior change to know about:** a `200` response with an unparseable body now stops after one attempt (it is not a `ProviderCallError`,
+so it classifies as non-retryable) where it previously tried the next key. Judged acceptable and rare.
+
+**Observations, not changed:**
+- No request timeout on the upload (same as `multiProvider.js`, 1.49), so a stalled connection waits on the runtime default.
+- *Lead for `voiceMemoService.js` (still pending):* it downloads the stored audio with `fetch(audioUrl).then(r => r.arrayBuffer())` and never
+  checks `r.ok`; a 404/403 from Cloudinary would hand an HTML error page to the transcriber as if it were audio.
+- The key-pool parsing is a third copy of `multiProvider.buildKeyPool`; a small duplication, not worth a shared helper on its own.
+
+**Fix status:** fixed and verified (tests with teeth, full suite).
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

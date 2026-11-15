@@ -2,6 +2,11 @@
 // ============================================================
 // AUDIO TRANSCRIPTION — Groq Whisper-compatible endpoint
 //
+// NOTE (full audit 1.57): an earlier version of this header claimed "same
+// cooldown-on-failure behavior" as multiProvider.js. This module has no
+// cooldown (see transcribeAudio below). What it now shares with
+// multiProvider.js is the error CLASSIFICATION (utils/providerErrors.js).
+//
 // multiProvider.js's callWithFallback/callWithFallbackGroq are shaped for
 // /chat/completions (JSON in, JSON out) and cannot be reused directly for
 // audio transcription, which requires a multipart/form-data POST to a
@@ -18,6 +23,8 @@
 // transcription today, so there is no meaningful multi-provider fallback
 // to build here yet. If that changes, this is the module to extend.
 // ============================================================
+
+import { ProviderCallError, classifyProviderError } from '../utils/providerErrors.js';
 
 const GROQ_BASE_URL = 'https://api.groq.com/openai/v1';
 const WHISPER_MODEL = 'whisper-large-v3-turbo'; // Groq's fast Whisper-compatible model
@@ -60,15 +67,23 @@ export const transcribeAudio = async (audioData, { mimeType, filename = 'audio.w
       form.append('model', WHISPER_MODEL);
       form.append('response_format', 'json');
 
-      const res = await fetch(`${GROQ_BASE_URL}/audio/transcriptions`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${apiKey}` },
-        body: form,
-      });
+      let res;
+      try {
+        res = await fetch(`${GROQ_BASE_URL}/audio/transcriptions`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${apiKey}` },
+          body: form,
+        });
+      } catch (networkErr) {
+        throw new ProviderCallError(networkErr.message, {
+          providerId: 'groq',
+          networkErrorCode: networkErr.cause?.code || null,
+        });
+      }
 
       if (!res.ok) {
         const errText = await res.text().catch(() => res.statusText);
-        throw new Error(`HTTP ${res.status}: ${errText}`);
+        throw new ProviderCallError(`HTTP ${res.status}: ${errText}`, { status: res.status, providerId: 'groq' });
       }
 
       const data = await res.json();
@@ -76,6 +91,14 @@ export const transcribeAudio = async (audioData, { mimeType, filename = 'audio.w
     } catch (err) {
       lastError = err;
       console.warn(`[Transcription] Groq key attempt failed: ${err.message}`);
+      // Full audit 1.57: previously EVERY failure moved on to the next key, so
+      // audio the provider rejects outright (400/413/415/422: wrong format,
+      // too large, empty) was re-uploaded once per configured key (up to 10
+      // times) and could never succeed. Only key faults (401/403/429) and
+      // provider-wide transient failures (5xx, network) are worth another
+      // key; anything else is about the request itself, so stop.
+      const category = classifyProviderError(err);
+      if (category !== 'KEY_FAULT' && category !== 'PROVIDER_TRANSIENT') break;
     }
   }
 

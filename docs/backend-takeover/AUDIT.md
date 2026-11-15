@@ -1610,6 +1610,9 @@ Confirmed it fails on the original code listing all 7 sites and passes on the fi
 **Behavior changes the owner should expect (these are corrections, but visible):**
 1. Growth pushes will start being throttled for real (the cap/gap now see their own log), so users may receive **fewer** pushes than before.
 2. `push_notification_log` and `job_logs` will begin accumulating rows; I did not check whether either has a retention/cleanup job.
+   **CORRECTION (see 1.59):** I overstated this for `job_logs`. The growth push job's *'completed'* rows pass `{ sent, ... }` and `job_logs` has
+   no `sent` column, so those inserts would still have been rejected by PostgREST (silently) after the `.catch` fix. 'started' and 'failed' rows
+   were fine. Fixed in 1.59 by routing that job through the shared `logJob`.
 3. Practice badges will begin being awarded (eligibility is computed from current totals, so earned badges appear on the next qualifying session).
 4. Deleting a practice session with a chat now succeeds and removes its messages.
 
@@ -1744,6 +1747,49 @@ file; both pass with the fix. Full suite 54/54. Not tested against Cloudinary's 
 and only fails when someone first uploads a file. Whether Cloudinary should count as required or optional is a deployment decision.
 
 **Fix status:** fixed and verified.
+
+### 1.59 — MEDIUM — `utils/jobHelpers.js`, `utils/logger.js` (+ `jobs/growthPushNotificationJob.js`): job-log failures were invisible, 'completed' rows could not insert, logger could throw (full audit, files 45-46/80)
+**Location:** `backend/src/utils/jobHelpers.js`, `backend/src/utils/logger.js`, `backend/src/jobs/growthPushNotificationJob.js` (3 lines)
+
+**1. `logJob`'s error handling could never fire (the "L4" fix did not actually work).** `logJob` wraps
+`await supabaseAdmin.from('job_logs').insert(row)` in `try/catch` and reports a failure to Sentry. But Supabase reports failures as a *returned* `{ error }`,
+not a thrown exception (shown against a real client in 1.54: an unreachable host returns an error object and does not throw). So for exactly the scenario the
+comments describe (an unwritable `job_logs`: migration, RLS, bad column) nothing was warned and nothing reached Sentry. It now reads `{ error }` and throws
+into the existing handling, so the warning and the Sentry report happen. It still never throws out to its caller.
+
+**2. The growth push job's private `logJob3` inserted `...data` straight into `job_logs`.** Its callers pass `{ sent, duration_ms }`, and `job_logs`
+(checked in `schema.sql`) has only `users_processed`, `opportunities_found`, `error_message`, `duration_ms`, `metadata`. `sent` is not a column, so every
+**'completed'** insert was rejected by PostgREST (and silently ignored). 'started' and 'failed' rows were fine. This is what `utils/jobHelpers.js`
+(the LOW-09 "shared helper") already handles by moving unknown keys into the `metadata` jsonb column; `logJob3` is now just an alias of it. The two other direct
+`job_logs` writers were checked: `practice.js:51` uses only real columns.
+
+**3. `logger.js` could throw.** `fmt` called `JSON.stringify` on object values; it throws on circular structures (e.g. an HTTP-client error object) and on BigInt.
+Loggers are usually called from `catch` blocks, where a throw would replace the real error with a `TypeError`. Unserializable values now print as `[unserializable]`.
+Output for normal values is unchanged. Not changed (still a real, separate issue): string values are interpolated raw, so a value containing newlines can forge log lines.
+
+**Verified:** new `utils/__tests__/jobHelpers.test.js` (3) and `utils/__tests__/logger.test.js` (4). Against the original files, four fail (returned-error not reported;
+three logger cases); the other three pass on both, as characterizations (including that `{ sent, duration_ms }` becomes `{ duration_ms, metadata: { sent } }`). The growth job module
+was also imported to confirm the new import binds. Full suite 61/61. Not exercised against a live Supabase `job_logs` table.
+
+**Fix status:** fixed and verified (tests with teeth, module load, full suite).
+
+### 1.60 — INFO — observation-only reviews: `config/sentry.js`, `utils/parseAIJson.js`, `middleware/traceId.js`, `middleware/validate.js` (full audit, files 47-50/80)
+No code changes. Each was read in full.
+
+- **`config/sentry.js` (81 lines).** Fail-open and no-op without `SENTRY_DSN`; `sendDefaultPii: false` is explicit. *Likely issue, unverified:* `initSentry()` is called in `app.js`
+  *after* the file's `import` statements. ES module imports are hoisted, so `express`, `http` and every route module are already loaded when `Sentry.init` runs. With
+  `@sentry/node` 10.x on ESM, automatic tracing/instrumentation generally requires Sentry to be initialized before those modules load (a preloaded `--import` file).
+  Explicit `captureException`/`captureMessage` calls (what this codebase relies on) work regardless; the configured `tracesSampleRate: 0.1` probably produces no auto-traces.
+  Could not be confirmed without a DSN and a Sentry project.
+- **`utils/parseAIJson.js` (25 lines).** Correct for fenced or bare JSON. Known limitation: it removes every triple-backtick *anywhere*, including inside JSON string
+  values, so a field containing a markdown code block would corrupt otherwise valid JSON. Unlikely in outreach content; a safe fix would be a superset (try raw parse first,
+  strip edge fences next, keep the current behavior last). Not applied: low value.
+- **`middleware/traceId.js` (25 lines).** Accepts a client-supplied `X-Trace-Id` verbatim (no length or character check) and echoes it in the response header. **`req.traceId` is read
+  nowhere else in the codebase** (only mounted in `app.js` and `server.js`), so it is not in any log line and there is no log-forging path today; it would become one the moment
+  something logs it. Worth validating at that point.
+- **`middleware/validate.js` (16 lines).** Correct under Express 4.22.2 / zod 3.25.76 (used on 19 routes, 3 with `'query'`). Latent: it assigns `req[source] = result.data`, and in
+  **Express 5 `req.query` is a read-only getter**, so the three `'query'` routes would throw on an Express upgrade. Also returns only `fieldErrors`, so a root-level type failure
+  (body not an object) yields an empty `details`.
 
 ## 2. Suspected / Needs Further Investigation
 

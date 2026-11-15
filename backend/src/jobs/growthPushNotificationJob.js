@@ -13,6 +13,7 @@
 //  - DIMENSION_LABELS
 // ============================================================
 import supabaseAdmin from '../config/supabase.js';
+import { logJob } from '../utils/jobHelpers.js';
 import { notifyUser as nu } from '../services/notifications.js';
 
 const DIMENSION_LABELS2 = {
@@ -20,9 +21,12 @@ const DIMENSION_LABELS2 = {
   personalization: 'Personalization', cta: 'Call to Action', tone: 'Tone Fit',
 };
 
-const logJob3 = async (name, status, data = {}) => {
-  await supabaseAdmin.from('job_logs').insert({ job_name: name, status, ...data }).then(undefined, () => {});
-};
+// Full audit 1.59: this used to be a private copy that inserted `...data`
+// straight into job_logs. Its callers pass `{ sent, duration_ms }`, and
+// job_logs has no `sent` column, so every 'completed' row was rejected by
+// PostgREST. The shared logJob (utils/jobHelpers.js) maps known columns and
+// puts everything else (here: `sent`) into the `metadata` jsonb column.
+const logJob3 = logJob;
 
 const sleep3 = (ms) => new Promise(r => setTimeout(r, ms));
 

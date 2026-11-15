@@ -135,8 +135,8 @@ ownership-scoping check; a route file does):
 |---|---|---|
 | auth.js | ✅ (prior pass) | Fully read, milestone 1 |
 | errorHandler.js | 🔧 (prior pass, partial) | Checked for multer-specific handling only |
-| traceId.js | ⏳ | |
-| validate.js | ⏳ | |
+| traceId.js | 🚩 | Client-supplied trace id echoed unvalidated; `req.traceId` is read nowhere, so no log-forging path today. See AUDIT.md 1.60. |
+| validate.js | 🚩 | Correct on Express 4; latent break on Express 5 (`req.query` is read-only). See AUDIT.md 1.60. |
 | workspace.js | ✅ (prior pass) | Fully read, milestone 1 |
 
 ### Config (9)
@@ -148,7 +148,7 @@ ownership-scoping check; a route file does):
 | firebase.js | ✅ (prior pass) | Fully read, milestone 1 (FIREBASE_SERVICE_ACCOUNT fix) |
 | limiters.js | ⏳ (partial) | Only `buildLimiter` touched (added `passOnStoreError: true`, see AUDIT.md 1.51). Full file not yet read. |
 | rateLimitStore.js | ⏳ | Only its import of getRawClient seen |
-| sentry.js | ⏳ | |
+| sentry.js | 🚩 | Read in full; clean. Likely (unverified) issue: `initSentry()` runs after hoisted imports, so auto-tracing is probably not instrumented. See AUDIT.md 1.60. |
 | supabase.js | ✅ (prior pass) | Fully read, milestone 1 |
 | validateEnv.js | ✅ (prior pass) | Fully read + fixed, milestone 1 |
 
@@ -162,10 +162,10 @@ ownership-scoping check; a route file does):
 |---|---|---|
 | attachmentProcessor.js | ⏳ | |
 | concurrencyGuard.js | 🔧 (prior pass, partial) | Head of file read in milestone 1 recon; not fully read |
-| jobHelpers.js | ⏳ | |
-| logger.js | ⏳ | |
+| jobHelpers.js | 🔧 | MEDIUM: `logJob` ignored Supabase's returned `{ error }`, so the L4 Sentry/warn path never fired for an unwritable job_logs. Fixed; tests (fail on old code). See AUDIT.md 1.59. |
+| logger.js | 🔧 | `JSON.stringify` could throw on circular/BigInt values from inside catch blocks; now safe. Tests (fail on old code). Raw-string log forging noted, not changed. See AUDIT.md 1.59. |
 | pagination.js | ✅ (prior pass) | Has existing test coverage, logic not independently re-read |
-| parseAIJson.js | ⏳ | |
+| parseAIJson.js | ✅ | Read in full; correct. Known limitation: strips triple-backticks inside string values. See AUDIT.md 1.60. |
 | parser.js | ✅ (prior pass) | Has existing test coverage, logic not independently re-read |
 | providerErrors.js | 🚩 | Re-read in full (was test-coverage-only). BAD_MODEL only detected on HTTP 400; a 404-for-unknown-model (unverified) would abort the chain. Flagged. See AUDIT.md 1.52. |
 | reportDegradation.js | ✅ | Clean — correctly in-memory by design, Sentry failure contained. See AUDIT.md 1.52. |

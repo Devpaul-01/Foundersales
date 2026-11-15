@@ -16,6 +16,15 @@ import cloudinary from '../config/cloudinary.js';
 import { UPLOAD_LIMITS } from '../config/constants.js';
 import { v4 as uuidv4 } from 'uuid';
 
+// Extensions for the mime types that upload as Cloudinary 'raw' (images use
+// resource_type 'image' and get no explicit format). Anything not listed
+// falls back to 'bin'.
+const RAW_EXTENSION_BY_MIME = {
+  'application/pdf': 'pdf',
+  'text/plain':      'txt',
+  'text/csv':        'csv',
+};
+
 /**
  * Detect file type category from MIME type
  */
@@ -70,7 +79,11 @@ export const uploadFile = async (buffer, { originalFilename, mimeType, sizeBytes
     throw new Error(`File too large. Maximum size is ${UPLOAD_LIMITS.MAX_SIZE_BYTES / 1024 / 1024}MB.`);
   }
 
-  const ext = originalFilename.split('.').pop() || 'bin';
+  // Full audit 1.55: derive the stored extension from the VALIDATED mime type,
+  // not from the client-supplied filename. Previously a file declared as
+  // application/pdf but named "x.html" was stored and served as ".html"
+  // (raw uploads are not content-checked by Cloudinary).
+  const ext = RAW_EXTENSION_BY_MIME[mimeType] || 'bin';
   const fileType = getFileType(mimeType);
   const resourceType = getResourceType(fileType);
 
@@ -112,7 +125,18 @@ export const uploadFile = async (buffer, { originalFilename, mimeType, sizeBytes
     .select()
     .single();
 
-  if (dbError) throw new Error(`Metadata save failed: ${dbError.message}`);
+  if (dbError) {
+    // Full audit 1.55: the object is already in Cloudinary. Without this
+    // cleanup a failed metadata insert (e.g. an invalid chat_id) left an
+    // orphaned, unreferenced upload behind. Best-effort: never mask the
+    // real error.
+    try {
+      await cloudinary.uploader.destroy(storagePath, { resource_type: resourceType });
+    } catch (cleanupErr) {
+      console.warn(`[Storage] Orphan cleanup failed for ${storagePath}:`, cleanupErr.message);
+    }
+    throw new Error(`Metadata save failed: ${dbError.message}`);
+  }
 
   return {
     url: publicUrl,
@@ -174,10 +198,16 @@ export const deleteFile = async (fileId, userId) => {
     resource_type: file.resource_type || 'image'
   });
 
-  await supabaseAdmin
+  // Full audit 1.55: this used to ignore the result, so a failed row delete
+  // (after the Cloudinary object was already destroyed) still reported
+  // success and left a dangling file_uploads row. Scoped to the owner as
+  // defense in depth (ownership was already checked above).
+  const { error: deleteError } = await supabaseAdmin
     .from('file_uploads')
     .delete()
-    .eq('id', fileId);
+    .eq('id', fileId)
+    .eq('user_id', userId);
+  if (deleteError) throw new Error(`Metadata delete failed: ${deleteError.message}`);
 };
 
 /**

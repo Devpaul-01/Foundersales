@@ -178,6 +178,9 @@ protected onboarding flow, where the correct fix shape is a product judgment cal
   rows (the inserts previously never ran). Not checked whether a cleanup/retention job exists; worth confirming
   so they do not grow unbounded.
 
+- **Uploads are public-by-URL** (AUDIT.md 1.55) — Cloudinary default delivery with an unguessable UUID path. Fine if
+  nothing sensitive is uploaded; otherwise consider authenticated/signed delivery. Product decision.
+
 - **Duplicate workspace-switch endpoints** (AUDIT.md 1.4) — see DECISIONS.md. Not removing either without
   confirming the frontend's actual usage, since frontend changes are out of scope and I can't verify which one（s）
   it calls without reading frontend code, which is permitted to *read* for this purpose even though not to *change*.

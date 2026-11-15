@@ -1623,6 +1623,106 @@ here. The scan covers `.from('literal')` and `.rpc(` chains; a `.from(variable)`
 
 **Fix status:** fixed and verified (real-client checks, regression guard with teeth, full suite).
 
+### 1.55 — MEDIUM — `services/storage.js`: client-controlled file extension, orphaned uploads, silent failed delete (full audit, file 41/80)
+**Location:** `backend/src/services/storage.js` (210 lines), traced through `routes/upload.js` and `config/constants.js`
+
+Full read, cross-checked against its two callers (`routes/upload.js`, `services/voiceMemoService.js`) and `UPLOAD_LIMITS`.
+Allowed types are jpeg/png/gif/webp, pdf, text/plain and text/csv; images go up as Cloudinary `image` resources
+(Cloudinary itself rejects non-images), while pdf/txt/csv go up as `raw`, which Cloudinary does not content-check.
+
+**Three real defects, all fixed:**
+1. **Client-controlled extension on raw uploads.** `ext` was taken from the filename (`originalFilename.split('.').pop()`) and
+   passed as Cloudinary's `format`, while the only validation is the *declared* mime type (a client-supplied header).
+   A file sent as `application/pdf` with the name `x.html` (or `.exe`, `.svg`) was stored and served with that extension.
+   It is served from Cloudinary's domain, not the app's origin, so this is not an app-origin XSS, but it let the app be
+   used to host arbitrary-extension content. Now derived from the validated mime type (`pdf`/`txt`/`csv`, else `bin`).
+2. **Orphaned uploads on metadata failure.** The object is uploaded to Cloudinary first, then the `file_uploads` row is
+   inserted. If the insert failed (for example an invalid `chat_id`, which `routes/upload.js` passes through from the request body
+   without checking), the exception was thrown but the Cloudinary object stayed forever, unreferenced. Now removed
+   best-effort (cleanup failure is logged and never masks the real error).
+3. **`deleteFile` reported success on a failed row delete.** The final `delete()` result was ignored, so a DB failure after the
+   Cloudinary object was already destroyed returned success and left a dangling row. Now surfaced as an error, and the delete
+   is also scoped `.eq('user_id', userId)` (ownership was already checked above; this is defense in depth).
+
+**Verified:** new `src/services/__tests__/storage.test.js` (7 tests, Cloudinary and Supabase mocked). Run against the original
+file, the four tests covering changed behavior fail; with the fix all pass. Full suite 36/36. Not verified against a live
+Cloudinary account (no credentials in this environment); the mime-to-extension map was checked only against the allowed-types list.
+
+**Checked and found fine:** `deleteFile` ownership check (row's `user_id` must equal the caller; mismatch rejects before
+Cloudinary is touched); `GET /upload` is scoped by `user_id`, so the unvalidated `chat_id` is not a cross-user exposure
+(`file_uploads` is read nowhere else); `uploadFile` enforces type and size even though `multer` also does.
+
+**Observations, not changed:**
+- `buildAttachmentContext` has **no callers** anywhere, and the `audio` branch in `uploadFile`/`getFileType` is unreachable because
+  `UPLOAD_LIMITS.ALLOWED_TYPES` has no audio types (voice memos use `uploadAudioBuffer`). Dead code, left in place.
+- `uploadAudioBuffer` does no type or size validation itself; it relies entirely on `voiceMemoService.js` (not yet audited, still pending).
+- Uploads are public by URL (default Cloudinary `upload` delivery type, unguessable UUID path). Reasonable for this design, but access
+  control is obscurity, not authorization; worth a conscious decision if any uploads are sensitive.
+
+**Fix status:** fixed and verified (mocked tests with teeth, full suite).
+
+### 1.56 — LOW — `services/streaming.js`: persistence failures were silent; main chat path now has tests (full audit, file 42/80)
+**Location:** `backend/src/services/streaming.js` (249 lines), traced through `multiProvider.streamWithFallback` and both `streamAndSave` call sites in `routes/chat.js`
+
+Full read. This is the main chat reply path (SSE streaming + persistence) and had no tests.
+
+**Defect, fixed (low severity):** the `UPDATE` that saves the finished reply (`delivery_status: 'delivered'`) and the `UPDATE` that marks a
+failed generation never checked their result. If the save failed, the client was still sent `complete`/`done` while the
+`chat_messages` row stayed empty (`content: ''`, status `sent`), so the reply vanished on reload and **nothing was logged**. Both now log
+the failure with the message and chat ids. Behavior otherwise unchanged (it does not retry; the user still sees the streamed text live).
+
+**Traced and ruled out (checked rather than assumed):**
+- *Crash from the fire-and-forget `onComplete`.* `streamProvider` calls `onComplete?.(...)` without awaiting it and `onComplete` is async, so a
+  rejection would be unhandled. `app.js` and `server.js` install `unhandledRejection` handlers that log and continue, so it cannot crash the process.
+- *`streamAndSave` throwing before any event.* Both `routes/chat.js` call sites wrap it in `try/catch`, send an SSE `error` and end the stream.
+- *`...metadata` spread overriding `role`/`user_id`/`chat_id` in the placeholder insert.* Neither caller passes `metadata`, so it is theoretical today
+  (it would become real if a caller ever passed request-derived data; spread order puts `metadata` last).
+- SSE framing: events carry fixed names and `JSON.stringify`d data, so newline injection is not possible via the current callers.
+
+**Verified:** new `src/services/__tests__/streaming.test.js` (6 tests, Supabase and response mocked): happy path event order and DB state, empty-output
+placeholder, error path, client-disconnect (no SSE but reply still saved), and the two new logging cases. The two logging tests fail on the
+original file; the other four pass on both (they characterize existing behavior). Full suite 42/42.
+
+**Observations, not changed:**
+- `await streamAndSave(...)` resolves **before** the message is persisted and before `done` is sent, because `streamWithFallback` returns as soon as the
+  provider stream ends and `onComplete`'s database work is not awaited. Nothing relies on the opposite today (`onSaved` is designed to fire later),
+  but any future code that assumes "the message is saved once `streamAndSave` returns" would be wrong.
+- If `streamAndSave` throws *after* inserting the placeholder, the row is left `content: ''` / `sent` (the route only closes the SSE stream).
+- An empty model response is saved as a bracketed apology string with status `delivered`, so it is later replayed to the model as a real assistant turn.
+
+**Fix status:** logging fix applied and verified; observations recorded only.
+
+### 1.57 — LOW — `services/transcription.js`: bad audio re-uploaded to every key; header claimed a cooldown that does not exist (full audit, file 43/80)
+**Location:** `backend/src/services/transcription.js` (85 lines), traced through its only caller `services/voiceMemoService.js`
+
+Full read. A small Groq Whisper client that loops over `GROQ_API_KEY_1..10` and returns `{ text }`.
+
+**Defect, fixed:** every failure, whatever its cause, moved on to the next key. Audio the provider rejects outright (400 bad/empty
+format, 413 too large, 415 unsupported type, 422) was therefore re-uploaded once per configured key (up to 10 times, each a full
+audio upload) and could never succeed. It now reuses the already-audited `classifyProviderError`: only key faults
+(401/403/429) and provider-wide transient failures (5xx, network) go on to the next key; anything else stops after one request.
+The error message keeps its `TRANSCRIPTION_FAILED: ...` form (the caller only stores `err.message` and rethrows).
+
+**Stale comment, fixed:** the header said this module has "same cooldown-on-failure behavior" as `multiProvider.js`; the body (and the
+header's own next sentence) says there is no cooldown. Corrected. I did **not** add a cooldown: it would be a feature, and Groq's
+Whisper limits are probably separate from its chat limits, so sharing the chat key cooldown would be wrong.
+
+**Verified:** new `src/services/__tests__/transcription.test.js` (10 cases, `fetch` stubbed): success, fallback on 401/429, on 503, on a
+network reset, stop-after-one on 400/413/415/422, last-error reporting after all keys fail, and the no-key error. The four
+input-rejection cases fail on the original (it made 3 requests instead of 1); the rest pass on both. Full suite 52/52.
+Not verified against the real Groq API (no key here).
+
+**Behavior change to know about:** a `200` response with an unparseable body now stops after one attempt (it is not a `ProviderCallError`,
+so it classifies as non-retryable) where it previously tried the next key. Judged acceptable and rare.
+
+**Observations, not changed:**
+- No request timeout on the upload (same as `multiProvider.js`, 1.49), so a stalled connection waits on the runtime default.
+- *Lead for `voiceMemoService.js` (still pending):* it downloads the stored audio with `fetch(audioUrl).then(r => r.arrayBuffer())` and never
+  checks `r.ok`; a 404/403 from Cloudinary would hand an HTML error page to the transcriber as if it were audio.
+- The key-pool parsing is a third copy of `multiProvider.buildKeyPool`; a small duplication, not worth a shared helper on its own.
+
+**Fix status:** fixed and verified (tests with teeth, full suite).
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

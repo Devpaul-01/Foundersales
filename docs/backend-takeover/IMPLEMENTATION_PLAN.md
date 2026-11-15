@@ -181,6 +181,11 @@ protected onboarding flow, where the correct fix shape is a product judgment cal
 - **Uploads are public-by-URL** (AUDIT.md 1.55) — Cloudinary default delivery with an unguessable UUID path. Fine if
   nothing sensitive is uploaded; otherwise consider authenticated/signed delivery. Product decision.
 
+- **Sentry initialization order** (AUDIT.md 1.60) — `initSentry()` runs after hoisted ES imports, so automatic tracing is probably not
+  instrumented under `@sentry/node` 10.x. If tracing matters, preload Sentry with a `--import` file. Unverified without a DSN.
+- **`validate(schema, 'query')` on an Express 5 upgrade** (AUDIT.md 1.60) — `req.query` becomes read-only; the three `'query'` routes
+  (`growth.js` x2, `opportunities.js`) would need a different way to hand over parsed values.
+
 - **Duplicate workspace-switch endpoints** (AUDIT.md 1.4) — see DECISIONS.md. Not removing either without
   confirming the frontend's actual usage, since frontend changes are out of scope and I can't verify which one（s）
   it calls without reading frontend code, which is permitted to *read* for this purpose even though not to *change*.

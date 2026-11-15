@@ -33,7 +33,13 @@ export const logJob = async (name, status, data = {}) => {
   if (Object.keys(extra).length) row.metadata = extra;
 
   try {
-    await supabaseAdmin.from('job_logs').insert(row);
+    // Full audit 1.59: Supabase reports failures as a returned `{ error }`,
+    // NOT a thrown exception, so the catch below never ran for the exact case
+    // L4 was about (an unwritable job_logs table: migration, RLS, bad column).
+    // Convert the returned error into a throw so the existing warn + Sentry
+    // handling actually fires.
+    const { error } = await supabaseAdmin.from('job_logs').insert(row);
+    if (error) throw new Error(error.message || 'job_logs insert failed');
   } catch (err) {
     // Still must never kill a job — but now at least visible in logs.
     console.warn(`[jobHelpers] logJob failed for "${name}" (${status}):`, err.message);

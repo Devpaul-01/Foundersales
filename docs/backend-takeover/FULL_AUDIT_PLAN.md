@@ -143,7 +143,7 @@ ownership-scoping check; a route file does):
 | File | Status | Note |
 |---|---|---|
 | bullmq.js | ✅ (prior pass) | Full fix + live verification, milestones 1 and 6 |
-| cloudinary.js | ⏳ | |
+| cloudinary.js | 🔧 | MEDIUM: `CLOUDINARY_URL`-only config (the documented form) was wiped by explicit `undefined` values, so every upload would fail. Fixed; child-process tests (URL-only case fails on old code). Cloudinary vars not in validateEnv noted. See AUDIT.md 1.58. |
 | constants.js | 🔧 (prior pass, partial) | Only QUEUE_JOB_TYPES/DELIVERY_STATUS/BACKGROUND_JOB_TYPES entries checked |
 | firebase.js | ✅ (prior pass) | Fully read, milestone 1 (FIREBASE_SERVICE_ACCOUNT fix) |
 | limiters.js | ⏳ (partial) | Only `buildLimiter` touched (added `passOnStoreError: true`, see AUDIT.md 1.51). Full file not yet read. |

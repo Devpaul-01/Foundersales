@@ -1723,6 +1723,28 @@ so it classifies as non-retryable) where it previously tried the next key. Judge
 
 **Fix status:** fixed and verified (tests with teeth, full suite).
 
+### 1.58 — MEDIUM — `config/cloudinary.js`: setting only `CLOUDINARY_URL` (as documented) wiped the config, so every upload failed (full audit, file 44/80)
+**Location:** `backend/src/config/cloudinary.js` (18 lines)
+
+The header says the SDK auto-reads a single `CLOUDINARY_URL`. But the file then called `cloudinary.config({ cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+api_key: ..., api_secret: ..., secure: true })` unconditionally. With only `CLOUDINARY_URL` set, those three are `undefined`, and the SDK treats explicit
+`undefined` values as overrides of the URL-derived config.
+
+**Reproduced:** with `CLOUDINARY_URL=cloudinary://KEY123:SECRET456@mycloud` and no discrete vars, `cloudinary.config()` returned no `cloud_name`, no `api_key`
+and no secret (`{"has_secret":false}`); with the three discrete vars it worked. So the advertised single-variable form silently produced an unconfigured
+client, and every `uploadFile` / `uploadAudioBuffer` call (document uploads and voice memos) would fail at runtime with a Cloudinary "must supply" error.
+
+**Fix:** only pass the discrete variables that are actually set (`secure: true` is always passed). Both forms now work.
+
+**Verified:** new `src/config/__tests__/cloudinary.test.js` runs each configuration in a child process (the SDK keeps global state that a module reset cannot
+clear): URL-only gives `mycloud` / `KEY123` / secret present / `secure: true`; discrete vars give the expected values. The URL-only test fails on the original
+file; both pass with the fix. Full suite 54/54. Not tested against Cloudinary's servers (no account here).
+
+**Observation, not changed:** `config/validateEnv.js` does not mention any `CLOUDINARY_*` variable, so a deployment with Cloudinary unconfigured boots cleanly
+and only fails when someone first uploads a file. Whether Cloudinary should count as required or optional is a deployment decision.
+
+**Fix status:** fixed and verified.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

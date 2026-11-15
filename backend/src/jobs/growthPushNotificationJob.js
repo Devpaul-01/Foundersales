@@ -21,7 +21,7 @@ const DIMENSION_LABELS2 = {
 };
 
 const logJob3 = async (name, status, data = {}) => {
-  await supabaseAdmin.from('job_logs').insert({ job_name: name, status, ...data }).catch(() => {});
+  await supabaseAdmin.from('job_logs').insert({ job_name: name, status, ...data }).then(undefined, () => {});
 };
 
 const sleep3 = (ms) => new Promise(r => setTimeout(r, ms));
@@ -193,7 +193,7 @@ const getHoursSinceLastPush2 = async (userId) => {
   return (Date.now() - new Date(latest.sent_at).getTime()) / 3600000;
 };
 const logPushSent2 = async (userId, pushType, title) => {
-  await supabaseAdmin.from('push_notification_log').insert({ user_id: userId, push_type: pushType, title: title?.slice(0, 200) || null, sent_at: new Date().toISOString() }).catch(() => {});
+  await supabaseAdmin.from('push_notification_log').insert({ user_id: userId, push_type: pushType, title: title?.slice(0, 200) || null, sent_at: new Date().toISOString() }).then(undefined, () => {});
 };
 
 export default { runMorningGrowthPush, runEveningGrowthPush };

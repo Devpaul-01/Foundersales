@@ -69,7 +69,7 @@ ownership-scoping check; a route file does):
 | onboarding.js | 🔧 | Protected file — only trivial whitespace/comment cleanup made. Sharpened the SEED_MEMORY flag from milestone 7 with full context. See AUDIT.md 1.20. |
 | opportunities.js | ✅ (prior pass) | Reviewed in original engagement's milestones 1-2 |
 | pipeline.js | 🔧 | Two verified-then-unscoped mutations tightened (stage update, assign update). See AUDIT.md 1.21. |
-| practice.js | ✅ (prior pass) | Reviewed in original engagement's milestone 2 |
+| practice.js | ✅ (prior pass) + 🔧 | 4 lines fixed (badge insert, dead-letter log, 2 session-delete cleanups) for the Supabase `.catch` bug; file not re-read in full here. See AUDIT.md 1.54. |
 | prospects.js | ✅ | Clean — every mutation correctly scoped, Zod .strict() injection guard, correct route ordering. See AUDIT.md 1.22. |
 | suggestions.js | 🔧 | Switched manual JSON.parse to the tested parseJSONArray utility (not a live crash, just more robust/consistent). Noted a two-utility duplication to revisit later. See AUDIT.md 1.23. |
 | upload.js | 🔧 (prior pass, partial) | multer usage checked for the CVE fix; full route logic not reviewed |
@@ -87,7 +87,7 @@ ownership-scoping check; a route file does):
 | emailDigestJob.js | 🔧 | HIGH: unescaped AI/user content in raw email HTML, fixed. Also unsafe JSON.parse replaced. See AUDIT.md 1.26. |
 | followupSequenceJob.js | 🔧 | Unscoped mutation tightened (weaker surrounding protection than other files — this job sweeps cross-workspace by design). Stale constants.js comment fixed. See AUDIT.md 1.27. |
 | growthIntelligenceScheduler.js | 🔧 | Three instances of the same unscoped-query pattern fixed (AI context contamination risk, not a direct leak). See AUDIT.md 1.28. |
-| growthPushNotificationJob.js | 🔧 | One unscoped query fixed (notification-logic leak, not data exposure). push_notification_log's user-only design confirmed deliberate. See AUDIT.md 1.29. |
+| growthPushNotificationJob.js | 🔧 | One unscoped query fixed (notification-logic leak, not data exposure). push_notification_log's user-only design confirmed deliberate. See AUDIT.md 1.29. Later: push-log insert and job-log insert never ran (Supabase `.catch` bug), so the push throttle could not work; fixed, see 1.54. |
 | index.js | ✅ (prior pass) | Reviewed in milestone 3 |
 | memoryExtractionJob.js | 🔧 | Five unscoped mutations tightened, two unsafe JSON.parse calls switched to the tested utility. See AUDIT.md 1.30. |
 | messageQueueWorker.js | ✅ (prior pass) | Full idempotency trace + dead code removal, milestone 3 |
@@ -120,13 +120,13 @@ ownership-scoping check; a route file does):
 | groqCalendarIntelligence.js | 🔧 | Clean, already uses parser utilities. Corrects a mistake in an earlier audit entry — synthesizeMeetingNotes genuinely calls the two "flagged" functions; synthesizeMeetingNotes itself is the one with no callers. See AUDIT.md 1.48. |
 | intelligenceReport.js | ⏳ | |
 | multiProvider.js | 🚩 | Fully read. Stale header comment fixed (claimed old classifier functions were still present). Four design concerns flagged, not fixed (no provider-level short-circuit, unbounded OpenRouter discovery, no fetch timeout / unreadable-body handling, per-key vs per-model 429 cooldown). Duplicate-token-on-stream-failure suspicion traced and ruled out. See AUDIT.md 1.49. |
-| notifications.js | ⏳ | Only notifyUser's call sites seen |
+| notifications.js | 🔧 | HIGH: `.catch()` on a Supabase builder (does not exist) threw and never ran the query; same bug at 6 other sites. Fixed all 7, regression guard added. See AUDIT.md 1.54. |
 | prospectDedup.js | ✅ (prior pass) | Fully read for idempotency, milestone 7 |
 | providerCooldown.js | 🔧 | MEDIUM: the in-memory fallback could never trigger (redis.js helpers never throw), so cooldown silently did nothing without Redis. Fixed, regression test added (fails on old code). Led to a bigger redis.js finding, see 1.51. See AUDIT.md 1.50. |
 | redis.js | 🔧 | REOPENED: earlier live verification missed outage cases. HIGH: every Redis call hung forever when Redis was unreachable/died (node-redis retries forever). Fixed (connect timeout, failure cooldown, coalescing, fail-fast offline queue), verified live in 4 scenarios + regression test. See AUDIT.md 1.51. |
 | storage.js | ⏳ | |
 | streaming.js | ⏳ | |
-| tokenTracker.js | ⏳ | |
+| tokenTracker.js | 🚩 | Read in full, checked against the real SQL function. No code change. Four low-impact observations (quota checks fail open on DB error; non-atomic check/record; global-cap row limit at scale; all providers recorded as 'groq') and `getWorkspaceUsageSummary` has no callers. See AUDIT.md 1.53. |
 | transcription.js | ⏳ | Only transcribeAudio's call site seen |
 | voiceMemoService.js | ✅ (prior pass) | Fully read for idempotency, milestone 7 |
 

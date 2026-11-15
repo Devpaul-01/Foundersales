@@ -171,6 +171,13 @@ protected onboarding flow, where the correct fix shape is a product judgment cal
   model, the chain aborts. Possible fix: also allow 404, still gated on the body's model-not-found text. Needs
   confirmation of real provider behavior first (unverified).
 
+- **`getWorkspaceUsageSummary` (`tokenTracker.js`) has no callers** (AUDIT.md 1.53) — complete but unwired, same
+  question as `synthesizeMeetingNotes`: meant to ship, or intentionally unused? Not removed.
+
+- **Check retention for `push_notification_log` and `job_logs`** (AUDIT.md 1.54) — both tables now actually receive
+  rows (the inserts previously never ran). Not checked whether a cleanup/retention job exists; worth confirming
+  so they do not grow unbounded.
+
 - **Duplicate workspace-switch endpoints** (AUDIT.md 1.4) — see DECISIONS.md. Not removing either without
   confirming the frontend's actual usage, since frontend changes are out of scope and I can't verify which one（s）
   it calls without reading frontend code, which is permitted to *read* for this purpose even though not to *change*.

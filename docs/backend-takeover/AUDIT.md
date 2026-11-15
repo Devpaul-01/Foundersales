@@ -1548,6 +1548,81 @@ text) looks low-risk but depends on real provider behavior I cannot check from t
 
 **Fix status:** no code change. Observation recorded in IMPLEMENTATION_PLAN.md.
 
+### 1.53 — LOW — `services/tokenTracker.js` full read; no code change, four observations (full audit, file 39/80)
+**Location:** `backend/src/services/tokenTracker.js` (173 lines), cross-checked against `record_ai_usage()` and `workspace_ai_usage_daily` in `schema.sql`
+
+Verified against the real schema rather than assumed: the `record_ai_usage` function writes the event row and upserts the
+daily rollup in one atomic statement pair (`ON CONFLICT (workspace_id, date, provider) DO UPDATE`), so concurrent writes do
+not lose counts; column names/types used by the readers (`call_count`, `total_tokens`, `total_credits`,
+`estimated_cost_cents`) all exist; `writeUsageEvent` correctly never throws, so a tracking failure can never break a
+completed AI call (also confirmed from the `callWithFallbackGroq` side in 1.49). The JS side computes "today" with
+`toISOString()` (UTC) and the SQL uses `CURRENT_DATE` (database session timezone) — these agree only while the database
+timezone is UTC (the Supabase default); worth knowing if that is ever changed.
+
+**Observations, not changed (all low impact, none verifiable as real problems at current scale):**
+1. *Quota checks fail open on a DB error.* `checkWorkspaceExaUsage` destructures only `data`, never `error`; a failed
+   query yields `used = 0` and `allowed: true`. Plausibly intentional (a DB blip should not block a feature), but it
+   means Exa spend is unmetered during one.
+2. *Check-then-record is not atomic* (callers check, make the Exa call, record afterwards), so concurrent requests can
+   overshoot a daily limit slightly. Standard for this design; bounded by concurrency.
+3. *Global Exa cap reads one row per workspace* via a plain select; PostgREST returns at most 1000 rows by default
+   (I believe — Supabase project setting, not verified here), so with >1000 workspaces using Exa on the same day the
+   global total would be undercounted. Not reachable at small scale.
+4. *All multi-provider AI usage is recorded under `provider: 'groq'`* even when Cerebras/Mistral/OpenRouter served the
+   call (the real provider survives only in the `model` string, `cerebras:gpt-oss-120b`). Cost is always 0, so no wrong
+   money figures, but per-provider analytics by the `provider` column would be misleading.
+Also: `getWorkspaceUsageSummary` has **no callers anywhere** in the codebase — another complete-but-unwired feature, like
+`synthesizeMeetingNotes` (1.48). Left in place; same question for the owner.
+
+**Fix status:** no code change.
+
+### 1.54 — HIGH — Supabase query builders have no `.catch()`: 7 call sites threw a TypeError and never ran their query (full audit, file 40/80: services/notifications.js; also touches jobs/growthPushNotificationJob.js and routes/practice.js)
+**Location:** `services/notifications.js:35`, `jobs/growthPushNotificationJob.js:24, 196`, `routes/practice.js:51, 130, 891, 892`
+
+Found reading `notifications.js`, where `sendPushNotification` does `await supabaseAdmin.from('users').update(..).eq(..).catch(() => {})`
+inside its own `catch` block. Supabase query builders (postgrest-js 2.115.0 here) are thenables with **no `.catch` method**.
+
+**Verified with the real client, not inferred:** `typeof builder.then === 'function'`, `typeof builder.catch === 'undefined'`.
+Against a local HTTP server standing in for Supabase: the old pattern throws `TypeError: ...catch is not a function` and
+**sends 0 requests** (a builder only executes when `.then` is called); `.then(undefined, handler)` sends the request
+(`POST /rest/v1/...` -> 201) and, against an unreachable host, returns an error object instead of throwing.
+
+**Impact, per site (all previously broken):**
+- `notifications.js` — the "silently handles expired FCM tokens" cleanup never ran, and `sendPushNotification` **rejected**
+  instead of returning `{ sent: false }` for exactly the expired-token case it is meant to absorb. Dead tokens were never cleared.
+- `growthPushNotificationJob.js:196` (`logPushSent2`) — **the push log was never written.** That table is what
+  `getDailyPushCount2` / `getHoursSinceLastPush2` read to enforce the daily cap and minimum gap between pushes, so those
+  throttles could never trigger (count always 0, last-push always "never"). The throw also aborted the per-user step.
+- `growthPushNotificationJob.js:24` (`logJob3`) — job-run logging threw on every call.
+- `practice.js:130` — **practice badges were never awarded** (the insert never ran; the TypeError surfaced on the first earned badge).
+- `practice.js:891-892` — **deleting a practice session with an attached chat failed**: the cleanup lines threw before the
+  session row was deleted.
+- `practice.js:51` — the dead-letter logger crashed inside the failure path it exists to record, and skipped the alert webhook after it.
+
+**Fix:** all seven now use `.then(undefined, handler)` (same intent: best-effort, swallow errors). Behavior that was
+being masked is therefore **now live** — see "Behavior changes" below. Note Supabase normally returns `{ error }` rather
+than rejecting, so a failed write is still silently ignored, as the original code intended.
+
+**Regression guard:** new `src/__tests__/noSupabaseBuilderCatch.test.js` (1) asserts the premise on a real builder and
+(2) scans all backend source for `.catch(` chained on a `.from()`/`.rpc()` statement (excluding `storage.from`/`auth`).
+Confirmed it fails on the original code listing all 7 sites and passes on the fixed code. Suite 29/29.
+
+**Behavior changes the owner should expect (these are corrections, but visible):**
+1. Growth pushes will start being throttled for real (the cap/gap now see their own log), so users may receive **fewer** pushes than before.
+2. `push_notification_log` and `job_logs` will begin accumulating rows; I did not check whether either has a retention/cleanup job.
+3. Practice badges will begin being awarded (eligibility is computed from current totals, so earned badges appear on the next qualifying session).
+4. Deleting a practice session with a chat now succeeds and removes its messages.
+
+**`notifications.js` otherwise:** read in full (161 lines); no other defect. `notifyUser` takes the target `userId`/token from its
+caller, so scoping depends on call sites (the ones in the files already audited were reviewed in earlier passes). Cleanup
+of an invalid token clears it for every user row holding that token, which is correct for a dead token.
+
+**Scope note:** only these 7 lines were changed in `practice.js` and `growthPushNotificationJob.js`; neither file was re-read in full
+here. The scan covers `.from('literal')` and `.rpc(` chains; a `.from(variable)` builder with `.catch` would not be matched
+(a separate grep for non-literal `.from(` found only `prospectDedup.js`, which does not use `.catch`).
+
+**Fix status:** fixed and verified (real-client checks, regression guard with teeth, full suite).
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

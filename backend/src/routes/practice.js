@@ -48,7 +48,7 @@ const logDeadLetterJobs = async (jobs, reason, sessionId) => {
     error_message: reason,
     metadata:      { ...j.payload, session_id: sessionId },
   }));
-  await supabaseAdmin.from('job_logs').insert(rows).catch(err =>
+  await supabaseAdmin.from('job_logs').insert(rows).then(undefined, err =>
     console.error('[Practice] Dead-letter DB log failed:', err.message)
   );
   console.error(`[Practice] ❌ Dead-letter: ${jobs.length} job(s) permanently failed — sessionId=${sessionId} reason=${reason}`);
@@ -127,7 +127,7 @@ const checkAndAwardBadges = async (userId, scenarioType, totalCompleted, isGhost
   ];
   for (const b of candidates) {
     if (b.cond && !earnedSet.has(b.type)) {
-      await supabaseAdmin.from('practice_badges').insert({ user_id: userId, badge_type: b.type, badge_label: b.label, badge_description: b.desc }).catch(() => {});
+      await supabaseAdmin.from('practice_badges').insert({ user_id: userId, badge_type: b.type, badge_label: b.label, badge_description: b.desc }).then(undefined, () => {});
     }
   }
 };
@@ -888,8 +888,8 @@ router.delete('/:sessionId', asyncHandler(async (req, res) => {
   // Delete the associated chat and messages (cascade expected via FK,
   // but explicit chat delete is a safety net if cascade is not set).
   if (session.chat_id) {
-    await supabaseAdmin.from('chat_messages').delete().eq('chat_id', session.chat_id).catch(() => {});
-    await supabaseAdmin.from('chats').delete().eq('id', session.chat_id).eq('user_id', userId).catch(() => {});
+    await supabaseAdmin.from('chat_messages').delete().eq('chat_id', session.chat_id).then(undefined, () => {});
+    await supabaseAdmin.from('chats').delete().eq('id', session.chat_id).eq('user_id', userId).then(undefined, () => {});
   }
 
   const { error } = await supabaseAdmin

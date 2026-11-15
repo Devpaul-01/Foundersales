@@ -119,7 +119,7 @@ ownership-scoping check; a route file does):
 | groq.js | ✅ | Clean barrel file — all 42 re-exports cross-checked against real source exports, all correct. See AUDIT.md 1.47. |
 | groqCalendarIntelligence.js | 🔧 | Clean, already uses parser utilities. Corrects a mistake in an earlier audit entry — synthesizeMeetingNotes genuinely calls the two "flagged" functions; synthesizeMeetingNotes itself is the one with no callers. See AUDIT.md 1.48. |
 | intelligenceReport.js | ⏳ | |
-| multiProvider.js | ⏳ | Only callWithFallbackGroq's call sites seen |
+| multiProvider.js | 🚩 | Fully read. Stale header comment fixed (claimed old classifier functions were still present). Four design concerns flagged, not fixed (no provider-level short-circuit, unbounded OpenRouter discovery, no fetch timeout / unreadable-body handling, per-key vs per-model 429 cooldown). Duplicate-token-on-stream-failure suspicion traced and ruled out. See AUDIT.md 1.49. |
 | notifications.js | ⏳ | Only notifyUser's call sites seen |
 | prospectDedup.js | ✅ (prior pass) | Fully read for idempotency, milestone 7 |
 | providerCooldown.js | ⏳ | |

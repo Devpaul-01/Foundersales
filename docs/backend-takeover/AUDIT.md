@@ -1411,6 +1411,47 @@ well-built interaction pattern.
 **Fix status:** no functional code changed in this file. Corrected the stale/incorrect comment in
 `calendarCommitmentsSignals.js` and this audit's own earlier (wrong) entry about it.
 
+### 1.49 — LOW — `services/multiProvider.js` full read; stale comment fixed, three design concerns flagged (full audit, file 36/80)
+**Location:** `backend/src/services/multiProvider.js`
+
+Full read of all 929 lines against the checklist. This is the single highest-traffic file in the codebase (every AI
+call routes through it). No scoping concerns (no DB access except via `tokenTracker`). Confirmed rather than
+assumed: every name imported from `redis.js` and `providerCooldown.js` exists as a real export; `recordGroqUsage`
+(awaited after every successful call in `callWithFallbackGroq`) cannot break a successful AI call, because
+`tokenTracker.js`'s `writeUsageEvent` catches its own errors and returns `null`; the `callWithFallback` /
+`streamWithFallback` loops correctly dedupe key cooldown per call and never cool a key for provider-wide
+(`PROVIDER_TRANSIENT`) or bad-model failures; Sentry capture is correctly limited to the two choke points the header
+describes and is itself wrapped so it cannot break the call path.
+
+Traced a suspected duplicate-token bug in `streamWithFallback` and **ruled it out**: a stream that fails *mid-read*
+throws a plain error (not a `ProviderCallError`), which `classifyProviderError` maps to `NON_RETRYABLE`, so the loop
+calls `onError` and stops instead of restarting on the next provider and re-emitting tokens the client already has.
+(Side effect worth knowing: such mid-stream drops are reported to Sentry as if they were application bugs.)
+
+**One real finding, fixed:** the header (IMPL-H8-01) claimed the old `isRetryableError`/`shouldCoolKey` functions
+and signal-list constants were "kept below ... for one release cycle as a safety net." Neither exists in this file —
+grep found no `isRetryableError` anywhere, and the only `shouldCoolKey` in the codebase is `exa.js`'s own separate
+function. Only the in-memory cooldown/discovery kill-switch fallback was retained. Comment corrected. (My first
+draft of the correction also said no `shouldCoolKey` exists anywhere in the codebase; the verification grep showed
+that was wrong because of `exa.js`, and I fixed the wording before committing.)
+
+**Flagged, not fixed (behavior changes in the highest-traffic file, none verifiable without real providers):**
+1. *No provider-level short-circuit on transient failure.* The queue is every model x every healthy key, per
+   provider. A `PROVIDER_TRANSIENT` failure (503, ECONNREFUSED) does not skip the rest of that provider's entries, so
+   a provider that is down is retried once per model/key before the next provider is tried.
+2. *Unbounded dynamic model discovery.* For cerebras/groq/openrouter, every discovered chat-capable model not in
+   `MODEL_PRIORITY` is appended alphabetically. For OpenRouter that is potentially its whole catalog, including
+   paid models, if the key has credit. Combined with (1), a total outage could mean a very long sequential chain
+   before the caller gets an error. May be intended ("dynamic discovery" is in the header) — a product/cost call.
+3. *No explicit timeout on the provider `fetch` calls* (unlike `groq-client.js`, 30s/60s). Not verified here what the
+   runtime's default is (Node v22.23.4 in this sandbox; I believe undici defaults to several minutes, unconfirmed).
+   Also, a 200 response whose body fails to read/parse (`res.json()` throws) is `NON_RETRYABLE` and aborts the whole
+   fallback chain instead of trying the next provider — arguably should be transient. Needs a decision on the values.
+4. *Observation only:* a 429 cools the entire key for 1 hour. I believe Groq rate limits apply per model, in which
+   case a single model's 429 sidelines the key for all models. Unverified; noting it for whoever tunes this.
+
+**Fix status:** stale comment fixed and verified (syntax check, full suite 23/23). Items 1-4 flagged only.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

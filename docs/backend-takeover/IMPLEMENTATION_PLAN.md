@@ -157,6 +157,12 @@ protected onboarding flow, where the correct fix shape is a product judgment cal
   different sending path) before unifying them.
 
 
+- **`multiProvider.js` fallback-chain behavior** (AUDIT.md 1.49) — four flagged items needing a decision, none
+  fixed: (1) no provider-level short-circuit on `PROVIDER_TRANSIENT` failures (a down provider is retried per
+  model x key); (2) dynamic discovery appends every discovered model alphabetically, which for OpenRouter could mean
+  its whole catalog incl. paid models; (3) no explicit `fetch` timeout, and an unreadable/invalid 200 body aborts the
+  chain as `NON_RETRYABLE`; (4) a 429 cools the whole key for 1h though limits may be per-model (unverified).
+
 - **Duplicate workspace-switch endpoints** (AUDIT.md 1.4) — see DECISIONS.md. Not removing either without
   confirming the frontend's actual usage, since frontend changes are out of scope and I can't verify which one（s）
   it calls without reading frontend code, which is permitted to *read* for this purpose even though not to *change*.

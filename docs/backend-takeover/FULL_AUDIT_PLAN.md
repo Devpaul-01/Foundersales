@@ -167,8 +167,8 @@ ownership-scoping check; a route file does):
 | pagination.js | ✅ (prior pass) | Has existing test coverage, logic not independently re-read |
 | parseAIJson.js | ⏳ | |
 | parser.js | ✅ (prior pass) | Has existing test coverage, logic not independently re-read |
-| providerErrors.js | ✅ (prior pass) | Has existing test coverage, logic not independently re-read |
-| reportDegradation.js | ⏳ | |
+| providerErrors.js | 🚩 | Re-read in full (was test-coverage-only). BAD_MODEL only detected on HTTP 400; a 404-for-unknown-model (unverified) would abort the chain. Flagged. See AUDIT.md 1.52. |
+| reportDegradation.js | ✅ | Clean — correctly in-memory by design, Sentry failure contained. See AUDIT.md 1.52. |
 
 ### Database
 | Item | Status | Note |

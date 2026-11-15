@@ -1530,6 +1530,24 @@ covered by a command timeout; `config/bullmq.js` uses a separate IORedis client 
 
 **Fix status:** fixed and verified live (see above).
 
+### 1.52 — INFO — `utils/reportDegradation.js` full read (clean); `utils/providerErrors.js` re-read, one observation flagged (full audit, file 38/80)
+**Location:** `backend/src/utils/reportDegradation.js`, `backend/src/utils/providerErrors.js`
+
+**`reportDegradation.js` (61 lines) — no issue found.** A per-process, 5-minute-throttled "degraded mode" reporter. Its
+header's reasoning for being in-memory rather than Redis-backed (a Redis-outage alert cannot depend on Redis) is correct.
+Falls back to `console.warn` without `SENTRY_DSN`, and Sentry failure is caught so it cannot break a caller. Worth
+knowing: before 1.50 it was effectively never triggered for Redis outages from `providerCooldown.js`/`multiProvider.js`
+(their fallbacks were unreachable); after that fix it can be.
+
+**`providerErrors.js` (130 lines)** was previously ✅ on the strength of its tests alone; read in full now. Logic matches
+its header and tests. **One observation, flagged not changed:** `BAD_MODEL` is only detected when `err.status === 400`.
+If a provider answers an unknown or removed model with HTTP 404 (I believe some OpenAI-compatible endpoints do, e.g.
+OpenRouter for withdrawn `:free` models — **not verified here**), it classifies as `NON_RETRYABLE` and aborts the whole
+fallback chain instead of skipping that model. A body-gated widening (`400 || 404`, still requiring the model-not-found
+text) looks low-risk but depends on real provider behavior I cannot check from this sandbox.
+
+**Fix status:** no code change. Observation recorded in IMPLEMENTATION_PLAN.md.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

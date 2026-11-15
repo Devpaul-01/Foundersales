@@ -126,7 +126,7 @@ ownership-scoping check; a route file does):
 | redis.js | 🔧 | REOPENED: earlier live verification missed outage cases. HIGH: every Redis call hung forever when Redis was unreachable/died (node-redis retries forever). Fixed (connect timeout, failure cooldown, coalescing, fail-fast offline queue), verified live in 4 scenarios + regression test. See AUDIT.md 1.51. |
 | storage.js | ⏳ | |
 | streaming.js | ⏳ | |
-| tokenTracker.js | ⏳ | |
+| tokenTracker.js | 🚩 | Read in full, checked against the real SQL function. No code change. Four low-impact observations (quota checks fail open on DB error; non-atomic check/record; global-cap row limit at scale; all providers recorded as 'groq') and `getWorkspaceUsageSummary` has no callers. See AUDIT.md 1.53. |
 | transcription.js | ⏳ | Only transcribeAudio's call site seen |
 | voiceMemoService.js | ✅ (prior pass) | Fully read for idempotency, milestone 7 |
 

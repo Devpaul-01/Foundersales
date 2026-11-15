@@ -1548,6 +1548,34 @@ text) looks low-risk but depends on real provider behavior I cannot check from t
 
 **Fix status:** no code change. Observation recorded in IMPLEMENTATION_PLAN.md.
 
+### 1.53 — LOW — `services/tokenTracker.js` full read; no code change, four observations (full audit, file 39/80)
+**Location:** `backend/src/services/tokenTracker.js` (173 lines), cross-checked against `record_ai_usage()` and `workspace_ai_usage_daily` in `schema.sql`
+
+Verified against the real schema rather than assumed: the `record_ai_usage` function writes the event row and upserts the
+daily rollup in one atomic statement pair (`ON CONFLICT (workspace_id, date, provider) DO UPDATE`), so concurrent writes do
+not lose counts; column names/types used by the readers (`call_count`, `total_tokens`, `total_credits`,
+`estimated_cost_cents`) all exist; `writeUsageEvent` correctly never throws, so a tracking failure can never break a
+completed AI call (also confirmed from the `callWithFallbackGroq` side in 1.49). The JS side computes "today" with
+`toISOString()` (UTC) and the SQL uses `CURRENT_DATE` (database session timezone) — these agree only while the database
+timezone is UTC (the Supabase default); worth knowing if that is ever changed.
+
+**Observations, not changed (all low impact, none verifiable as real problems at current scale):**
+1. *Quota checks fail open on a DB error.* `checkWorkspaceExaUsage` destructures only `data`, never `error`; a failed
+   query yields `used = 0` and `allowed: true`. Plausibly intentional (a DB blip should not block a feature), but it
+   means Exa spend is unmetered during one.
+2. *Check-then-record is not atomic* (callers check, make the Exa call, record afterwards), so concurrent requests can
+   overshoot a daily limit slightly. Standard for this design; bounded by concurrency.
+3. *Global Exa cap reads one row per workspace* via a plain select; PostgREST returns at most 1000 rows by default
+   (I believe — Supabase project setting, not verified here), so with >1000 workspaces using Exa on the same day the
+   global total would be undercounted. Not reachable at small scale.
+4. *All multi-provider AI usage is recorded under `provider: 'groq'`* even when Cerebras/Mistral/OpenRouter served the
+   call (the real provider survives only in the `model` string, `cerebras:gpt-oss-120b`). Cost is always 0, so no wrong
+   money figures, but per-provider analytics by the `provider` column would be misleading.
+Also: `getWorkspaceUsageSummary` has **no callers anywhere** in the codebase — another complete-but-unwired feature, like
+`synthesizeMeetingNotes` (1.48). Left in place; same question for the owner.
+
+**Fix status:** no code change.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

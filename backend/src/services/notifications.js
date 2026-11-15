@@ -36,7 +36,10 @@ export const sendPushNotification = async (fcmToken, { title, body, data = {} })
         .from('users')
         .update({ fcm_token: null })
         .eq('fcm_token', fcmToken)
-        .catch(() => {});
+        // NOTE: Supabase query builders are thenables with no catch method —
+        // calling one throws a TypeError and the request never runs. Passing a
+        // rejection handler to then() executes the query and swallows errors.
+        .then(undefined, () => {});
     }
     console.warn('[Notifications] Push failed:', err.code || err.message);
     return { sent: false, reason: err.code };

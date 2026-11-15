@@ -26,7 +26,7 @@
 // confined to this file.
 // ============================================================
 
-import { hashSet, hashGetAll, hashIncrementField } from './redis.js';
+import { hashSet, hashGetAll, hashIncrementField, getRawClient } from './redis.js';
 import { reportDegradedMode } from '../utils/reportDegradation.js';
 
 export const isRedisStateEnabled = () => process.env.MULTIPROVIDER_REDIS_STATE_ENABLED !== 'false';
@@ -41,14 +41,33 @@ const cooldownRedisKey = (provider, index) => `mp:cooldown:${provider}:${index}`
 // simple Redis key-existence check rather than application-side
 // timestamp arithmetic, and why markKeyFailed issues two sequential
 // calls rather than a single pipelined one.
+// Full audit (1.50): redis.js's hash helpers swallow their own errors and
+// return null (and getRawClient() returns null when REDIS_URL is unset or
+// Redis can't be reached) — they never throw. That meant the try/catch
+// fallbacks in the public dispatchers below could never trigger for an
+// actual Redis outage or an unconfigured REDIS_URL (a supported config,
+// and the default since the kill switch defaults to ON): markKeyFailed
+// logged "cooling down (Redis)" while recording nothing anywhere, and
+// isKeyCooling always answered false, so a known-bad key was never cooled.
+// These two functions now throw when Redis is unavailable so the intended
+// in-memory fallback + reportDegradedMode actually run.
+const requireRedis = async () => {
+  const client = await getRawClient();
+  if (!client) throw new Error('Redis client unavailable');
+};
+
 const markKeyFailedRedis = async (provider, index) => {
+  await requireRedis();
   const key = cooldownRedisKey(provider, index);
-  await hashIncrementField(key, 'failCount', 1, KEY_COOLDOWN_MS / 1000);
-  await hashSet(key, { failedAt: String(Date.now()) }, KEY_COOLDOWN_MS / 1000);
+  const incremented = await hashIncrementField(key, 'failCount', 1, KEY_COOLDOWN_MS / 1000);
+  if (incremented === null) throw new Error('Redis hash increment failed');
+  const written = await hashSet(key, { failedAt: String(Date.now()) }, KEY_COOLDOWN_MS / 1000);
+  if (!written) throw new Error('Redis hash set failed');
   console.warn(`[ProviderCooldown] ${provider} key #${index} cooling down (Redis, cross-instance) — retrying in 1h`);
 };
 
 const isKeyCoolingRedis = async (provider, index) => {
+  await requireRedis();
   const data = await hashGetAll(cooldownRedisKey(provider, index));
   return !!data;
 };

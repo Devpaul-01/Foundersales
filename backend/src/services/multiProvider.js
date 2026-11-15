@@ -74,12 +74,14 @@
 // IMPL-H8-01 (Phase 2 refactor): retry classification now uses
 // utils/providerErrors.js's classifyProviderError() instead of the old
 // isRetryableError/shouldCoolKey string-substring matching. See that
-// file's header comment for the full reasoning. The old functions and
-// signal-list constants are kept below (renamed with an `InMemory`/`Old`
-// suffix where they overlap with new names) for one release cycle as a
-// safety net, matching this file's own kill-switch conservatism — remove
-// them in a follow-up cleanup once the new classifier has run in
-// production without surprises.
+// file's header comment for the full reasoning. NOTE (full audit, 1.49):
+// an earlier version of this comment said the old isRetryableError /
+// shouldCoolKey functions and signal-list constants were still kept below
+// as a safety net. They are not — neither function nor any signal list
+// exists in this file (exa.js has its own separate, unrelated
+// shouldCoolKey; that is a different function); only the in-memory
+// COOLDOWN/DISCOVERY fallback (kill-switch path) was retained here.
+// Classification in this file is solely utils/providerErrors.js now.
 //
 // IMPL-SENTRY-01 (Phase 2 refactor / L4): most AI-call failures in this
 // codebase never reach Sentry's automatic Express-level error capture,

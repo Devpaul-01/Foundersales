@@ -56,6 +56,90 @@ const REDIS_URL = process.env.REDIS_URL;
 
 let _client = null;
 
+// ── Connection management (full audit, 1.51) ───────────────────────────
+// Previously getClient() did `await client.connect()` with no timeout and
+// cached nothing on failure. node-redis' default reconnect strategy retries
+// FOREVER, so connect() never rejects when Redis is unreachable: with
+// REDIS_URL set but Redis down, every Redis call in the app hung forever
+// (and each call leaked a fresh client that kept retrying in the
+// background). Reproduced live: getCache() still pending after 12s, twice.
+// Callers (rate limiting, auth/workspace caches, concurrencyGuard,
+// providerCooldown, multiProvider) are all written to fail open on a
+// null/throw, so the fix is to make "Redis is down" actually return null:
+//   - bound the initial connect with a timeout and destroy the client;
+//   - remember the failure for a cooldown so requests don't each pay the
+//     timeout while Redis is down;
+//   - coalesce concurrent callers onto one in-flight connect attempt;
+//   - disableOfflineQueue so that, after a successful connection, commands
+//     issued while node-redis is reconnecting fail fast instead of queuing
+//     (and hanging) until Redis returns. Reconnection itself still happens
+//     automatically in the background.
+const CONNECT_TIMEOUT_MS = 3000;
+const CONNECT_RETRY_COOLDOWN_MS = 30 * 1000;
+
+let _connecting = null;
+let _lastConnectFailureAt = 0;
+
+const connectClient = async () => {
+  let client = null;
+  let timer = null;
+  try {
+    // ── Parse the URL to extract hostname for SNI, and whether TLS applies ──
+    // NOTE (docs/backend-takeover/AUDIT.md): this used to hardcode
+    // `tls: true` unconditionally, regardless of the URL's actual scheme.
+    // config/bullmq.js's IORedis client already derives this correctly from
+    // the scheme (`isTLS = REDIS_URL.startsWith('rediss://')`); this file
+    // did the same hostname-parsing-for-SNI work but then ignored the
+    // scheme. Confirmed live, not just read: booting against a real, local,
+    // plain `redis://` Redis instance (not TLS) logged
+    // "[Redis] getRawClient() failed: tls socket option is set to true
+    // which is mismatch with protocol..." and every caller of this client
+    // (rate limiting, workspace/auth caching, concurrencyGuard's
+    // distributed locking across 7 files) silently fell back to
+    // per-instance/no-op behavior instead of using Redis at all — a
+    // real, previously-undetected reliability gap for the very common case
+    // of a non-TLS Redis (local dev, self-hosted, Docker Compose), not a
+    // theoretical one.
+    const url = new URL(REDIS_URL);
+    const hostname = url.hostname;
+    const isTLS = REDIS_URL.startsWith('rediss://');
+
+    client = createClient({
+      url: REDIS_URL,
+      socket: isTLS
+        ? { tls: true, servername: hostname } // SNI support for TLS targets
+        : {},
+      disableOfflineQueue: true,
+    });
+
+    client.on('error', (err) =>
+      console.error('[Redis] Client error (non-fatal):', err.message)
+    );
+
+    await Promise.race([
+      client.connect(),
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`connect timed out after ${CONNECT_TIMEOUT_MS}ms`)),
+          CONNECT_TIMEOUT_MS
+        );
+      }),
+    ]);
+    _client = client;
+    console.log('[Redis] Connected');
+    return _client;
+  } catch (err) {
+    _lastConnectFailureAt = Date.now();
+    // Stop node-redis' endless background reconnect loop for the client
+    // that never connected.
+    try { client?.destroy?.(); } catch { /* already closed */ }
+    console.warn(`[Redis] Could not connect — caching will be skipped (retrying in ${CONNECT_RETRY_COOLDOWN_MS / 1000}s):`, err.message);
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+};
+
 // Lazy-connect singleton — only connects if REDIS_URL is set.
 const getClient = async () => {
   if (_client) return _client;
@@ -63,49 +147,11 @@ const getClient = async () => {
     // Redis not configured — all operations will silently no-op.
     return null;
   }
-
-  // ── Parse the URL to extract hostname for SNI, and whether TLS applies ──
-  // NOTE (docs/backend-takeover/AUDIT.md): this used to hardcode
-  // `tls: true` unconditionally, regardless of the URL's actual scheme.
-  // config/bullmq.js's IORedis client already derives this correctly from
-  // the scheme (`isTLS = REDIS_URL.startsWith('rediss://')`); this file
-  // did the same hostname-parsing-for-SNI work but then ignored the
-  // scheme. Confirmed live, not just read: booting against a real, local,
-  // plain `redis://` Redis instance (not TLS) logged
-  // "[Redis] getRawClient() failed: tls socket option is set to true
-  // which is mismatch with protocol..." and every caller of this client
-  // (rate limiting, workspace/auth caching, concurrencyGuard's
-  // distributed locking across 7 files) silently fell back to
-  // per-instance/no-op behavior instead of using Redis at all — a
-  // real, previously-undetected reliability gap for the very common case
-  // of a non-TLS Redis (local dev, self-hosted, Docker Compose), not a
-  // theoretical one.
-  const url = new URL(REDIS_URL);
-  const hostname = url.hostname;
-  const isTLS = REDIS_URL.startsWith('rediss://');
-
-  const client = createClient({
-    url: REDIS_URL,
-    socket: isTLS
-      ? { tls: true, servername: hostname } // SNI support for TLS targets
-      : {},
-  });
-
-  client.on('error', (err) =>
-    console.error('[Redis] Client error (non-fatal):', err.message)
-  );
-
-  // ── Connect and store client
-
-  try {
-    await client.connect();
-    _client = client;
-    console.log('[Redis] Connected');
-    return _client;
-  } catch (err) {
-    console.warn('[Redis] Could not connect — caching will be skipped:', err.message);
-    return null;
+  if (Date.now() - _lastConnectFailureAt < CONNECT_RETRY_COOLDOWN_MS) return null;
+  if (!_connecting) {
+    _connecting = connectClient().finally(() => { _connecting = null; });
   }
+  return _connecting;
 };
 
 // ──────────────────────────────────────────

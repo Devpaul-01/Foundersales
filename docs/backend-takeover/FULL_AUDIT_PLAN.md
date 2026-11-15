@@ -119,11 +119,11 @@ ownership-scoping check; a route file does):
 | groq.js | ✅ | Clean barrel file — all 42 re-exports cross-checked against real source exports, all correct. See AUDIT.md 1.47. |
 | groqCalendarIntelligence.js | 🔧 | Clean, already uses parser utilities. Corrects a mistake in an earlier audit entry — synthesizeMeetingNotes genuinely calls the two "flagged" functions; synthesizeMeetingNotes itself is the one with no callers. See AUDIT.md 1.48. |
 | intelligenceReport.js | ⏳ | |
-| multiProvider.js | ⏳ | Only callWithFallbackGroq's call sites seen |
+| multiProvider.js | 🚩 | Fully read. Stale header comment fixed (claimed old classifier functions were still present). Four design concerns flagged, not fixed (no provider-level short-circuit, unbounded OpenRouter discovery, no fetch timeout / unreadable-body handling, per-key vs per-model 429 cooldown). Duplicate-token-on-stream-failure suspicion traced and ruled out. See AUDIT.md 1.49. |
 | notifications.js | ⏳ | Only notifyUser's call sites seen |
 | prospectDedup.js | ✅ (prior pass) | Fully read for idempotency, milestone 7 |
-| providerCooldown.js | ⏳ | |
-| redis.js | ✅ (prior pass) | Full fix + live verification, milestone 6 |
+| providerCooldown.js | 🔧 | MEDIUM: the in-memory fallback could never trigger (redis.js helpers never throw), so cooldown silently did nothing without Redis. Fixed, regression test added (fails on old code). Led to a bigger redis.js finding, see 1.51. See AUDIT.md 1.50. |
+| redis.js | 🔧 | REOPENED: earlier live verification missed outage cases. HIGH: every Redis call hung forever when Redis was unreachable/died (node-redis retries forever). Fixed (connect timeout, failure cooldown, coalescing, fail-fast offline queue), verified live in 4 scenarios + regression test. See AUDIT.md 1.51. |
 | storage.js | ⏳ | |
 | streaming.js | ⏳ | |
 | tokenTracker.js | ⏳ | |
@@ -146,7 +146,7 @@ ownership-scoping check; a route file does):
 | cloudinary.js | ⏳ | |
 | constants.js | 🔧 (prior pass, partial) | Only QUEUE_JOB_TYPES/DELIVERY_STATUS/BACKGROUND_JOB_TYPES entries checked |
 | firebase.js | ✅ (prior pass) | Fully read, milestone 1 (FIREBASE_SERVICE_ACCOUNT fix) |
-| limiters.js | ⏳ | |
+| limiters.js | ⏳ (partial) | Only `buildLimiter` touched (added `passOnStoreError: true`, see AUDIT.md 1.51). Full file not yet read. |
 | rateLimitStore.js | ⏳ | Only its import of getRawClient seen |
 | sentry.js | ⏳ | |
 | supabase.js | ✅ (prior pass) | Fully read, milestone 1 |
@@ -167,8 +167,8 @@ ownership-scoping check; a route file does):
 | pagination.js | ✅ (prior pass) | Has existing test coverage, logic not independently re-read |
 | parseAIJson.js | ⏳ | |
 | parser.js | ✅ (prior pass) | Has existing test coverage, logic not independently re-read |
-| providerErrors.js | ✅ (prior pass) | Has existing test coverage, logic not independently re-read |
-| reportDegradation.js | ⏳ | |
+| providerErrors.js | 🚩 | Re-read in full (was test-coverage-only). BAD_MODEL only detected on HTTP 400; a 404-for-unknown-model (unverified) would abort the chain. Flagged. See AUDIT.md 1.52. |
+| reportDegradation.js | ✅ | Clean — correctly in-memory by design, Sentry failure contained. See AUDIT.md 1.52. |
 
 ### Database
 | Item | Status | Note |

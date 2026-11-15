@@ -1411,6 +1411,143 @@ well-built interaction pattern.
 **Fix status:** no functional code changed in this file. Corrected the stale/incorrect comment in
 `calendarCommitmentsSignals.js` and this audit's own earlier (wrong) entry about it.
 
+### 1.49 — LOW — `services/multiProvider.js` full read; stale comment fixed, three design concerns flagged (full audit, file 36/80)
+**Location:** `backend/src/services/multiProvider.js`
+
+Full read of all 929 lines against the checklist. This is the single highest-traffic file in the codebase (every AI
+call routes through it). No scoping concerns (no DB access except via `tokenTracker`). Confirmed rather than
+assumed: every name imported from `redis.js` and `providerCooldown.js` exists as a real export; `recordGroqUsage`
+(awaited after every successful call in `callWithFallbackGroq`) cannot break a successful AI call, because
+`tokenTracker.js`'s `writeUsageEvent` catches its own errors and returns `null`; the `callWithFallback` /
+`streamWithFallback` loops correctly dedupe key cooldown per call and never cool a key for provider-wide
+(`PROVIDER_TRANSIENT`) or bad-model failures; Sentry capture is correctly limited to the two choke points the header
+describes and is itself wrapped so it cannot break the call path.
+
+Traced a suspected duplicate-token bug in `streamWithFallback` and **ruled it out**: a stream that fails *mid-read*
+throws a plain error (not a `ProviderCallError`), which `classifyProviderError` maps to `NON_RETRYABLE`, so the loop
+calls `onError` and stops instead of restarting on the next provider and re-emitting tokens the client already has.
+(Side effect worth knowing: such mid-stream drops are reported to Sentry as if they were application bugs.)
+
+**One real finding, fixed:** the header (IMPL-H8-01) claimed the old `isRetryableError`/`shouldCoolKey` functions
+and signal-list constants were "kept below ... for one release cycle as a safety net." Neither exists in this file —
+grep found no `isRetryableError` anywhere, and the only `shouldCoolKey` in the codebase is `exa.js`'s own separate
+function. Only the in-memory cooldown/discovery kill-switch fallback was retained. Comment corrected. (My first
+draft of the correction also said no `shouldCoolKey` exists anywhere in the codebase; the verification grep showed
+that was wrong because of `exa.js`, and I fixed the wording before committing.)
+
+**Flagged, not fixed (behavior changes in the highest-traffic file, none verifiable without real providers):**
+1. *No provider-level short-circuit on transient failure.* The queue is every model x every healthy key, per
+   provider. A `PROVIDER_TRANSIENT` failure (503, ECONNREFUSED) does not skip the rest of that provider's entries, so
+   a provider that is down is retried once per model/key before the next provider is tried.
+2. *Unbounded dynamic model discovery.* For cerebras/groq/openrouter, every discovered chat-capable model not in
+   `MODEL_PRIORITY` is appended alphabetically. For OpenRouter that is potentially its whole catalog, including
+   paid models, if the key has credit. Combined with (1), a total outage could mean a very long sequential chain
+   before the caller gets an error. May be intended ("dynamic discovery" is in the header) — a product/cost call.
+3. *No explicit timeout on the provider `fetch` calls* (unlike `groq-client.js`, 30s/60s). Not verified here what the
+   runtime's default is (Node v22.23.4 in this sandbox; I believe undici defaults to several minutes, unconfirmed).
+   Also, a 200 response whose body fails to read/parse (`res.json()` throws) is `NON_RETRYABLE` and aborts the whole
+   fallback chain instead of trying the next provider — arguably should be transient. Needs a decision on the values.
+4. *Observation only:* a 429 cools the entire key for 1 hour. I believe Groq rate limits apply per model, in which
+   case a single model's 429 sidelines the key for all models. Unverified; noting it for whoever tunes this.
+
+**Fix status:** stale comment fixed and verified (syntax check, full suite 23/23). Items 1-4 flagged only.
+
+### 1.50 — MEDIUM — `services/providerCooldown.js`: the "fall back to in-memory" path could never trigger, so key cooldown silently did nothing without Redis (full audit, file 37/80)
+**Location:** `backend/src/services/providerCooldown.js` (also affects `multiProvider.js`, `exa.js`)
+
+Full read (116 lines). Shared Redis-backed (in-memory fallback) key-cooldown used by `multiProvider.js` and `exa.js`.
+
+**Real finding, fixed:** the public dispatchers (`markKeyFailed`, `isKeyCooling`) wrap the Redis path in `try/catch`
+and fall back to the in-memory implementation + `reportDegradedMode(...)` on a thrown error. But the Redis helpers
+they call (`hashIncrementField`, `hashSet`, `hashGetAll` in `redis.js`) catch their own errors and return `null`, and
+`getClient()` returns `null` when `REDIS_URL` is unset — none of them ever throw. So the fallback was unreachable for
+every real "Redis unavailable" case. Concretely, with `REDIS_URL` unset (a supported config: `validateEnv` classifies
+it optional) and the kill switch at its default (ON): `markKeyFailed` logged "cooling down (Redis, cross-instance)"
+while recording nothing anywhere, `isKeyCooling` always returned `false`, and `reportDegradedMode` never fired. A
+known-bad or rate-limited key was therefore retried on every request, on every model — worse than the kill-switch
+(in-memory) path the file claims to degrade to.
+
+**Reproduced, not inferred:** `REDIS_URL` unset, default env -> `isKeyCooling` is `false` right after
+`markKeyFailed`; the same script with `MULTIPROVIDER_REDIS_STATE_ENABLED=false` -> `true`.
+
+**Fix:** `markKeyFailedRedis` and `isKeyCoolingRedis` now call `getRawClient()` first and throw if it is `null`, and
+`markKeyFailedRedis` also throws if either write returns a failure value, so the existing dispatcher `catch` (in-memory
+fallback + degraded-mode report) now actually runs. No change to the Redis-available path.
+
+**Verified:** new `src/services/__tests__/providerCooldown.test.js` (3 tests). Confirmed it has teeth: with the
+original file restored it fails (`expected false to be true`); with the fix it passes. Also ran the working-Redis path
+against a real local Redis (`redis-server` 6399): key cooled, other key not, hash holds `failCount`/`failedAt`, TTL 3600.
+Full suite 26/26.
+
+**Related, discovered while checking the above — see AUDIT.md 1.51:** with `REDIS_URL` set but Redis *unreachable*,
+`redis.js`'s `getClient()` never returns (every Redis call hangs). That is outside this file and is recorded separately.
+
+**Minor, not changed:** `multiProvider.getProviderStatus` (no callers anywhere) reads cooldown state from Redis when
+enabled, so with Redis down it would report in-memory-cooled keys as "healthy". Moot while it has no callers.
+
+**Fix status:** fixed and verified (syntax check, regression test, live Redis check, full suite).
+
+### 1.51 — HIGH — `services/redis.js`: every Redis call hung forever when Redis was down; reopens a file earlier marked clean (found while auditing files 36-37)
+**Location:** `backend/src/services/redis.js` (`getClient`), `backend/src/config/limiters.js` (`buildLimiter`)
+
+This reopens `redis.js`, previously recorded as fully fixed and live-verified (1.12). That verification exercised the
+*working* Redis and the *unconfigured* (`REDIS_URL` unset) cases, never "configured but unreachable" or "Redis dies
+after connecting" — and the whole codebase is written to fail open on those. They did not.
+
+**Reproduced live (local `redis-server`, node-redis 5.12.1), two distinct hangs:**
+1. *Unreachable at startup* (`REDIS_URL=redis://127.0.0.1:1`): `getClient()` awaited `client.connect()` with no timeout.
+   node-redis' default reconnect strategy retries forever, so `connect()` never rejects; `getCache()` was still pending
+   after 12s, on two consecutive calls. Nothing was cached on failure, so each call also created a new client that
+   kept retrying in the background (a leak).
+2. *Redis dies after connecting:* with the default offline queue, commands issued while node-redis reconnects wait
+   until Redis returns; `getCache()` was still pending after 10s.
+
+**Impact:** every caller's `try/catch`-and-fail-open design was unreachable in a real outage; the request simply stalled.
+That includes `multiProvider.isKeyCooling` (called per key on every AI call), the auth/workspace caches, distributed
+locking in `concurrencyGuard`, and rate limiting. A Redis outage would have stalled the API rather than degrading it.
+
+**Fix (`redis.js`):** bound the initial connect (3s) and destroy the never-connected client; remember a failed attempt
+for 30s so requests don't each pay the timeout; coalesce concurrent callers onto one connect attempt; create the client
+with `disableOfflineQueue: true` so commands issued while reconnecting fail fast (reconnection still happens in the
+background). All existing helpers already catch and return null/false, so no caller changed.
+
+**Verified live, four scenarios:** unreachable -> `null` after 3.0s, then 0ms on later calls (was: hang); healthy -> 20
+concurrent first callers all round-trip with a single "Connected"; Redis killed mid-life -> `null` in 1ms (was: hang);
+Redis restarted -> auto-recovered without a process restart. New `src/services/__tests__/redis.test.js`: with the
+original file it times out (hangs); with the fix it passes. Full suite 27/27.
+
+**Second-order effect I introduced and had to handle (`limiters.js`):** making Redis fail fast turned the mid-life hang
+into an error for rate-limited routes. Tested with the real store: with the existing `buildLimiter` config, a Redis
+outage returned `500 {"err":"The client is offline"}`; with `passOnStoreError: true` it returned 200. Nearly every
+route (including `/login`) sits behind one of these limiters, so I added `passOnStoreError: true` to `buildLimiter`,
+consistent with `redis.js`'s own stated philosophy. **This is a deliberate tradeoff, flagged for the owner:** during a
+mid-life Redis outage requests are not rate limited at all (the boot-time fallback is per-instance in-memory limiting;
+this case has none). If you would rather fail closed on e.g. the auth limiter, remove that line (comment says how).
+Only `buildLimiter` was touched; `limiters.js` still gets its own full read.
+
+**Not changed / limits of verification:** the in-flight-command case (a connection that stalls without closing) is not
+covered by a command timeout; `config/bullmq.js` uses a separate IORedis client and was not touched.
+
+**Fix status:** fixed and verified live (see above).
+
+### 1.52 — INFO — `utils/reportDegradation.js` full read (clean); `utils/providerErrors.js` re-read, one observation flagged (full audit, file 38/80)
+**Location:** `backend/src/utils/reportDegradation.js`, `backend/src/utils/providerErrors.js`
+
+**`reportDegradation.js` (61 lines) — no issue found.** A per-process, 5-minute-throttled "degraded mode" reporter. Its
+header's reasoning for being in-memory rather than Redis-backed (a Redis-outage alert cannot depend on Redis) is correct.
+Falls back to `console.warn` without `SENTRY_DSN`, and Sentry failure is caught so it cannot break a caller. Worth
+knowing: before 1.50 it was effectively never triggered for Redis outages from `providerCooldown.js`/`multiProvider.js`
+(their fallbacks were unreachable); after that fix it can be.
+
+**`providerErrors.js` (130 lines)** was previously ✅ on the strength of its tests alone; read in full now. Logic matches
+its header and tests. **One observation, flagged not changed:** `BAD_MODEL` is only detected when `err.status === 400`.
+If a provider answers an unknown or removed model with HTTP 404 (I believe some OpenAI-compatible endpoints do, e.g.
+OpenRouter for withdrawn `:free` models — **not verified here**), it classifies as `NON_RETRYABLE` and aborts the whole
+fallback chain instead of skipping that model. A body-gated widening (`400 || 404`, still requiring the model-not-found
+text) looks low-risk but depends on real provider behavior I cannot check from this sandbox.
+
+**Fix status:** no code change. Observation recorded in IMPLEMENTATION_PLAN.md.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

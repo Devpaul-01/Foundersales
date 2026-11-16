@@ -25,6 +25,10 @@ confirmed gap — the spot-checked routes all correctly enforce isolation in app
 architectural characteristic in AUDIT.md 1.3, with a commitment to widen the spot-check (milestone 2) rather than
 add a blanket defensive layer without evidence it's needed.
 
+> **ADDENDUM (full audit, see AUDIT.md 1.66):** D2's reasoning covers the *backend* only. The frontend also talks to the database directly with the public
+> anon key (`hooks/useRealtime.ts` subscribes to `chat_messages` and `user_events` as the anon role), and no table has RLS. If the live project's anon role has
+> table grants (Supabase's default), the "not justified by a specific confirmed gap" premise no longer holds. Verify with the curl check in 1.66 before treating this decision as settled.
+
 ## D3 — Duplicate workspace-switch endpoints: deduplicated the logic, kept both routes
 **Date:** 2026-10-29 (resolved 2026-10-30)
 

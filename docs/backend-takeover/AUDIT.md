@@ -1910,6 +1910,62 @@ The `voiceMemoService` wiring is a one-line substitution plus an import (syntax-
 
 **Fix status:** fixed and verified at the helper level.
 
+### 1.66 — POSSIBLY CRITICAL (needs a 1-minute owner check) — zero RLS + the browser uses the public anon key to subscribe to table changes; this weakens the premise of 1.3 / D2 (full audit, schema.sql)
+**Location:** `schema.sql` (0 of 48 tables have `ENABLE ROW LEVEL SECURITY`), `frontend/src/lib/supabase.ts`, `frontend/src/hooks/useRealtime.ts`
+
+**What 1.3 / D2 concluded:** no RLS is "not inherently a bug" because the *backend* only uses the service-role client, which bypasses RLS. That is true of the backend. It does not cover the other client of the same
+database: **the browser.** Facts established from the repo:
+- The frontend builds a Supabase client from `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` (`lib/supabase.ts`). A `VITE_` variable is compiled into the public JavaScript bundle, so the anon key is, by design, public.
+- `hooks/useRealtime.ts` uses that client to open `postgres_changes` subscriptions on **`chat_messages`** (practice-session delivery, `PracticeSessionPage.tsx`) and **`user_events`** (calendar prep, `CalendarPage.tsx`,
+  `CalendarEventDetailPage.tsx`). No user session or access token is attached to the client anywhere I could find (`setSession` / `setAuth` / `access_token` are absent), so these subscriptions run as the **anon role**.
+- The `filter` (e.g. by `chat_id`) is chosen by the client code. Anyone holding the anon key can open the same subscription **without** a filter.
+
+**Why that matters:** with RLS disabled, Supabase Realtime does not restrict which rows an anon subscriber receives, and PostgREST (`/rest/v1/<table>`) is open to the anon role on any table it has been granted (Supabase's default
+grants include `anon` on `public` tables). If both hold on the live project, anyone who opens the site's JS can read, and possibly write, **every tenant's data**: chat message content, prospects, voice-memo transcripts, calendar
+events. The whole multi-tenant isolation work audited elsewhere (workspace scoping in every route) would be bypassed because it is enforced in the Express layer, which this path never touches.
+
+**What I could NOT verify (so this is a flagged risk, not a confirmed breach):** the live project's grants and RLS state, and which tables are in the `supabase_realtime` publication (no publication/grant statements exist in `schema.sql` or
+`migrations/`, so they are configured outside the repo). The app working as designed (realtime delivering rows to an anon client) is itself consistent with the exposure being real.
+
+**Check it (anon key is the same one the frontend ships; replace the placeholders):**
+```
+curl -s "https://<project>.supabase.co/rest/v1/users?select=id&limit=1" -H "apikey: <ANON_KEY>" -H "Authorization: Bearer <ANON_KEY>"
+curl -s "https://<project>.supabase.co/rest/v1/chat_messages?select=id,content&limit=1" -H "apikey: <ANON_KEY>" -H "Authorization: Bearer <ANON_KEY>"
+```
+A JSON array with rows = exposed. `[]` is **inconclusive** (the table may just be empty); `permission denied` / 401/403 = safe for REST. Also check Dashboard -> Database -> Replication for which tables are published.
+
+**Why I did not "just enable RLS":** `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` with *no* policies is safe for the backend (service role bypasses RLS) and would close both holes, **but it will also stop the three realtime
+subscriptions from delivering anything**, because they run as anon. So the practice-session "message delivered" updates and calendar "prep generated" updates would silently stop. D2's worry about breaking things was about backend queries;
+this is the browser-side dependency it did not account for. The real fix is a design decision:
+1. Authenticate the realtime client with the user's session token and add *narrow* RLS SELECT policies for just the subscribed tables (workspace/user scoped), enabling RLS on all the others with no policies; or
+2. Move delivery notifications off Supabase Realtime (the backend already streams SSE for chat; polling or SSE for these two events), then enable RLS everywhere with no policies; or
+3. Revoke `anon` table grants and rely on Realtime Broadcast instead.
+Interim mitigation that breaks nothing: `REVOKE ALL ON ALL TABLES IN SCHEMA public FROM anon;` closes **REST** exposure for anon but will also cut the realtime subscriptions; so it is the same trade-off. I changed no code or SQL for this.
+
+**Also revisit D2:** its stated reason ("isn't justified by a specific confirmed gap") should be re-read in light of this. Recommend the owner run the check above before anything else in this audit.
+
+**Fix status:** NOT fixed — needs the owner's check and a design decision; documented only.
+
+### 1.67 — LOW/MEDIUM — `schema.sql` structural review (script-based, not run against a live DB) (full audit, `schema.sql` constraints row)
+**Method:** parsed `schema.sql` (48 tables, 100 foreign keys, 4702 lines) with a script, then spot-checked the surprising results against the file. Not executed against Postgres in this pass.
+
+**Sound:** all 48 tables have a primary key. 57 FKs cascade, 22 `SET NULL`, 12 have no `ON DELETE` clause.
+
+**Findings (none changed; all are decisions or low-risk hardening):**
+1. **26 ownership/reference columns have no foreign key**, so there is no referential integrity and no cascade: `ai_usage_events.{workspace_id,user_id}`, `availability_windows.{workspace_id,user_id}`, `booking_pages.{workspace_id,user_id}`,
+   `calendar_ai_events.{workspace_id,user_id,event_id}`, `conversation_commitments.{user_id,source_id}`, `conversation_signals.{user_id,source_id}`, `event_attendees.workspace_id`, `practice_curriculum.user_id`, `practice_drills.user_id`,
+   `practice_sessions.{coaching_chat_id,workspace_id}`, `prospect_insights.user_id`, `prospect_merge_candidates.workspace_id`, `prospects.user_id`, `user_notifications.user_id`, `user_skill_profile.user_id`, `voice_memos.{workspace_id,user_id}`,
+   `workspace_ai_usage_daily.workspace_id`. Some may be intentional (e.g. `source_id` polymorphic), but `workspace_id`/`user_id` on user content tables (`prospects`, `voice_memos`) are not.
+2. **12 FKs have no `ON DELETE` behavior** (default NO ACTION, so deleting the parent is *blocked*): chats.growth_card_id -> growth_cards; daily_check_ins.workspace_id -> workspaces; opportunities.assigned_to -> users; practice_badges.workspace_id -> workspaces; practice_drills.session_id -> practice_sessions; practice_drills.workspace_id -> workspaces; practice_interruptions.chat_id -> chats; practice_sessions.triggered_by_feedback_id -> feedback; user_memory.workspace_id -> workspaces; user_performance_profiles.workspace_id -> workspaces; workspace_members.invited_by -> users; workspaces.owner_user_id -> users. Notably `workspaces.owner_user_id -> users` and `opportunities.assigned_to -> users` block a hard delete of a user.
+3. **26 FK columns have no index starting with that column** (heuristic: composite indexes that lead with another column are not counted), e.g. `chats.user_id`, `chat_messages.user_id`, `user_events.user_id`, `practice_badges.user_id`, `chats.practice_session_id`,
+   `file_uploads.chat_id`, `workspace_members.invited_by`. Mostly a scale/performance and cascade-speed concern; confirm against real query plans before adding indexes.
+4. **Nullable ownership columns:** `calendar_ai_events.user_id`, `chat_topic_tags.user_id`, `feature_usage_events.user_id`, `goal_notes.user_id`, `practice_curriculum.user_id`, `practice_drills.user_id`, `user_memory.user_id`, `user_skill_profile.user_id`,
+   `workspace_members.user_id` (the last is plausibly intentional for pending invites). A NULL-owner row is invisible to every user-scoped query.
+5. **Account deletion never removes user content.** `deleteAccount` (checked in `routes/user.js`) is a soft delete: it scrubs `name`/`email`, marks owned workspaces deleted and removes the auth user; no job in `jobs/`/`workers/` hard-deletes afterwards. So chats, prospects,
+   voice-memo transcripts, calendar data and so on persist indefinitely, and the missing FKs in (1) mean even a manual hard delete would leave rows behind. That is a retention/privacy decision (e.g. GDPR erasure expectations) for the owner, not a code bug.
+
+**Fix status:** documented only; schema changes need an owner decision and a migration plan.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

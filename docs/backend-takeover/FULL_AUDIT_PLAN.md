@@ -174,7 +174,7 @@ ownership-scoping check; a route file does):
 | Item | Status | Note |
 |---|---|---|
 | schema.sql — structure/ordering | ✅ (prior pass) | Verified by live execution, milestone 6 |
-| schema.sql — every table's constraints/nullability/FKs individually | ⏳ | Only the tables a specific finding touched were examined closely |
+| schema.sql — every table's constraints/nullability/FKs individually | 🚩 | Script-based structural review of all 48 tables (not run against a live DB): 26 ownership columns without FKs, 12 FKs without ON DELETE, 26 unindexed FK columns, nullable owner columns, soft-delete retention. **Plus: the browser uses the public anon key with RLS off (1.66) — owner must verify.** See AUDIT.md 1.66, 1.67. |
 | migrations/ — each file's content vs schema.sql | 🔧 (prior pass, partial) | All checked for presence in schema.sql; content not deeply reviewed beyond that |
 
 ## Execution order

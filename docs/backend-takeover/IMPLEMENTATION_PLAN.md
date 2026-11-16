@@ -118,6 +118,12 @@ protected onboarding flow, where the correct fix shape is a product judgment cal
 
 ## Deferred / needs a decision, not yet scheduled
 
+- **[HIGHEST PRIORITY — verify first] RLS is off on all 48 tables while the browser uses the public anon key** (AUDIT.md 1.66, DECISIONS.md D2 addendum).
+  Run the two curl checks in 1.66. If rows come back, tenant data is readable by anyone with the site's JS. Fixing it also affects the three realtime
+  subscriptions (practice session delivery, calendar prep), so it needs a short design decision, not a blind `ENABLE ROW LEVEL SECURITY`.
+- **Schema hardening and retention** (AUDIT.md 1.67) — 26 ownership columns without FKs, 12 FKs without `ON DELETE`, unindexed FK columns, and account deletion that
+  keeps all user content. Decide the retention/erasure policy first; the FK work follows from it.
+
 - **`SEED_MEMORY`'s redelivery behavior** (AUDIT.md 1.13, sharpened in 1.20) — only the `isRebuild: false` path
   (fresh onboarding completion, `POST /onboarding/answers`) lacks a redelivery guard; the `isRebuild: true` path
   (`POST /onboarding/rebuild-voice-profile`) already clears-then-reseeds safely. Precise severity, confirmed by

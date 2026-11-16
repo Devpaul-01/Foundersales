@@ -74,7 +74,7 @@ ownership-scoping check; a route file does):
 | suggestions.js | 🔧 | Switched manual JSON.parse to the tested parseJSONArray utility (not a live crash, just more robust/consistent). Noted a two-utility duplication to revisit later. See AUDIT.md 1.23. |
 | upload.js | 🔧 (prior pass, partial) | multer usage checked for the CVE fix; full route logic not reviewed |
 | user.js | ✅ (prior pass) | Reviewed in original engagement's milestones 1-2, deferred-items pass |
-| workspace-activity.js | ⏳ | |
+| workspace-activity.js | 🔧 | LOW: negative limit/offset gave a 500; clamped. Scoping/permission correct. 6 tests (1 fails on old code). See AUDIT.md 1.61. |
 | workspaces.js | ✅ (prior pass) | Reviewed in original engagement's milestones 1-2, deferred-items pass |
 
 ### Jobs (19)

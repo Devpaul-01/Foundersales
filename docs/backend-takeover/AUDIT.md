@@ -1791,6 +1791,17 @@ No code changes. Each was read in full.
   **Express 5 `req.query` is a read-only getter**, so the three `'query'` routes would throw on an Express upgrade. Also returns only `fieldErrors`, so a root-level type failure
   (body not an object) yields an empty `details`.
 
+### 1.61 — LOW — `routes/workspace-activity.js`: negative limit/offset caused a 500 (full audit, file 51/80)
+**Location:** `backend/src/routes/workspace-activity.js` (34 lines)
+
+Full read. Scoping is correct: manager-gated via `requirePermission('manager')`, filtered by `req.workspace.id`, mounted behind auth + workspace middleware in both `app.js` and `server.js`. Returning member name/email and activity metadata to managers is by design (see its header).
+
+**Defect, fixed:** `limit`/`offset` were only capped above (`Math.min(.., 100)`), so `?limit=-5` or `?offset=-10` reached `.range()` unchanged, which PostgREST rejects, and the manager got a 500. Now `limit` is clamped to 1..100 and `offset` to >= 0 (non-numeric still falls back to 20 / 0).
+
+**Verified:** new `routes/__tests__/workspaceActivity.test.js` (6 tests, handler invoked directly with Supabase mocked): workspace scoping, defaults, cap at 100, negative clamp, non-numeric, DB error propagation. The negative-clamp test fails on the original. Suite 67/67. (My first version of that test asserted the wrong clamp value; the code was right and I corrected the test.)
+
+**Fix status:** fixed and verified.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

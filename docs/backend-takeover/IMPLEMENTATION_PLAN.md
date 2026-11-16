@@ -190,6 +190,9 @@ protected onboarding flow, where the correct fix shape is a product judgment cal
   stricter on multi-instance deployments; review the configured `max` values in `limiters.js` against real usage.
 - **Rate-limit fallback is sticky for the process lifetime** (AUDIT.md 1.62) — if Redis is down at boot, limiters stay in-memory until restart.
 
+- **Attachment URL allowlist is Cloudinary-only** (AUDIT.md 1.63) — if the frontend ever uses a custom Cloudinary domain or another source, add that host to
+  `isAllowedAttachmentUrl`. Consider also rejecting non-allowlisted URLs with a 400 in `chat.js`'s schema (they are currently accepted and stored, just never fetched).
+
 - **Duplicate workspace-switch endpoints** (AUDIT.md 1.4) — see DECISIONS.md. Not removing either without
   confirming the frontend's actual usage, since frontend changes are out of scope and I can't verify which one（s）
   it calls without reading frontend code, which is permitted to *read* for this purpose even though not to *change*.

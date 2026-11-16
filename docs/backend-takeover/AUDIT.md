@@ -1833,6 +1833,40 @@ model output, which for meeting prep/debrief content can include names and detai
 
 **Fix status:** rateLimitStore fixed and verified; calendarAiSchemas clean.
 
+### 1.63 — HIGH — `utils/attachmentProcessor.js`: SSRF with response reflection through chat attachment URLs (full audit, file 54/80)
+**Location:** `backend/src/utils/attachmentProcessor.js` (301 lines), fed by `routes/chat.js` (schema at ~line 496, call sites ~1047 and ~1586)
+
+**Defect, fixed.** `POST` chat-message bodies accept `attachments: [{ name, type, url }]` and `chat.js` validates `url` only with `z.string().url()`, which accepts any
+URL. `preprocessAttachmentsForGrok` then fetched that URL **server-side** with `axios` (text/PDF/image) and put the result into the model prompt (documents: first 8000 chars of the
+body; images: base64 sent to a vision model). An authenticated user could therefore make the server request an internal address — e.g. a cloud metadata endpoint such as
+`http://169.254.169.254/...`, `localhost`, or an internal service — and read the response by asking the model to repeat the attached "document". Classic SSRF, with the response
+reflected back to the attacker.
+
+**Fix:** `preprocessAttachmentsForGrok` now refuses to fetch any URL that is not one of our own uploads. The new exported `isAllowedAttachmentUrl` requires `https:`, host exactly
+`res.cloudinary.com`, no userinfo, no non-default port, and, when `CLOUDINARY_CLOUD_NAME` is known, a path under `/<our cloud>/` (so another tenant's assets are refused too). Those
+are the only URLs `services/storage.js` ever produces. A refused attachment becomes the same kind of placeholder as a missing URL ("... is not an uploaded file — it was not read"); the
+request itself still succeeds. Also added the missing `maxContentLength` (10 MB) to the PDF download, which was the only one of the three fetches without a size bound.
+
+**Checked for other sinks:** every other server-side `fetch`/`axios` call was reviewed: `multiProvider.js` (fixed provider base URLs), `voiceMemoService.js:114` (URL built server-side by
+`cloudinary.url(memo.storage_path)`), `practice.js:57` (env-configured webhook). `attachmentProcessor.js` was the only one taking a client-supplied URL.
+
+**Verified:** new `utils/__tests__/attachmentProcessor.test.js` (21 cases, `axios` mocked): allows our Cloudinary URLs; rejects cloud-metadata IP, localhost, loopback https, internal hostname,
+plain http, another cloud's path, lookalike host (`res.cloudinary.com.evil.example`), userinfo trick (`res.cloudinary.com@evil.example`), credentials, odd port, `file:`, `data:`, garbage and
+empty; confirms a disallowed URL results in **zero** `axios.get` calls and a placeholder; an allowed text file is still fetched and read; the no-URL placeholder is unchanged. Against the
+original file all 19 new-behavior cases fail (the helper does not exist and the fetch happens). Full suite 91/91. Not exercised against a real Cloudinary account or a real vision model.
+
+**Behavior change / risks to know:**
+- Any attachment whose URL is **not** `https://res.cloudinary.com/<cloud>/...` is now silently not read (the user message still goes through). If the frontend ever sends another origin (a custom
+  Cloudinary CNAME domain, a different CDN, a pasted link), it will stop working; the allowlist would need that host added.
+- I did not change `chat.js`'s schema, so the bad URL is still *accepted* and persisted on the stored message (`attachments` is saved as sent). It is simply never fetched. Rejecting it at the
+  edge with a 400 would be a reasonable follow-up.
+- Redirects are still followed by `axios` by default; with the host pinned to our own Cloudinary path this does not reopen the hole in practice, but `maxRedirects: 0` would be stricter.
+
+**Other observations:** the file keeps its legacy "Grok" names (the header explains why); `buildGrokAttachmentPrompt` interpolates the client-supplied filename into the prompt (normal prompt-injection surface,
+not a new one).
+
+**Fix status:** fixed and verified.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

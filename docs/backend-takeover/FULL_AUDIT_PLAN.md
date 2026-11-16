@@ -146,7 +146,7 @@ ownership-scoping check; a route file does):
 | cloudinary.js | 🔧 | MEDIUM: `CLOUDINARY_URL`-only config (the documented form) was wiped by explicit `undefined` values, so every upload would fail. Fixed; child-process tests (URL-only case fails on old code). Cloudinary vars not in validateEnv noted. See AUDIT.md 1.58. |
 | constants.js | 🔧 (prior pass, partial) | Only QUEUE_JOB_TYPES/DELIVERY_STATUS/BACKGROUND_JOB_TYPES entries checked |
 | firebase.js | ✅ (prior pass) | Fully read, milestone 1 (FIREBASE_SERVICE_ACCOUNT fix) |
-| limiters.js | ⏳ (partial) | Only `buildLimiter` touched (added `passOnStoreError: true`, see AUDIT.md 1.51). Full file not yet read. |
+| limiters.js | 🔧 | Read in full. `passOnStoreError: true` added earlier (1.51); the real problem (19/20 limiters not on Redis) was in rateLimitStore.js (1.62). All 20 namespaces unique; `trust proxy` = 1 is set in both entry points (assumes exactly one proxy hop); IPv6 clients are keyed on the raw address (express-rate-limit 7.x), so a /64 can rotate to evade IP limits. See AUDIT.md 1.51, 1.62. |
 | rateLimitStore.js | 🔧 | HIGH: a connect-in-progress race meant only 1 of 20 limiters got Redis (19 silently per-instance). Reproduced live (1/20), fixed (20/20), 3 tests (2 fail on old code). Sticky boot-time fallback noted. See AUDIT.md 1.62. |
 | sentry.js | 🚩 | Read in full; clean. Likely (unverified) issue: `initSentry()` runs after hoisted imports, so auto-tracing is probably not instrumented. See AUDIT.md 1.60. |
 | supabase.js | ✅ (prior pass) | Fully read, milestone 1 |
@@ -160,7 +160,7 @@ ownership-scoping check; a route file does):
 ### Utils (9)
 | File | Status | Note |
 |---|---|---|
-| attachmentProcessor.js | ⏳ | |
+| attachmentProcessor.js | 🔧 | HIGH: SSRF with response reflection: client-supplied attachment URLs (schema only checks `.url()`) were fetched server-side and fed to the model. Now allowlisted to our Cloudinary uploads; PDF download size-bounded. 21 tests. Other fetch sinks checked. See AUDIT.md 1.63. |
 | concurrencyGuard.js | 🔧 (prior pass, partial) | Head of file read in milestone 1 recon; not fully read |
 | jobHelpers.js | 🔧 | MEDIUM: `logJob` ignored Supabase's returned `{ error }`, so the L4 Sentry/warn path never fired for an unwritable job_logs. Fixed; tests (fail on old code). See AUDIT.md 1.59. |
 | logger.js | 🔧 | `JSON.stringify` could throw on circular/BigInt values from inside catch blocks; now safe. Tests (fail on old code). Raw-string log forging noted, not changed. See AUDIT.md 1.59. |

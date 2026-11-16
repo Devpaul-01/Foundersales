@@ -21,6 +21,30 @@
 // ============================================================
 
 import axios from 'axios';
+import cloudinary from '../config/cloudinary.js';
+
+// Full audit 1.63 (SSRF): attachment URLs come straight from the client
+// (chat.js only checks z.string().url(), which accepts ANY url — internal IPs,
+// cloud metadata endpoints, localhost services). This module fetches them
+// server-side and puts the body into the model prompt, so a user could read
+// internal resources by asking the model to repeat them. The only URLs this
+// product ever legitimately produces come from services/storage.js, i.e.
+// https://res.cloudinary.com/<our cloud>/..., so that is all we allow.
+const ALLOWED_ATTACHMENT_HOST = 'res.cloudinary.com';
+
+export const isAllowedAttachmentUrl = (rawUrl) => {
+  let u;
+  try { u = new URL(rawUrl); } catch { return false; }
+  if (u.protocol !== 'https:') return false;
+  if (u.hostname.toLowerCase() !== ALLOWED_ATTACHMENT_HOST) return false;
+  if (u.username || u.password) return false;
+  if (u.port && u.port !== '443') return false;
+  const cloudName = cloudinary.config().cloud_name;
+  // When our cloud name is known, only our own assets; otherwise the host
+  // check above is still enough to keep every internal address out.
+  if (cloudName && !u.pathname.startsWith(`/${cloudName}/`)) return false;
+  return true;
+};
 
 /**
  * Process attachments into a format the AI can understand.
@@ -122,6 +146,16 @@ export const preprocessAttachmentsForGrok = async (attachments) => {
     const kind = classifyFile(file.type);
 
     console.log(`[AttachmentProcessor] Processing "${filename}"`, { rawType: file.type, kind, hasUrl: !!url });
+
+    if (url && !isAllowedAttachmentUrl(url)) {
+      console.warn(`[AttachmentProcessor] "${filename}" has a url that is not one of our uploads — refusing to fetch it`);
+      processed.push({
+        type: 'unknown',
+        filename,
+        content: `[File "${filename}" was attached but is not an uploaded file — it was not read]`,
+      });
+      continue;
+    }
 
     if (!url) {
       console.warn(`[AttachmentProcessor] "${filename}" has no url — skipping fetch, using placeholder`);
@@ -281,7 +315,7 @@ const fetchAsBase64 = async (url) => {
 const extractPdfText = async (url) => {
   try {
     const { default: pdfParse } = await import('pdf-parse/lib/pdf-parse.js');
-    const response = await axios.get(url, { responseType: 'arraybuffer', timeout: 20000 });
+    const response = await axios.get(url, { responseType: 'arraybuffer', timeout: 20000, maxContentLength: 10 * 1024 * 1024 });
     const buffer = Buffer.from(response.data);
     const result = await pdfParse(buffer);
     return result.text?.trim() || null;

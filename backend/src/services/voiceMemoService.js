@@ -21,6 +21,7 @@
 import supabaseAdmin from '../config/supabase.js';
 import { uploadAudioBuffer, deleteAudioObject } from './storage.js';
 import { transcribeAudio } from './transcription.js';
+import { downloadAudioBuffer } from '../utils/downloadAudio.js';
 import { generateMeetingDebrief } from './groqCalendarIntelligence.js';
 import { extractCommitmentsAndSignals } from './calendarCommitmentsSignals.js';
 import { shouldExtractCommitmentsSignals, recordGateDecision } from './calendarAiGate.js';
@@ -111,7 +112,7 @@ export async function transcribeMemo({ memoId, workspaceId, userId }) {
     const cloudinary = (await import('../config/cloudinary.js')).default;
     const audioUrl = cloudinary.url(memo.storage_path, { resource_type: 'video' });
 
-    const audioBuffer = await fetch(audioUrl).then(r => r.arrayBuffer());
+    const audioBuffer = await downloadAudioBuffer(audioUrl, { maxBytes: VOICE_MEMO_LIMITS.MAX_SIZE_BYTES });
     transcript = await transcribeAudio(audioBuffer, { mimeType: memo.mime_type, filename: memo.original_filename || 'memo.webm' });
 
     await supabaseAdmin.from('voice_memos').update({

@@ -128,7 +128,7 @@ ownership-scoping check; a route file does):
 | streaming.js | 🔧 | LOW: persistence UPDATE results were ignored (a failed save left an empty row with nothing logged); now logged. Crash and throw paths traced and ruled out. First tests for this path added (6; 2 fail on old code). Observations on ordering and placeholder rows. See AUDIT.md 1.56. |
 | tokenTracker.js | 🚩 | Read in full, checked against the real SQL function. No code change. Four low-impact observations (quota checks fail open on DB error; non-atomic check/record; global-cap row limit at scale; all providers recorded as 'groq') and `getWorkspaceUsageSummary` has no callers. See AUDIT.md 1.53. |
 | transcription.js | 🔧 | LOW: every failure retried on every key (bad audio re-uploaded up to 10x); now only key faults and transient failures move on. Stale 'cooldown' header claim fixed. 10 tests (4 fail on old code). Lead noted for voiceMemoService (no `r.ok` check on the audio download). See AUDIT.md 1.57. |
-| voiceMemoService.js | ✅ (prior pass) | Fully read for idempotency, milestone 7 |
+| voiceMemoService.js | ✅ (prior pass) + 🔧 | Re-opened: audio download had no status/size check (error pages were transcribed). Added `utils/downloadAudio.js` with tests; one-line wiring. Rest not re-read. See AUDIT.md 1.65. |
 
 ### Middleware (5)
 | File | Status | Note |

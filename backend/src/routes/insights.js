@@ -11,7 +11,7 @@ import { parseAIJson }       from '../utils/parseAIJson.js';
 import { INTELLIGENCE_TTL_S } from '../config/constants.js';
 import {
   gatherIntelligenceContext, deriveIntelligenceMetrics,
-  buildIntelligencePrompt, generateRuleBasedInsights,
+  buildIntelligencePrompt, generateRuleBasedInsights, normalizeInsights,
 } from '../services/intelligenceReport.js';
 
 const router = Router();
@@ -482,7 +482,10 @@ router.get('/intelligence', asyncHandler(async (req, res) => {
       tier: 'fast', workspaceId, userId, sourceJob: 'intelligence',
     });
 
-    const insights = parseAIJson(content);
+    // Full audit 1.64: validate before caching/returning; a null result throws
+    // into the catch below, which serves the rule-based fallback.
+    const insights = normalizeInsights(parseAIJson(content));
+    if (!insights) throw new Error('AI returned no usable insights');
     // IMPL-M11-01: INTELLIGENCE_TTL_S is now a real, imported constant
     // (config/constants.js) — this line previously threw a
     // ReferenceError on every successful AI generation, which the

@@ -1867,6 +1867,32 @@ not a new one).
 
 **Fix status:** fixed and verified.
 
+### 1.64 — LOW — `services/intelligenceReport.js` (+ `routes/insights.js`): unvalidated AI output was cached and returned; flat trend labeled "Declining" (full audit, file 55/80)
+**Location:** `backend/src/services/intelligenceReport.js` (324 lines); consumer `backend/src/routes/insights.js` (`GET /intelligence`)
+
+Full read. **Scoping is correct:** all 12 gather queries filter by both `workspace_id` and `user_id`. Callers checked: `routes/insights.js` is the only consumer, with correct argument order
+(`gatherIntelligenceContext(userId, workspaceId)`). The `.catch(() => {})` on `setCache` there is fine (`setCache` is a real async function, not a Supabase builder; see 1.54).
+
+**Defects, fixed:**
+1. **AI output was cached and returned unchecked.** The route did `const insights = parseAIJson(content)` then cached it and returned it. If the model answered with an object (`{ "insights": [...] }`), a
+   string, or items missing `title`/`body`, that went straight to the client and stayed cached for the full TTL. New `normalizeInsights` (exported) requires an array, keeps only items with a non-empty string
+   `title` and `body`, fills `type`/`icon` defaults, nulls a non-string `action`, caps at 5 (the prompt asks for 3-5), and returns `null` when nothing usable remains; the route then throws into its
+   existing catch and serves the rule-based fallback instead.
+2. **A flat skill trend was described to the model as "Declining".** The prompt used `isImproving ? 'Improving' : 'Declining'`, so `composite_delta` of `0` read as "Declining (0.00)". Now three-state:
+   Improving / Declining / Flat.
+
+**Verified:** new `services/__tests__/intelligenceReport.test.js` (10 tests): trend wording for +/-/0 and absent, `normalizeInsights` on good input, wrong shapes, partial items, defaults and the cap, and that the
+rule-based fallback always yields an insight. Six fail on the original (the helper and the Flat label do not exist); full suite 101/101. The route change itself is a three-line wiring change and was not
+exercised end to end (that needs the whole app, auth and a model).
+
+**Observations, not changed:**
+- Every query ignores its `error`, so a failed query silently becomes "No active goals" / "No signals detected" in the prompt and the model is asked for insights on partial data without any indication.
+- Check-in mood average counts a null `mood_score` as 5 (`c.mood_score || 5`), which biases the average toward neutral; a real 0 would also become 5.
+- "Stalled deals" is counted only within the 10 most recent contacted/replied/call_demo opportunities, and includes deals that are progressing (replied/call_demo) if no feedback was ever prompted.
+- User-supplied text (goals, objection phrases, product description) is interpolated into the prompt: normal, unavoidable prompt-injection surface for this feature.
+
+**Fix status:** fixed and verified.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

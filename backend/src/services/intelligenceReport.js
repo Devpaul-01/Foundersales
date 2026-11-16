@@ -214,7 +214,7 @@ export const buildIntelligencePrompt = (userCtx, context, metrics) => {
     `== Practice Summary ==`,
     `Total completed: ${practice?.length || 0}`,
     practice?.length ? `Weakest skills: ${topWeakness.join(', ') || 'None identified'}` : '',
-    skillTrend ? `Skill trend: ${isImproving ? '✅ Improving' : '⚠️ Declining'} (${skillTrend.composite_delta > 0 ? '+' : ''}${(skillTrend.composite_delta || 0).toFixed(2)})` : '',
+    skillTrend ? `Skill trend: ${skillTrend.composite_delta > 0 ? '✅ Improving' : skillTrend.composite_delta < 0 ? '⚠️ Declining' : '➖ Flat'} (${skillTrend.composite_delta > 0 ? '+' : ''}${(skillTrend.composite_delta || 0).toFixed(2)})` : '',
     skillTrend?.top_weakness ? `Top weakness: ${skillTrend.top_weakness}` : '',
     skillTrend?.top_strength ? `Top strength: ${skillTrend.top_strength}` : '',
     '',
@@ -318,7 +318,31 @@ export const generateRuleBasedInsights = (context, metrics) => {
   return insights.slice(0, 5);
 };
 
+// ──────────────────────────────────────────────────────────────
+// 5. AI OUTPUT VALIDATION (full audit 1.64)
+// routes/insights.js used to cache and return whatever JSON the model
+// produced. A model that answers with an object instead of an array, or with
+// items missing title/body, would reach the client AND be cached for the full
+// TTL. Returns a clean array (max 5) or null when nothing usable came back,
+// in which case the route falls back to the rule-based insights.
+// ──────────────────────────────────────────────────────────────
+export const normalizeInsights = (raw) => {
+  if (!Array.isArray(raw)) return null;
+  const clean = raw
+    .filter((i) => i && typeof i === 'object' && typeof i.title === 'string' && i.title.trim()
+      && typeof i.body === 'string' && i.body.trim())
+    .slice(0, 5)
+    .map((i) => ({
+      type:   typeof i.type === 'string' && i.type ? i.type : 'coaching',
+      icon:   typeof i.icon === 'string' && i.icon ? i.icon : '💡',
+      title:  i.title.trim(),
+      body:   i.body.trim(),
+      action: typeof i.action === 'string' && i.action.trim() ? i.action.trim() : null,
+    }));
+  return clean.length ? clean : null;
+};
+
 export default {
   gatherIntelligenceContext, deriveIntelligenceMetrics,
-  buildIntelligencePrompt, generateRuleBasedInsights,
+  buildIntelligencePrompt, generateRuleBasedInsights, normalizeInsights,
 };

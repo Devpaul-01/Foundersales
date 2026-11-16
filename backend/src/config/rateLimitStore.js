@@ -80,25 +80,35 @@ import { reportDegradedMode } from '../utils/reportDegradation.js';
 
 const _stores = new Map(); // namespace -> RedisStore instance
 let _client;                // cached raw redis client — ONE connection shared by every namespaced store
-let _clientAttempted = false;
+let _clientPromise = null; // the ONE in-flight/settled connection attempt, shared by every caller
 let _redisUnavailable = false;
 
-const getSharedClient = async () => {
-  if (_client) return _client;
-  if (_redisUnavailable) return null;
-  if (_clientAttempted) return null; // already tried and failed this process lifetime — don't retry every call
-  _clientAttempted = true;
-
-  const client = await getRawClient();
-  if (!client) {
-    console.warn('[RateLimit] Redis unavailable — falling back to per-instance in-memory rate limiting.');
-    reportDegradedMode('ratelimit-store-fallback', { reason: 'redis_unavailable_at_store_construction' });
-    _redisUnavailable = true;
-    return null;
+// Full audit 1.62: this used a boolean `_clientAttempted` that was set BEFORE
+// the connection finished, and every caller that arrived while the first was
+// still connecting got `null` ("already tried and failed"). config/limiters.js
+// starts all ~20 limiters concurrently at import time, so only the first
+// ('auth') ever received the Redis client; the other 19 silently fell back to
+// per-instance in-memory counters even with a healthy Redis and no warning —
+// defeating the cross-instance limiting this module exists for. Reproduced:
+// 1 of 20 "Redis-backed rate limit store initialized" lines. All callers now
+// await the same promise.
+const getSharedClient = () => {
+  if (_client) return Promise.resolve(_client);
+  if (_redisUnavailable) return Promise.resolve(null);
+  if (!_clientPromise) {
+    _clientPromise = (async () => {
+      const client = await getRawClient();
+      if (!client) {
+        console.warn('[RateLimit] Redis unavailable — falling back to per-instance in-memory rate limiting.');
+        reportDegradedMode('ratelimit-store-fallback', { reason: 'redis_unavailable_at_store_construction' });
+        _redisUnavailable = true;
+        return null;
+      }
+      _client = client;
+      return _client;
+    })();
   }
-
-  _client = client;
-  return _client;
+  return _clientPromise;
 };
 
 /**
@@ -132,6 +142,9 @@ export const createRateLimitStore = async (namespace = 'default') => {
 
   const client = await getSharedClient();
   if (!client) return undefined;
+  // Re-check after the await: a concurrent call for the same namespace may
+  // have created the store while this one waited on the shared client.
+  if (_stores.has(namespace)) return _stores.get(namespace);
 
   const store = new RedisStore({
     // rate-limit-redis integrates with a raw `redis` v4 client via its

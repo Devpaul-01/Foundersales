@@ -147,7 +147,7 @@ ownership-scoping check; a route file does):
 | constants.js | 🔧 (prior pass, partial) | Only QUEUE_JOB_TYPES/DELIVERY_STATUS/BACKGROUND_JOB_TYPES entries checked |
 | firebase.js | ✅ (prior pass) | Fully read, milestone 1 (FIREBASE_SERVICE_ACCOUNT fix) |
 | limiters.js | ⏳ (partial) | Only `buildLimiter` touched (added `passOnStoreError: true`, see AUDIT.md 1.51). Full file not yet read. |
-| rateLimitStore.js | ⏳ | Only its import of getRawClient seen |
+| rateLimitStore.js | 🔧 | HIGH: a connect-in-progress race meant only 1 of 20 limiters got Redis (19 silently per-instance). Reproduced live (1/20), fixed (20/20), 3 tests (2 fail on old code). Sticky boot-time fallback noted. See AUDIT.md 1.62. |
 | sentry.js | 🚩 | Read in full; clean. Likely (unverified) issue: `initSentry()` runs after hoisted imports, so auto-tracing is probably not instrumented. See AUDIT.md 1.60. |
 | supabase.js | ✅ (prior pass) | Fully read, milestone 1 |
 | validateEnv.js | ✅ (prior pass) | Fully read + fixed, milestone 1 |
@@ -155,7 +155,7 @@ ownership-scoping check; a route file does):
 ### Schemas (1)
 | File | Status | Note |
 |---|---|---|
-| calendarAiSchemas.js | ⏳ | Only imported names seen, not read |
+| calendarAiSchemas.js | ✅ | Read in full; clean. Logs up to 500 chars of raw model output on validation failure (possible calendar PII in logs). See AUDIT.md 1.62. |
 
 ### Utils (9)
 | File | Status | Note |

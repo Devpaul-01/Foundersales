@@ -118,7 +118,7 @@ ownership-scoping check; a route file does):
 | groq-session.js | 🔧 | MEDIUM: 3 functions could store malformed AI output as valid data, fixed. 7 JSON.parse calls switched total. See AUDIT.md 1.46. |
 | groq.js | ✅ | Clean barrel file — all 42 re-exports cross-checked against real source exports, all correct. See AUDIT.md 1.47. |
 | groqCalendarIntelligence.js | 🔧 | Clean, already uses parser utilities. Corrects a mistake in an earlier audit entry — synthesizeMeetingNotes genuinely calls the two "flagged" functions; synthesizeMeetingNotes itself is the one with no callers. See AUDIT.md 1.48. |
-| intelligenceReport.js | ⏳ | |
+| intelligenceReport.js | 🔧 | LOW: AI output was cached/returned unvalidated (now `normalizeInsights` + fallback); a flat skill trend was labeled 'Declining'. Scoping correct. 10 tests (6 fail on old code). See AUDIT.md 1.64. |
 | multiProvider.js | 🚩 | Fully read. Stale header comment fixed (claimed old classifier functions were still present). Four design concerns flagged, not fixed (no provider-level short-circuit, unbounded OpenRouter discovery, no fetch timeout / unreadable-body handling, per-key vs per-model 429 cooldown). Duplicate-token-on-stream-failure suspicion traced and ruled out. See AUDIT.md 1.49. |
 | notifications.js | 🔧 | HIGH: `.catch()` on a Supabase builder (does not exist) threw and never ran the query; same bug at 6 other sites. Fixed all 7, regression guard added. See AUDIT.md 1.54. |
 | prospectDedup.js | ✅ (prior pass) | Fully read for idempotency, milestone 7 |

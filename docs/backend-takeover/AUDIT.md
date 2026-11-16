@@ -1893,6 +1893,23 @@ exercised end to end (that needs the whole app, auth and a model).
 
 **Fix status:** fixed and verified.
 
+### 1.65 — LOW — `services/voiceMemoService.js`: audio download never checked the HTTP status or size (follow-up to 1.57; file re-opened)
+**Location:** `backend/src/services/voiceMemoService.js:114` (transcription step); new `backend/src/utils/downloadAudio.js`
+
+Re-opens a file previously marked clean (a prior pass read it for idempotency). Lead from 1.57, confirmed: the transcription step did
+`await fetch(audioUrl).then(r => r.arrayBuffer())`, with no `r.ok` check. A 403/404/5xx from the storage CDN (for example if the Cloudinary object was deleted or never finished uploading) had its
+error page passed to the transcriber as if it were audio. With the 1.57 change that now fails fast with an opaque "HTTP 400" from Groq stored in `transcription_error`, rather than a message saying
+the download failed. There was also no size bound on the download.
+
+**Fix:** new `downloadAudioBuffer(url, { maxBytes })` throws a clear error on a non-OK status, on an oversized declared `Content-Length` (before reading the body), on an oversized body, and on an empty body.
+`voiceMemoService` uses it with the existing `VOICE_MEMO_LIMITS.MAX_SIZE_BYTES` (25 MB, the same ceiling as the upload path). The surrounding `try/catch` is unchanged, so a failure still marks the memo
+`failed` with the (now accurate) message and rethrows for the queue's retry.
+
+**Verified:** new `utils/__tests__/downloadAudio.test.js` (7 cases, `fetch` stubbed): success, 403/404/500, oversized by header (body not read), oversized by body, empty. Suite 108/108.
+The `voiceMemoService` wiring is a one-line substitution plus an import (syntax-checked, and the constant was already imported there); the full service was not re-read or run end to end.
+
+**Fix status:** fixed and verified at the helper level.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

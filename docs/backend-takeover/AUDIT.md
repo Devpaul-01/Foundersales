@@ -1791,6 +1791,48 @@ No code changes. Each was read in full.
   **Express 5 `req.query` is a read-only getter**, so the three `'query'` routes would throw on an Express upgrade. Also returns only `fieldErrors`, so a root-level type failure
   (body not an object) yields an empty `details`.
 
+### 1.61 — LOW — `routes/workspace-activity.js`: negative limit/offset caused a 500 (full audit, file 51/80)
+**Location:** `backend/src/routes/workspace-activity.js` (34 lines)
+
+Full read. Scoping is correct: manager-gated via `requirePermission('manager')`, filtered by `req.workspace.id`, mounted behind auth + workspace middleware in both `app.js` and `server.js`. Returning member name/email and activity metadata to managers is by design (see its header).
+
+**Defect, fixed:** `limit`/`offset` were only capped above (`Math.min(.., 100)`), so `?limit=-5` or `?offset=-10` reached `.range()` unchanged, which PostgREST rejects, and the manager got a 500. Now `limit` is clamped to 1..100 and `offset` to >= 0 (non-numeric still falls back to 20 / 0).
+
+**Verified:** new `routes/__tests__/workspaceActivity.test.js` (6 tests, handler invoked directly with Supabase mocked): workspace scoping, defaults, cap at 100, negative clamp, non-numeric, DB error propagation. The negative-clamp test fails on the original. Suite 67/67. (My first version of that test asserted the wrong clamp value; the code was right and I corrected the test.)
+
+**Fix status:** fixed and verified.
+
+### 1.62 — HIGH — `config/rateLimitStore.js`: only 1 of 20 limiters actually used Redis, even with a healthy Redis (full audit, files 52-53/80; also reviews `schemas/calendarAiSchemas.js`)
+**Location:** `backend/src/config/rateLimitStore.js` (150 lines); consumer `backend/src/config/limiters.js`
+
+**Defect, fixed.** `getSharedClient()` set a boolean `_clientAttempted = true` *before* the Redis connection finished, and any caller arriving afterwards got `null`
+("already tried and failed"). `limiters.js` starts all 20 limiters concurrently at import time (each `buildLimiter(...)` is an un-awaited promise gathered later),
+so only the first caller ('auth') ever received the client. The other 19 silently fell back to per-instance in-memory counters, with no warning (the fallback
+log/degraded-mode report fired only on the first caller's path).
+
+**Reproduced with a real Redis:** booting `limiters.js` printed exactly **one** "Redis-backed rate limit store initialized" line (namespace `auth`) out of 20 limiters.
+Effect: every limiter except `auth` enforced its limit per server instance, so with N instances the real limit was roughly N x the configured one. That is precisely the
+problem this module's header (C2 / IMPL-RATELIMIT-02) says it exists to solve, and the earlier "namespace per limiter" work was irrelevant for 19 of them.
+
+**Fix:** all callers now await one shared in-flight promise. Also re-checks the per-namespace cache after the `await`, because two concurrent calls for the *same* namespace
+each built a store (found by my own test; harmless for counting, but the docs promise one instance). After the fix: **20 of 20** limiters report a Redis-backed store
+with a live Redis; with Redis unreachable or `REDIS_URL` unset, all fall back with a single warning.
+
+**Verified:** new `config/__tests__/rateLimitStore.test.js` (3 tests, delayed fake Redis client): 20 concurrent namespaces all get distinct stores from one client lookup;
+unavailable Redis falls back for all with one warning; same namespace returns the same instance. Two of the three fail on the original. Suite 70/70. Live check above used
+a local `redis-server`, not a production Redis.
+
+**Behavior change to expect:** rate limits will now actually be shared across instances, i.e. effectively *stricter* than before for any multi-instance deployment (a user could
+previously get ~N x the limit). Worth knowing before it surprises a heavy user or an integration test that hammers an endpoint.
+
+**Still true, not changed (design limits):** the fallback is sticky for the whole process lifetime. If Redis is unreachable when the app boots (e.g. it starts a few seconds after the API), every
+limiter stays in-memory until restart even after Redis recovers. (Before the 1.51 fix this case hung forever instead.) Relatedly, see 1.51: a mid-life outage fails open via `passOnStoreError`.
+
+**`schemas/calendarAiSchemas.js` (79 lines) — read in full, no defect.** Plain zod schemas plus `validateOrFallback`. Minor: on validation failure it logs up to 500 characters of the raw
+model output, which for meeting prep/debrief content can include names and details from a user's calendar, so those land in application logs. Noted only.
+
+**Fix status:** rateLimitStore fixed and verified; calendarAiSchemas clean.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

@@ -16,8 +16,11 @@ const { log, logError } = createLogger('WorkspaceActivity');
 // GET /api/workspace/activity
 router.get('/activity', requirePermission('manager'), asyncHandler(async (req, res) => {
   const workspaceId = req.workspace.id;
-  const limit  = Math.min(parseInt(req.query.limit) || 20, 100);
-  const offset = parseInt(req.query.offset) || 0;
+  // Full audit 1.61: clamp both ends. A negative limit/offset (e.g. ?limit=-5)
+  // used to reach .range() as-is, which PostgREST rejects, so the manager got
+  // a 500 instead of a normal page.
+  const limit  = Math.min(Math.max(parseInt(req.query.limit) || 20, 1), 100);
+  const offset = Math.max(parseInt(req.query.offset) || 0, 0);
   log('FEED', { workspaceId, userId: req.user.id, limit, offset });
 
   const { data: events, error, count } = await supabaseAdmin

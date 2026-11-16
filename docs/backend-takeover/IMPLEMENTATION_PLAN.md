@@ -186,6 +186,10 @@ protected onboarding flow, where the correct fix shape is a product judgment cal
 - **`validate(schema, 'query')` on an Express 5 upgrade** (AUDIT.md 1.60) — `req.query` becomes read-only; the three `'query'` routes
   (`growth.js` x2, `opportunities.js`) would need a different way to hand over parsed values.
 
+- **Rate limits are now truly shared across instances** (AUDIT.md 1.62) — before, 19 of 20 limiters were per-instance. Expect limits to feel
+  stricter on multi-instance deployments; review the configured `max` values in `limiters.js` against real usage.
+- **Rate-limit fallback is sticky for the process lifetime** (AUDIT.md 1.62) — if Redis is down at boot, limiters stay in-memory until restart.
+
 - **Duplicate workspace-switch endpoints** (AUDIT.md 1.4) — see DECISIONS.md. Not removing either without
   confirming the frontend's actual usage, since frontend changes are out of scope and I can't verify which one（s）
   it calls without reading frontend code, which is permitted to *read* for this purpose even though not to *change*.

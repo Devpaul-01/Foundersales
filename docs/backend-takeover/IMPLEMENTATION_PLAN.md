@@ -179,8 +179,7 @@ protected onboarding flow, where the correct fix shape is a product judgment cal
 - **Uploads are public-by-URL** (AUDIT.md 1.55) — Cloudinary default delivery with an unguessable UUID path. Fine if
   nothing sensitive is uploaded; otherwise consider authenticated/signed delivery. Product decision.
 
-- **Sentry initialization order** (AUDIT.md 1.60) — `initSentry()` runs after hoisted ES imports, so automatic tracing is probably not
-  instrumented under `@sentry/node` 10.x. If tracing matters, preload Sentry with a `--import` file. Unverified without a DSN.
+- **Sentry initialization order** — RESOLVED in AUDIT.md 1.72 via a `--import` preload (if your host uses its own start command, add the flag there).
 - **`validate(schema, 'query')` on Express 5** — RESOLVED in AUDIT.md 1.70.
 
 - **Rate limits are now truly shared across instances** (AUDIT.md 1.62) — before, 19 of 20 limiters were per-instance. Expect limits to feel

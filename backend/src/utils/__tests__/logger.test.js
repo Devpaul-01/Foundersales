@@ -33,3 +33,12 @@ describe('createLogger', () => {
     expect(out[0]).toContain('real problem');
   });
 });
+
+describe('log-line safety (audit 1.70)', () => {
+  it('escapes CR/LF in string values so a value cannot forge extra log lines', () => {
+    log('EVENT', { note: 'hello\n[T] FORGED → admin=true\r\nmore' });
+    expect(out).toHaveLength(1);
+    expect(out[0]).not.toMatch(/[\r\n]/);
+    expect(out[0]).toContain('hello\\n[T] FORGED');
+  });
+});

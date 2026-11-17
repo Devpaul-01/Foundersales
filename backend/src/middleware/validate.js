@@ -11,6 +11,8 @@ export const validate = (schema, source = 'body') => (req, res, next) => {
       details: result.error.flatten().fieldErrors,
     });
   }
-  req[source] = result.data;
+  // Full audit 1.70: plain assignment (`req[source] = ...`) throws in Express 5,
+  // where req.query is a read-only getter. defineProperty works on both 4 and 5.
+  Object.defineProperty(req, source, { value: result.data, writable: true, configurable: true, enumerable: true });
   next();
 };

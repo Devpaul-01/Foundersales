@@ -1984,6 +1984,21 @@ whole key for 1 h (1.49 item 4), because whether the provider limits per model o
 
 **Fix status:** fixed and verified in tests.
 
+### 1.69 — RESOLUTION — chat attachment URLs are now rejected at the edge (follow-up to 1.63)
+**Decision:** reject, don't just ignore. Checked the frontend first: attachment URLs come from the upload response (`res.file.url` in `ChatPage.tsx`, i.e. the Cloudinary `secure_url` from `routes/upload.js`), so a strict check matches real usage.
+`routes/chat.js` now validates `attachments[].url` with the new exported `attachmentUrlSchema` (the same allowlist `isAllowedAttachmentUrl` uses for fetching), so a disallowed URL gets a **400** (`Attachment url must be a file you uploaded`) instead of being accepted, stored and merely never fetched. The fetch-time check from 1.63 stays as defense in depth.
+**Verified:** schema test added to `attachmentProcessor.test.js` (accepts our URL, rejects metadata IP and garbage with the message, optional still optional). **Not verified:** the full chat request path end to end. **Risk:** a client sending an attachment URL from any other origin now gets a 400.
+
+### 1.70 — RESOLUTION — small hardening decided and applied (deferred observations from 1.58, 1.59, 1.60)
+Each was an observation earlier; I decided to fix all of them because every one is cheap and low risk:
+1. **`middleware/validate.js`** assigns the parsed value with `Object.defineProperty` instead of `req[source] = ...`, so the three `'query'` routes keep working on Express 5, where `req.query` is a read-only getter (tested with a getter-only `req.query`).
+2. **`middleware/traceId.js`** trusts an incoming `X-Trace-Id` only if it is 1-128 characters from `[A-Za-z0-9._:-]`; anything else (spaces, control characters, overlong, non-ASCII) is replaced with a fresh UUID.
+3. **`utils/parseAIJson.js`** now tries the text as-is, then with only leading/trailing fences removed, then the original strip-everything behavior as the last resort. It is a strict superset: all 7 shapes the old version could parse still parse (tested), and JSON whose string values contain triple backticks, previously corrupted, now parses.
+4. **`utils/logger.js`** escapes CR/LF in string values so user text or model output cannot forge extra log lines.
+5. **`config/validateEnv.js`** prints an optional-variable warning at boot when Cloudinary is unconfigured (neither `CLOUDINARY_URL` nor all three discrete vars), instead of failing only at the first upload.
+**Verified:** 21 tests (`parseAIJson`, `traceIdValidate`, logger escaping, `validateEnvCloudinary`); 10 of the new-behavior cases fail on the original files. Suite 144/144.
+**Behavior to know:** log values containing newlines now print as a literal `\n`; a non-conforming client trace id is silently replaced.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

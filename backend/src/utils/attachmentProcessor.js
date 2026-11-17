@@ -21,6 +21,7 @@
 // ============================================================
 
 import axios from 'axios';
+import { z } from 'zod';
 import cloudinary from '../config/cloudinary.js';
 
 // Full audit 1.63 (SSRF): attachment URLs come straight from the client
@@ -45,6 +46,12 @@ export const isAllowedAttachmentUrl = (rawUrl) => {
   if (cloudName && !u.pathname.startsWith(`/${cloudName}/`)) return false;
   return true;
 };
+
+// Full audit 1.69: used by routes/chat.js so a disallowed url is rejected at
+// the edge with a 400 (it is also never fetched, see preprocessAttachments...).
+export const attachmentUrlSchema = z.string().url().refine(isAllowedAttachmentUrl, {
+  message: 'Attachment url must be a file you uploaded',
+});
 
 /**
  * Process attachments into a format the AI can understand.

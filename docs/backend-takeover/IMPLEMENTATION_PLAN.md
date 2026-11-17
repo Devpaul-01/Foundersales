@@ -183,15 +183,13 @@ protected onboarding flow, where the correct fix shape is a product judgment cal
 
 - **Sentry initialization order** (AUDIT.md 1.60) — `initSentry()` runs after hoisted ES imports, so automatic tracing is probably not
   instrumented under `@sentry/node` 10.x. If tracing matters, preload Sentry with a `--import` file. Unverified without a DSN.
-- **`validate(schema, 'query')` on an Express 5 upgrade** (AUDIT.md 1.60) — `req.query` becomes read-only; the three `'query'` routes
-  (`growth.js` x2, `opportunities.js`) would need a different way to hand over parsed values.
+- **`validate(schema, 'query')` on Express 5** — RESOLVED in AUDIT.md 1.70.
 
 - **Rate limits are now truly shared across instances** (AUDIT.md 1.62) — before, 19 of 20 limiters were per-instance. Expect limits to feel
   stricter on multi-instance deployments; review the configured `max` values in `limiters.js` against real usage.
 - **Rate-limit fallback is sticky for the process lifetime** (AUDIT.md 1.62) — if Redis is down at boot, limiters stay in-memory until restart.
 
-- **Attachment URL allowlist is Cloudinary-only** (AUDIT.md 1.63) — if the frontend ever uses a custom Cloudinary domain or another source, add that host to
-  `isAllowedAttachmentUrl`. Consider also rejecting non-allowlisted URLs with a 400 in `chat.js`'s schema (they are currently accepted and stored, just never fetched).
+- **Attachment URL allowlist is Cloudinary-only** (AUDIT.md 1.63, 1.69) — now also rejected with a 400 in `chat.js`. If the frontend ever uses another origin (custom Cloudinary domain, other CDN), add the host to `isAllowedAttachmentUrl`.
 
 - **Duplicate workspace-switch endpoints** (AUDIT.md 1.4) — see DECISIONS.md. Not removing either without
   confirming the frontend's actual usage, since frontend changes are out of scope and I can't verify which one（s）

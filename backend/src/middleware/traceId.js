@@ -19,7 +19,11 @@ import { randomUUID } from 'crypto';
 export const traceId = (req, res, next) => {
   // Use the incoming header if the gateway already set one (e.g. from a load balancer),
   // otherwise generate a fresh UUID. This preserves trace continuity across services.
-  req.traceId = req.headers['x-trace-id'] || randomUUID();
+  // Full audit 1.70: only trust a well-formed incoming id (short, no spaces or
+  // control characters); anything else is replaced, so a client cannot inject
+  // arbitrary text into logs or response headers that later use req.traceId.
+  const incoming = req.headers['x-trace-id'];
+  req.traceId = typeof incoming === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(incoming) ? incoming : randomUUID();
   res.setHeader('X-Trace-Id', req.traceId);
   next();
 };

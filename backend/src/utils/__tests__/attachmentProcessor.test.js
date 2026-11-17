@@ -70,3 +70,15 @@ describe('preprocessAttachmentsForGrok', () => {
     expect(out[0].content).toMatch(/no accessible URL/);
   });
 });
+
+describe('attachmentUrlSchema (chat request validation)', () => {
+  it('accepts our upload urls and rejects everything else with a clear message', async () => {
+    const { attachmentUrlSchema } = await import('../attachmentProcessor.js');
+    expect(attachmentUrlSchema.safeParse('https://res.cloudinary.com/mycloud/raw/upload/v1/u/a.pdf').success).toBe(true);
+    const bad = attachmentUrlSchema.safeParse('http://169.254.169.254/latest/meta-data/');
+    expect(bad.success).toBe(false);
+    expect(bad.error.issues[0].message).toMatch(/file you uploaded/);
+    expect(attachmentUrlSchema.safeParse('not a url').success).toBe(false);
+    expect(attachmentUrlSchema.optional().safeParse(undefined).success).toBe(true);
+  });
+});

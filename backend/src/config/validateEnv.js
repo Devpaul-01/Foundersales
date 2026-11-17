@@ -60,6 +60,17 @@ export const validateEnv = () => {
   }
 
   const missingOptional = OPTIONAL_WITH_WARNINGS.filter(({ key }) => !process.env[key]?.trim());
+  // Full audit 1.70: Cloudinary is only configured when CLOUDINARY_URL or all
+  // three discrete vars are set (config/cloudinary.js). Without it, file
+  // uploads and voice memos fail only when first used; warn at boot instead.
+  const hasCloudinary = !!process.env.CLOUDINARY_URL?.trim() ||
+    ['CLOUDINARY_CLOUD_NAME', 'CLOUDINARY_API_KEY', 'CLOUDINARY_API_SECRET'].every((k) => process.env[k]?.trim());
+  if (!hasCloudinary) {
+    missingOptional.push({
+      key: 'CLOUDINARY_URL (or CLOUDINARY_CLOUD_NAME + CLOUDINARY_API_KEY + CLOUDINARY_API_SECRET)',
+      hint: 'Cloudinary credentials — file uploads and voice memos will fail without this',
+    });
+  }
   if (missingOptional.length > 0) {
     console.warn('\n⚠️  Optional environment variables not set (degraded functionality):');
     for (const { key, hint } of missingOptional) {

@@ -4,6 +4,9 @@
 // usually called from inside a catch block, where a throw would replace the
 // real error with a TypeError.
 const safeValue = (v) => {
+  // Full audit 1.70: log lines are line-oriented, so a value containing CR/LF
+  // (user text, model output) could forge extra log lines. Escape them.
+  if (typeof v === 'string') return v.replace(/\r/g, '\\r').replace(/\n/g, '\\n');
   if (typeof v !== 'object') return v;
   try { return JSON.stringify(v); } catch { return '[unserializable]'; }
 };

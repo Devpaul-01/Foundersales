@@ -102,6 +102,7 @@ import {
   buildGrokAttachmentPrompt,
   buildAttachmentHistorySummary,
   extractImageParts,
+  attachmentUrlSchema,
 } from '../utils/attachmentProcessor.js';
 
 // Aggregate char budget for attachment context pulled back in from OLDER
@@ -496,7 +497,7 @@ const chatMessageSchema = z.object({
   attachments: z.array(z.object({
     name: z.string().max(255),
     type: z.string().max(100),
-    url:  z.string().url().optional(),
+    url:  attachmentUrlSchema.optional(),
   })).max(10).optional(),
   chat_mode: z.enum(CHAT_MODE_VALUES).optional(),
   growth_card_id: z.string().uuid().optional(),

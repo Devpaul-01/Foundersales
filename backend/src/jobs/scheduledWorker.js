@@ -40,6 +40,7 @@ import * as Sentry from '@sentry/node';
 // Scheduled/recurring jobs
 import { runMemoryExtractionJob }        from './memoryExtractionJob.js';
 import { runFollowupSequenceJob }        from './followupSequenceJob.js';
+import { runDataRetentionJob }          from './dataRetentionJob.js';
 import { runEmailDigestJob }             from './emailDigestJob.js';
 import { runPatternDetectionJob }        from './patternDetectionJob.js';
 import { runPatternInsightsJob }         from './patternInsightsJob.js';
@@ -87,6 +88,7 @@ export const HANDLERS = {
   // Daily
   performance_summary:    runPerformanceSummaryJob,
   metrics_aggregation:    runMetricsJob,
+  data_retention:         runDataRetentionJob,
   daily_tip_generation:   runDailyTipGeneration,
   calendar_prep:          runCalendarPrepJob,
   calendar_debrief_digest: runCalendarDebriefDigest,    // NEW

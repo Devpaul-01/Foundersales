@@ -36,6 +36,7 @@ export const SCHEDULES = [
   // ── DAILY ──────────────────────────────────────────────────
   { name: 'performance_summary',    cron: '0 2 * * *'     },
   { name: 'metrics_aggregation',    cron: '0 3 * * *'     },
+  { name: 'data_retention',        cron: '30 4 * * *'    }, // prune job_logs / push_notification_log (audit 1.71)
   { name: 'daily_tip_generation',   cron: '0 7 * * *'     },
   { name: 'calendar_prep',          cron: '0 8 * * *'     },
   { name: 'calendar_debrief_digest',cron: '0 8 * * *'     }, // NEW

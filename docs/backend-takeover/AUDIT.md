@@ -1999,6 +1999,12 @@ Each was an observation earlier; I decided to fix all of them because every one 
 **Verified:** 21 tests (`parseAIJson`, `traceIdValidate`, logger escaping, `validateEnvCloudinary`); 10 of the new-behavior cases fail on the original files. Suite 144/144.
 **Behavior to know:** log values containing newlines now print as a literal `\n`; a non-conforming client trace id is silently replaced.
 
+### 1.71 — RESOLUTION — retention job for `job_logs` and `push_notification_log` (follow-up to 1.54 / 1.59)
+**Decision:** add one, 90 days. Those two tables only ever grew, and the 1.54 and 1.59 fixes made their inserts actually work, so growth would have started. New `jobs/dataRetentionJob.js`, scheduled daily at 04:30 UTC (`data_retention` in `registerSchedules.js`, handler in `scheduledWorker.js`,
+documented in `BACKGROUND_JOBS.md`). It deletes `job_logs` rows by `created_at` and `push_notification_log` rows by `sent_at` older than 90 days (the push throttle only reads the last 24 hours). One table failing does not stop the other, and a delete error is reported in the job's own log row rather than thrown, since the job is safe to simply rerun the next day.
+**Verified:** `dataRetentionJob.test.js` (2 tests, Supabase mocked): correct tables, columns and ~90-day cutoffs, `count: 'exact'`, partial-failure behavior; the existing scheduled-worker completeness test confirms the handler is registered. Suite 146/146. **Not verified:** against a real database. Note `job_logs` has no index on `created_at`, so the daily delete is a sequential scan; fine at this table's size, worth an index if it ever grows large.
+**Not done (still your call):** retention of user-authored content after account deletion (1.67 item 5) is a policy decision and untouched.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

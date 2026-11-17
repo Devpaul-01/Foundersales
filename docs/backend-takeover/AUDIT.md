@@ -1966,6 +1966,24 @@ Interim mitigation that breaks nothing: `REVOKE ALL ON ALL TABLES IN SCHEMA publ
 
 **Fix status:** documented only; schema changes need an owner decision and a migration plan.
 
+### 1.68 — RESOLUTION — `services/multiProvider.js` + `utils/providerErrors.js`: the design concerns flagged in 1.49 and 1.52, decided and fixed
+**Decision (owner asked me to decide):** fix all of them, conservatively, because each failure mode (a hung provider, an aborted chain, a long outage) hurts every AI feature at once.
+
+1. **Provider-level short-circuit.** After 2 provider-wide transient failures (5xx, network, timeout) from one provider within a single call, the loop skips that provider's remaining model x key entries and moves on. Key faults and bad-model
+   errors do not count toward this. (Test: groq returning 503 now costs 2 requests, not one per static model, then mistral serves the call.)
+2. **Timeouts.** Non-streaming calls get a 90 s total limit. Streaming calls get a 30 s limit to *start* responding (cleared once headers arrive, so long replies are not cut off) and a 45 s stall guard between chunks.
+   A timeout is mapped to a transient `ETIMEDOUT` so it falls through to the next entry (an unmapped abort would have been `NON_RETRYABLE` and ended the whole chain). A mid-stream stall ends via `onError` and does **not** restart on another
+   provider, preserving the no-duplicate-tokens guarantee established in 1.49 (verified with a stalling stream under fake timers: one token delivered, one `onError`, no second provider request).
+3. **Unreadable 200 body** (connection cut mid-body, parse failure) is now a transient failure that moves to the next entry, instead of aborting the chain.
+4. **Discovery cap.** The alphabetical tail of dynamically discovered models is limited to 8 per provider, so OpenRouter's catalog (including paid models) is no longer walked in full.
+5. **`providerErrors.js`:** a `404` now counts as `BAD_MODEL` when (and only when) the body names a missing model, same gate as the existing `400` rule; a 404 without that body stays `NON_RETRYABLE` so a wrong-URL bug is not hidden.
+
+**Verified:** new `services/__tests__/multiProvider.test.js` (7 tests, `fetch` stubbed, real fallback loop) plus a new 404 case in `providerErrors.test.js`. Seven of these fail on the original code. Full suite 116/116.
+**Not verified:** against live providers (no keys here). The numbers (90/30/45 s, threshold 2, cap 8) are my judgment, not measured; they are named constants at the top of that section of `multiProvider.js` if they need tuning. One thing I did **not** change: a 429 still cools the
+whole key for 1 h (1.49 item 4), because whether the provider limits per model or per key is unverified and I would rather not guess.
+
+**Fix status:** fixed and verified in tests.
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

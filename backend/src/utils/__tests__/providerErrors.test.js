@@ -43,6 +43,20 @@ describe('classifyProviderError', () => {
     expect(classifyProviderError(genericBadRequest)).toBe('NON_RETRYABLE');
   });
 
+  it('classifies a 404 as BAD_MODEL only when the body names a missing model (audit 1.68)', () => {
+    const missingModel = new ProviderCallError('HTTP 404', {
+      status: 404, providerId: 'openrouter',
+      parsedBody: { error: { code: 'model_not_found', message: 'The model `x/y:free` does not exist' } },
+    });
+    expect(classifyProviderError(missingModel)).toBe('BAD_MODEL');
+
+    const wrongUrl = new ProviderCallError('HTTP 404', { status: 404, providerId: 'groq', parsedBody: { error: { message: 'Not Found' } } });
+    expect(classifyProviderError(wrongUrl)).toBe('NON_RETRYABLE');
+
+    const noBody = new ProviderCallError('HTTP 404', { status: 404, providerId: 'groq' });
+    expect(classifyProviderError(noBody)).toBe('NON_RETRYABLE');
+  });
+
   it('classifies a non-ProviderCallError defensively as NON_RETRYABLE', () => {
     const plainError = new Error('something unexpected');
     expect(classifyProviderError(plainError)).toBe('NON_RETRYABLE');

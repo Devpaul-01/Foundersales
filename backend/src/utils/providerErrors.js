@@ -120,7 +120,11 @@ export const classifyProviderError = (err) => {
     }
   }
 
-  if (err.status === 400 && isBadModelSignal(err.parsedBody)) {
+  // Full audit 1.68: some OpenAI-compatible providers answer an unknown or
+  // withdrawn model with 404 rather than 400. Still gated on the body
+  // naming the model, so an unrelated 404 (bad URL = an application bug)
+  // stays NON_RETRYABLE and is not masked by cycling through providers.
+  if ((err.status === 400 || err.status === 404) && isBadModelSignal(err.parsedBody)) {
     return 'BAD_MODEL';
   }
 

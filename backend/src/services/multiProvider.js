@@ -286,7 +286,10 @@ const fetchAndRankModelsFromProvider = async (providerId, baseURL, apiKey) => {
     !priorityList.includes(id) && !NON_CHAT_PATTERN.test(id)
   ).sort();
 
-  const ranked = [...known, ...unknown];
+  // Full audit 1.68: cap the alphabetical tail. For OpenRouter this list was
+  // its whole catalog (including paid models) and, combined with retrying
+  // every entry, could make a total outage take minutes to fail.
+  const ranked = [...known, ...unknown.slice(0, MAX_DISCOVERED_EXTRA_MODELS)];
   return ranked.length > 0 ? ranked : priorityList;
 };
 
@@ -510,6 +513,25 @@ const buildMessagesForProvider = (messages, images, isVisionCapable) => {
 // now distinguished from HTTP-level failures (a response came back with
 // !res.ok) — the original code did not make this distinction explicitly,
 // relying on whatever shape fetch's own thrown error happened to have.
+// Full audit 1.68 — timeouts and failure shaping for provider HTTP calls.
+const TRANSIENT_SKIP_THRESHOLD = 2;
+const CALL_TIMEOUT_MS         = 90_000; // whole non-streaming request
+const STREAM_HEADERS_TIMEOUT_MS = 30_000; // waiting for the response to start
+const STREAM_STALL_TIMEOUT_MS   = 45_000; // silence between streamed chunks
+const MAX_DISCOVERED_EXTRA_MODELS = 8;
+
+// A timeout surfaces as a DOMException named TimeoutError/AbortError with no
+// `cause.code`, which the classifier would treat as NON_RETRYABLE and abort
+// the whole chain. A timed-out or unreadable response is a transient
+// connection failure, so give it a code the classifier already treats as such.
+const toTransientError = (err, providerId) =>
+  new ProviderCallError(err.message, {
+    providerId,
+    networkErrorCode:
+      err.cause?.code ||
+      (err.name === 'TimeoutError' || err.name === 'AbortError' ? 'ETIMEDOUT' : 'ECONNRESET'),
+  });
+
 const callProvider = async ({
   baseURL, apiKey, model, extraHeaders, providerId,
   messages, systemPrompt, temperature, maxTokens, images,
@@ -537,11 +559,13 @@ const callProvider = async ({
         ...extraHeaders,
       },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
     });
   } catch (networkErr) {
     throw new ProviderCallError(networkErr.message, {
       providerId,
-      networkErrorCode: networkErr.cause?.code || null,
+      networkErrorCode: networkErr.cause?.code
+        || (networkErr.name === 'TimeoutError' || networkErr.name === 'AbortError' ? 'ETIMEDOUT' : null),
     });
   }
 
@@ -552,7 +576,14 @@ const callProvider = async ({
     throw new ProviderCallError(`HTTP ${res.status}: ${errText}`, { status: res.status, providerId, parsedBody });
   }
 
-  const data    = await res.json();
+  let data;
+  try {
+    data = await res.json();
+  } catch (bodyErr) {
+    // A 200 whose body can't be read/parsed (connection cut mid-body, or a
+    // timeout while reading it) is a transient failure: try the next entry.
+    throw toTransientError(bodyErr, providerId);
+  }
   const content = data.choices?.[0]?.message?.content ?? '';
   const usage   = data.usage ?? {};
   return { content, usage, used_vision: isVisionCapable && !!images?.length };
@@ -583,6 +614,10 @@ const streamProvider = async ({
     ],
   };
 
+  // Abort only if the response hasn't STARTED within the headers timeout;
+  // cleared as soon as fetch resolves so long streams are not cut off.
+  const startController = new AbortController();
+  const startTimer = setTimeout(() => startController.abort(), STREAM_HEADERS_TIMEOUT_MS);
   let res;
   try {
     res = await fetch(`${baseURL}/chat/completions`, {
@@ -593,12 +628,16 @@ const streamProvider = async ({
         ...extraHeaders,
       },
       body: JSON.stringify(body),
+      signal: startController.signal,
     });
   } catch (networkErr) {
     throw new ProviderCallError(networkErr.message, {
       providerId,
-      networkErrorCode: networkErr.cause?.code || null,
+      networkErrorCode: networkErr.cause?.code
+        || (networkErr.name === 'AbortError' || networkErr.name === 'TimeoutError' ? 'ETIMEDOUT' : null),
     });
+  } finally {
+    clearTimeout(startTimer);
   }
 
   if (!res.ok) {
@@ -618,7 +657,21 @@ const streamProvider = async ({
   let   usage       = null;
 
   while (true) {
-    const { done, value } = await reader.read();
+    // Stall guard: a stream that goes silent mid-reply is cancelled. This is a
+    // plain Error (not a ProviderCallError), so it classifies NON_RETRYABLE and
+    // ends the call via onError instead of restarting on another provider and
+    // re-emitting tokens the client already has (see 1.49).
+    let stallTimer;
+    const { done, value } = await Promise.race([
+      reader.read(),
+      new Promise((_, reject) => {
+        stallTimer = setTimeout(
+          () => reject(new Error(`stream stalled: no data for ${STREAM_STALL_TIMEOUT_MS / 1000}s`)),
+          STREAM_STALL_TIMEOUT_MS
+        );
+      }),
+    ]).catch((e) => { reader.cancel().catch(() => {}); throw e; })
+      .finally(() => clearTimeout(stallTimer));
     if (done) break;
 
     buffer += decoder.decode(value, { stream: true });
@@ -708,8 +761,14 @@ export const callWithFallback = async ({ images, ...opts }) => {
 
   let lastError;
   const cooledThisCall = new Set();
+  // Full audit 1.68: after TRANSIENT_SKIP_THRESHOLD provider-wide transient
+  // failures (5xx / network / timeout) from one provider in this call, skip
+  // that provider's remaining queue entries instead of retrying every
+  // model x key against a provider that is down.
+  const transientByProvider = new Map();
 
   for (const provider of queue) {
+    if ((transientByProvider.get(provider.providerId) || 0) >= TRANSIENT_SKIP_THRESHOLD) continue;
     try {
       console.log(`[MultiProvider] Trying ${provider.debugName}...`);
       recordUsageAttempt(provider.providerId, provider.keyEntry.index); // fire-and-forget, observe-only
@@ -756,6 +815,7 @@ export const callWithFallback = async ({ images, ...opts }) => {
         // Deliberately do NOT cool the key — this failure is provider-wide
         // or network-related, not attributable to this specific key.
         recordProviderTransient(provider.providerId);
+        transientByProvider.set(provider.providerId, (transientByProvider.get(provider.providerId) || 0) + 1);
       } else if (category === 'BAD_MODEL') {
         // Deliberately do NOT cool the key — the model reference is what's
         // wrong, not the key. Evict it so other requests/instances stop
@@ -817,8 +877,14 @@ export const streamWithFallback = async ({
   }
 
   const cooledThisCall = new Set();
+  // Full audit 1.68: after TRANSIENT_SKIP_THRESHOLD provider-wide transient
+  // failures (5xx / network / timeout) from one provider in this call, skip
+  // that provider's remaining queue entries instead of retrying every
+  // model x key against a provider that is down.
+  const transientByProvider = new Map();
 
   for (const provider of queue) {
+    if ((transientByProvider.get(provider.providerId) || 0) >= TRANSIENT_SKIP_THRESHOLD) continue;
     try {
       console.log(`[MultiProvider] Streaming via ${provider.debugName}`);
       recordUsageAttempt(provider.providerId, provider.keyEntry.index); // fire-and-forget, observe-only
@@ -857,6 +923,7 @@ export const streamWithFallback = async ({
         }
       } else if (category === 'PROVIDER_TRANSIENT') {
         recordProviderTransient(provider.providerId);
+        transientByProvider.set(provider.providerId, (transientByProvider.get(provider.providerId) || 0) + 1);
       } else if (category === 'BAD_MODEL') {
         evictModelFromRedisCache(provider.providerId, provider.model).catch(() => {});
       } else {

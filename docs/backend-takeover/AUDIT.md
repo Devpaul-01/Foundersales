@@ -2005,6 +2005,11 @@ documented in `BACKGROUND_JOBS.md`). It deletes `job_logs` rows by `created_at` 
 **Verified:** `dataRetentionJob.test.js` (2 tests, Supabase mocked): correct tables, columns and ~90-day cutoffs, `count: 'exact'`, partial-failure behavior; the existing scheduled-worker completeness test confirms the handler is registered. Suite 146/146. **Not verified:** against a real database. Note `job_logs` has no index on `created_at`, so the daily delete is a sequential scan; fine at this table's size, worth an index if it ever grows large.
 **Not done (still your call):** retention of user-authored content after account deletion (1.67 item 5) is a policy decision and untouched.
 
+### 1.72 — RESOLUTION — Sentry now initializes before the app loads (follow-up to 1.60)
+**Decision:** fix it rather than leave it as a note, since the change is small and fully reversible. New `backend/src/instrument.js` calls the existing (idempotent) `initSentry()`; the `start` script is now `node --import ./src/instrument.js src/index.js` and `dev` runs nodemon with the same preload. The later `initSentry()` calls in `app.js` / `server.js` are harmless no-ops. Without a DSN nothing changes (it logs "disabled" and carries on).
+**Verified:** in child processes, with and without a DSN, Sentry initializes before the main program runs and the client exists before any app import; `npm start` with no env reaches the app's own env validation as before; the scripts are checked by a test. Suite green (`src/__tests__/instrument.test.js`, 3 tests).
+**Not verified (be honest about it):** that automatic traces actually appear in a Sentry project. That needs a real DSN and traffic; my claim in 1.60 that it was *probably* un-instrumented was itself unverified, and this fix is based on Sentry's documented ESM setup, not on observed traces. **If your host runs its own start command** (not `npm start`), add `--import ./src/instrument.js` there or the preload is simply unused (nothing breaks).
+
 ## 2. Suspected / Needs Further Investigation
 
 Not yet confirmed — listed so they aren't lost, not yet acted on.

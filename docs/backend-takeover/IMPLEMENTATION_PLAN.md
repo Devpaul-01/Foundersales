@@ -174,9 +174,7 @@ protected onboarding flow, where the correct fix shape is a product judgment cal
 - **`getWorkspaceUsageSummary` (`tokenTracker.js`) has no callers** (AUDIT.md 1.53) — complete but unwired, same
   question as `synthesizeMeetingNotes`: meant to ship, or intentionally unused? Not removed.
 
-- **Check retention for `push_notification_log` and `job_logs`** (AUDIT.md 1.54) — both tables now actually receive
-  rows (the inserts previously never ran). Not checked whether a cleanup/retention job exists; worth confirming
-  so they do not grow unbounded.
+- **Retention for `push_notification_log` / `job_logs`** — RESOLVED in AUDIT.md 1.71 (daily `data_retention` job, 90 days).
 
 - **Uploads are public-by-URL** (AUDIT.md 1.55) — Cloudinary default delivery with an unguessable UUID path. Fine if
   nothing sensitive is uploaded; otherwise consider authenticated/signed delivery. Product decision.

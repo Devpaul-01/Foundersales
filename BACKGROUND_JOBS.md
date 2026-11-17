@@ -93,6 +93,7 @@ This queue runs strictly one job at a time by design — these are aggregate sca
 | `calendar_reminder_scan` | `*/5 * * * *` | Every 5 min | `runCalendarReminderScan` |
 | `performance_summary` | `0 2 * * *` | Daily 02:00 UTC | `runPerformanceSummaryJob` |
 | `metrics_aggregation` | `0 3 * * *` | Daily 03:00 UTC | `runMetricsJob` |
+| `data_retention` | `30 4 * * *` | Daily 04:30 UTC | `runDataRetentionJob` |
 | `daily_tip_generation` | `0 7 * * *` | Daily 07:00 UTC | `runDailyTipGeneration` |
 | `calendar_prep` | `0 8 * * *` | Daily 08:00 UTC | `runCalendarPrepJob` |
 | `calendar_debrief_digest` | `0 8 * * *` | Daily 08:00 UTC | `runCalendarDebriefDigest` |
@@ -122,6 +123,8 @@ Registration order matters for one reason: the Sunday pipeline (18:00 → 23:00 
 **`calendar_reminder_scan`** (every 5 min) — finds events starting within `CALENDAR_REMINDER_WINDOW_MINUTES` (30) that haven't had a reminder sent. **Idempotency is a database-level compare-and-swap, not a BullMQ mechanism**: each event is claimed via `UPDATE user_events SET reminder_sent = true WHERE id = ? AND reminder_sent = false RETURNING id` — if another concurrent tick already claimed it, the update matches zero rows and the scan silently skips it. No per-event BullMQ job exists at all for reminders.
 
 **`performance_summary`** (2am) — for every (user, workspace) pair whose `total_sent` grew by ≥5 since its last summary and has ≥10 total, regenerates `learned_patterns` — a short AI narrative plus derived best-platform/style/length fields computed from actual stats per dimension, then explained by the model rather than left for it to invent.
+
+**`data_retention`** (4:30am) — deletes `job_logs` and `push_notification_log` rows older than 90 days (windows set in `RETENTION_DAYS` in `jobs/dataRetentionJob.js`). One table failing does not stop the other.
 
 **`metrics_aggregation`** (3am) — rolls up the previous day's `daily_metrics` per active member: opportunities shown/viewed, links clicked, messages sent, outcomes, derived rates. Pure aggregation, no AI.
 

@@ -1,497 +1,117 @@
-// src/services/multiProvider.js
 // ============================================================
-// MULTI-PROVIDER AI FALLBACK — Cerebras + Groq + Mistral + OpenRouter
+// services/multiProvider.js
 //
-// Provider priority (highest free TPM first):
-//   1. Cerebras    (~60K TPM free)  — gpt-oss-120b (production) + dynamic discovery
-//   2. Groq        (~30K TPM free)  — llama-4-scout (vision!) + llama-3.3-70b + dynamic discovery
-//   3. Mistral     (500K TPM free*) — mistral-small-latest / mistral-medium-latest (provider aliases)
-//      *Mistral free tier may use your prompts for training.
-//   4. OpenRouter  (paid, many models) — dynamic discovery; fallback of last resort
+// REWRITE (feat/llm-gateway-provider): this file previously maintained
+// its own multi-provider fallback chain across Cerebras, Groq, Mistral
+// and OpenRouter directly — multi-key pools per provider, Redis-backed
+// per-key cooldown, dynamic model discovery with a lock-guarded cache,
+// and a hand-rolled queue that tried every (provider x model x key)
+// combination in priority order.
 //
-// Multi-key support per provider (add real keys from separate accounts):
-//   CEREBRAS_API_KEY_1    … CEREBRAS_API_KEY_5
-//   GROQ_API_KEY_1        … GROQ_API_KEY_10
-//   MISTRAL_API_KEY_1     … MISTRAL_API_KEY_5
-//   OPENROUTER_API_KEY_1  … OPENROUTER_API_KEY_5
-//   (single-key fallback: CEREBRAS_API_KEY, GROQ_API_KEY, MISTRAL_API_KEY, OPENROUTER_API_KEY)
+// All AI chat traffic now goes through a single self-hosted gateway
+// (github.com/Devpaul-01/llm-gateway) instead. The gateway is itself an
+// OpenAI-compatible multi-provider router: it already does model-alias
+// resolution, per-request `fallback_models` chaining, and upstream key
+// rotation/cooldown server-side. Reimplementing that same logic again
+// on this side would just be two layers doing the same job — so this
+// file now only has to:
+//   1. speak the (already OpenAI-compatible) wire format to ONE
+//      endpoint, with ONE key,
+//   2. keep a cooldown on that one gateway key in case IT starts
+//      getting rejected (revoked/rotated key, gateway auth misconfig),
+//      since that's a failure mode the gateway itself can't self-heal,
+//   3. preserve the exact external contract every caller in this
+//      codebase already depends on (callWithFallback,
+//      callWithFallbackGroq, streamWithFallback, getProviderStatus) so
+//      none of those ~20+ call sites need to change.
 //
-// All four use OpenAI-compatible APIs — no separate SDKs needed.
-// Failed keys cool down for 1 hour (in-memory fallback path) or via Redis
-// (default path — see IMPL-MULTIPROVIDER-01 below).
+// Model discovery, per-provider health counters, and vision-model
+// detection via a hardcoded provider+model list are gone — the gateway
+// decides what "openai/gpt-oss-120b" or "meta-llama/llama-4-scout-..."
+// actually resolve to, including its own fallback behavior, so this
+// file no longer needs to know provider internals at all.
 //
-// CHAT AUDIT CHANGES (this revision):
-//   - VISION SUPPORT (audit §5.8): callWithFallback / callWithFallbackGroq /
-//     streamWithFallback now accept an optional `images` array
-//     ([{ url: 'data:<mime>;base64,...' }]). Images are only actually
-//     attached to the outgoing request when the model chosen for that
-//     specific attempt is in VISION_CAPABLE_MODELS — every other model in
-//     the fallback queue still gets the plain-text messages exactly as
-//     before. This avoids sending multi-part `content` arrays to providers
-//     that may not expect them, while giving the one vision-capable model
-//     in the queue (Groq's llama-4-scout) the actual image bytes instead
-//     of a "there's an image here, describe it" placeholder it can never
-//     act on.
-//   - model_used is now a clean `${providerId}:${model}` string instead of
-//     the compound `${providerId}-${model}-key${index}` debug string
-//     (audit §5.3). The key index is still used internally for cooldown
-//     bookkeeping and logging — it just isn't leaked into persisted data
-//     / analytics anymore.
-//
-// IMPL-MULTIPROVIDER-01 (Phase 2 refactor): key cooldown state, model
-// discovery cache, and (new, observe-only) usage counters are now backed
-// by Redis by default, so this file's runtime state is correctly shared
-// across every instance in a horizontally-scaled deployment, rather than
-// silently diverging per-process. Previously: an instance that saw a key
-// fail had no way to tell any other instance, so other instances kept
-// sending traffic to a known-bad key; and every instance independently
-// performed model discovery at boot, hitting every provider's /models
-// endpoint redundantly on every deploy.
-//
-// Pool construction (_pools, buildKeyPool) is DELIBERATELY left local /
-// per-process, unchanged — this is configuration read from process.env at
-// startup, not runtime state. Every instance in a correctly-configured
-// deployment has identical environment variables, so every instance
-// independently builds an identical pool; there is nothing to
-// synchronize, and synchronizing already-identical configuration would
-// add a Redis dependency at boot for zero benefit.
-//
-// Kill switch: MULTIPROVIDER_REDIS_STATE_ENABLED (default enabled — set
-// to the string 'false' to disable). When disabled, this file falls back
-// entirely to the original in-memory Map-based cooldown/discovery
-// behavior (kept in this file, not deleted, specifically so this switch
-// works). This file is the single highest-traffic file in the codebase —
-// every AI feature routes through it — so a single environment-variable
-// toggle that reverts to the previously-working, well-understood
-// in-memory behavior, with no code deploy required, is the highest-value
-// risk mitigation available for a change this central. Recommend running
-// with this explicitly set to 'false' for an initial canary rollout,
-// flipping to enabled (or simply unsetting it) once validated under real
-// multi-instance load. Plan to remove the in-memory fallback path
-// entirely only after the Redis-backed path has run in production for a
-// deliberate observation period (1-2 weeks of stable operation).
-//
-// IMPL-H8-01 (Phase 2 refactor): retry classification now uses
-// utils/providerErrors.js's classifyProviderError() instead of the old
-// isRetryableError/shouldCoolKey string-substring matching. See that
-// file's header comment for the full reasoning. NOTE (full audit, 1.49):
-// an earlier version of this comment said the old isRetryableError /
-// shouldCoolKey functions and signal-list constants were still kept below
-// as a safety net. They are not — neither function nor any signal list
-// exists in this file (exa.js has its own separate, unrelated
-// shouldCoolKey; that is a different function); only the in-memory
-// COOLDOWN/DISCOVERY fallback (kill-switch path) was retained here.
-// Classification in this file is solely utils/providerErrors.js now.
-//
-// IMPL-SENTRY-01 (Phase 2 refactor / L4): most AI-call failures in this
-// codebase never reach Sentry's automatic Express-level error capture,
-// because the overwhelming majority of groq-*.js functions catch their
-// own errors locally and return a fallback value rather than rethrowing.
-// Relying on automatic capture alone would mean the failures most worth
-// surfacing (NON_RETRYABLE classifications, ALL_PROVIDERS_FAILED) would
-// frequently never reach Sentry at all. Explicit Sentry.captureException
-// calls are placed at exactly these two choke points below — deliberately
-// NOT scattered across every individual groq-*.js catch block, which
-// would reintroduce the kind of duplicated-logic-across-many-files
-// problem already flagged elsewhere in this codebase's audit history.
-// KEY_FAULT and PROVIDER_TRANSIENT classifications are deliberately NOT
-// sent to Sentry — these are expected, routinely-handled conditions the
-// fallback chain is specifically designed to absorb, and capturing every
-// one would generate enormous, signal-drowning volume under completely
-// normal operating conditions.
+// Error classification (KEY_FAULT vs PROVIDER_TRANSIENT vs BAD_MODEL vs
+// NON_RETRYABLE) still goes through utils/providerErrors.js — see that
+// file for the taxonomy, and for the admission-limit carve-out added
+// alongside this rewrite (a 429 from the gateway can mean "this key is
+// bad" OR "daily token budget exceeded" OR "too many concurrent
+// requests", distinguished by error.code — only the first should cool
+// the key).
 // ============================================================
 
 import * as Sentry from '@sentry/node';
 import { ProviderCallError, classifyProviderError } from '../utils/providerErrors.js';
 import {
-  getCache, setCache, withLock, getRawClient,
-  hashIncrementField,
-  incrementCounter,
-} from './redis.js';
-import {
   markKeyFailed, isKeyCooling, getCooldownState, isRedisStateEnabled,
   isKeyCoolingInMemorySync, getInMemoryCooldownState,
 } from './providerCooldown.js';
-import { reportDegradedMode } from '../utils/reportDegradation.js';
-
-const MODEL_PRIORITY = {
-  cerebras: [
-    'gpt-oss-120b',
-  ],
-
-  groq: [
-    'openai/gpt-oss-120b',
-    'qwen/qwen3-32b',
-    'meta-llama/llama-4-scout-17b-16e-instruct',
-  ],
-
-  mistral: [
-    'mistral-large-2512',
-    'mistral-medium-latest',
-    'ministral-3b-2512',
-  ],
-
-  openrouter: [
-    'meta-llama/llama-3.3-70b-instruct:free',
-    'google/gemma-4-31b-it:free',
-    'nousresearch/hermes-3-405b:free',
-  ],
-};
-
-const FAST_MODEL_PRIORITY = {
-  cerebras: MODEL_PRIORITY.cerebras,
-  groq: [
-    'llama-3.1-8b-instant',
-    ...MODEL_PRIORITY.groq,
-  ],
-  mistral: [
-    'ministral-3b-2512',
-    ...MODEL_PRIORITY.mistral,
-  ],
-  openrouter: MODEL_PRIORITY.openrouter,
-};
-
-const getModelPriorityForTier = (providerId, tier) =>
-  tier === 'fast'
-    ? (FAST_MODEL_PRIORITY[providerId] || MODEL_PRIORITY[providerId])
-    : MODEL_PRIORITY[providerId];
 
 // ──────────────────────────────────────────
-// VISION-CAPABLE MODELS
-// Only models actually able to interpret image content. Everything else
-// in the fallback queue still receives the text-only messages array —
-// see buildMessagesForProvider below.
-// ──────────────────────────────────────────
-const VISION_CAPABLE_MODELS = new Set([
-  'meta-llama/llama-4-scout-17b-16e-instruct',
-  'google/gemma-4-31b-it:free',
-]);
-
-const NON_CHAT_PATTERN = /whisper|embed|guard|tts|moderation|transcribe|ocr|safeguard|vision-only/i;
-
-const PROVIDER_REGISTRY = {
-  cerebras: {
-    name:      'cerebras',
-    baseURL:   'https://api.cerebras.ai/v1',
-    models:    MODEL_PRIORITY.cerebras,
-    envPrefix: 'CEREBRAS_API_KEY',
-    maxKeys:   5,
-  },
-  groq: {
-    name:      'groq',
-    baseURL:   'https://api.groq.com/openai/v1',
-    models:    MODEL_PRIORITY.groq,
-    envPrefix: 'GROQ_API_KEY',
-    maxKeys:   10,
-  },
-  mistral: {
-    name:      'mistral',
-    baseURL:   'https://api.mistral.ai/v1',
-    models:    MODEL_PRIORITY.mistral,
-    envPrefix: 'MISTRAL_API_KEY',
-    maxKeys:   5,
-  },
-  openrouter: {
-    name:      'openrouter',
-    baseURL:   'https://openrouter.ai/api/v1',
-    models:    MODEL_PRIORITY.openrouter,
-    envPrefix: 'OPENROUTER_API_KEY',
-    maxKeys:   5,
-    extraHeaders: {
-      'HTTP-Referer': process.env.OPENROUTER_REFERER ?? 'https://localhost',
-      'X-Title':      process.env.OPENROUTER_APP_TITLE ?? 'MultiProvider',
-    },
-  },
-};
-
-const PROVIDER_ORDER = ['cerebras', 'groq', 'mistral', 'openrouter'];
-
-const buildKeyPool = (providerDef) => {
-  const { name, envPrefix, maxKeys } = providerDef;
-  const keys = [];
-
-  for (let i = 1; i <= maxKeys; i++) {
-    const key = process.env[`${envPrefix}_${i}`];
-    if (key?.trim()) keys.push({ key: key.trim(), index: i, provider: name });
-  }
-
-  if (keys.length === 0 && process.env[envPrefix]?.trim()) {
-    keys.push({ key: process.env[envPrefix].trim(), index: 0, provider: name });
-  }
-
-  if (keys.length > 0) {
-    console.log(`[MultiProvider] ${name}: ${keys.length} key(s) loaded`);
-  }
-
-  return keys;
-};
-
-// ══════════════════════════════════════════════════════════════
-// IMPL-MULTIPROVIDER-01 — Redis key builders for state that stays local
-// to THIS file (model discovery cache, usage counters, provider-health
-// counters). Key cooldown state (markKeyFailed/isKeyCooling) has been
-// extracted into services/providerCooldown.js so it can be shared
-// verbatim with exa.js's key rotation — see that module's header
-// comment for the full reasoning. isRedisStateEnabled is also sourced
-// from there, since both this file and exa.js are meant to move in
-// lockstep on the same kill switch.
-// ══════════════════════════════════════════════════════════════
-
-const MODEL_CACHE_TTL_S    = 6 * 60 * 60;    // 6 hours
-const MODEL_LOCK_TTL_S     = 15;             // comfortably covers the 8s discovery HTTP timeout below
-const USAGE_COUNTER_TTL_S  = 60;             // not refreshed on each increment — rolls over naturally
-const PROVIDER_HEALTH_TTL_S = 60 * 60;
-
-const modelsRedisKey         = (provider)         => `mp:models:${provider}`;
-const modelsLockRedisKey     = (provider)         => `mp:models:${provider}:lock`;
-const usageRedisKey          = (provider, index)  => `mp:usage:${provider}:${index}`;
-const providerHealthRedisKey = (provider)         => `mp:providerhealth:${provider}`;
-
-// ──────────────────────────────────────────
-// IMPL-MULTIPROVIDER-01 — Redis-backed model discovery cache
-
+// GATEWAY CONFIG
 //
-// Shared across every instance: only one instance ever performs the real
-// /models HTTP call per provider per 6-hour window (lock-guarded); every
-// other instance either reads the shared cache or — if it loses the lock
-// race before the winner has finished writing — falls back to the static
-// MODEL_PRIORITY list for that one request cycle, exactly like the
-// pre-Redis "discovery hasn't finished yet" fallback already did. This
-// also fixes a real, if subtler, correctness gap beyond just reducing
-// redundant HTTP calls: without a shared cache, two instances could
-// independently discover slightly different model lists from a
-// transiently-inconsistent provider response, meaning two requests to the
-// same feature, routed to different instances, could silently use
-// different underlying models for reasons invisible to anyone debugging
-// a "why did this response seem different" report.
+// GATEWAY_API_KEY is the only required credential — this replaces every
+// CEREBRAS_API_KEY_n / GROQ_API_KEY_n / MISTRAL_API_KEY_n /
+// OPENROUTER_API_KEY_n that used to live here. GATEWAY_BASE_URL defaults
+// to the gateway's own documented /v1 path convention
+// (OpenAI-compatible: POST {baseURL}/chat/completions) but is
+// overridable per-environment (local gateway instance, staging
+// deployment, etc).
 // ──────────────────────────────────────────
-const fetchAndRankModelsFromProvider = async (providerId, baseURL, apiKey) => {
-  if (providerId === 'mistral') {
-    return MODEL_PRIORITY.mistral;
+const PROVIDER_ID    = 'gateway';
+const GATEWAY_BASE_URL = (process.env.GATEWAY_BASE_URL || 'https://llm-gateway.fly.dev/v1').replace(/\/+$/, '');
+const GATEWAY_API_KEY  = process.env.GATEWAY_API_KEY || '';
+
+// Primary model + the gateway-side fallback chain requested alongside
+// it. These are resolved by the gateway itself (see
+// internal/providers/resolve.go in llm-gateway) — bare names like
+// "mistral-large-latest" and "meta-llama/llama-3.1-8b-instruct" are the
+// gateway's own default priority list, so this mirrors what the
+// gateway would already try on its own; sending it explicitly keeps
+// that choice visible and overridable from this side without needing a
+// gateway redeploy.
+const TEXT_MODEL   = process.env.GATEWAY_TEXT_MODEL   || 'openai/gpt-oss-120b';
+const TEXT_FALLBACK_MODELS = (process.env.GATEWAY_TEXT_FALLBACK_MODELS || 'mistral-large-latest,meta-llama/llama-3.1-8b-instruct')
+  .split(',').map(s => s.trim()).filter(Boolean);
+
+// gpt-oss-120b has no vision input, so an image-bearing request needs a
+// genuinely vision-capable model as the PRIMARY `model` — the gateway
+// can still fall back from there, but the first attempt has to be able
+// to see the image at all. meta-llama/llama-4-scout is the gateway's
+// vision-capable alias (see resolve.go); gemini-2.5-flash-lite is a
+// second vision-capable option used only as a gateway-side fallback.
+const VISION_MODEL  = process.env.GATEWAY_VISION_MODEL  || 'meta-llama/llama-4-scout-17b-16e-instruct';
+const VISION_FALLBACK_MODELS = (process.env.GATEWAY_VISION_FALLBACK_MODELS || 'gemini-2.5-flash-lite')
+  .split(',').map(s => s.trim()).filter(Boolean);
+
+const CALL_TIMEOUT_MS         = 90_000; // whole non-streaming request
+const STREAM_HEADERS_TIMEOUT_MS = 30_000; // waiting for the response to start
+const STREAM_STALL_TIMEOUT_MS   = 45_000; // silence between streamed chunks
+
+// Single conceptual "key index" — kept as 0 rather than removing the
+// provider/index-shaped cooldown API entirely, since providerCooldown.js
+// is shared with other services (see exa.js) and is already
+// provider-name-agnostic; this just means there's exactly one slot to
+// cool instead of a pool of them.
+const KEY_INDEX = 0;
+
+let warnedMissingKey = false;
+const warnIfMisconfigured = () => {
+  if (!GATEWAY_API_KEY && !warnedMissingKey) {
+    console.error('[MultiProvider] CRITICAL: GATEWAY_API_KEY is not set — all AI calls will fail.');
+    warnedMissingKey = true;
   }
-
-  const res = await fetch(`${baseURL}/models`, {
-    headers: { Authorization: `Bearer ${apiKey}` },
-    signal:  AbortSignal.timeout(8000),
-  });
-
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-  const json   = await res.json();
-  const allIds = (json.data || []).map(m => m.id).filter(Boolean);
-
-  const priorityList = MODEL_PRIORITY[providerId] || [];
-  const known   = priorityList.filter(id => allIds.includes(id));
-  const unknown = allIds.filter(id =>
-    !priorityList.includes(id) && !NON_CHAT_PATTERN.test(id)
-  ).sort();
-
-  // Full audit 1.68: cap the alphabetical tail. For OpenRouter this list was
-  // its whole catalog (including paid models) and, combined with retrying
-  // every entry, could make a total outage take minutes to fail.
-  const ranked = [...known, ...unknown.slice(0, MAX_DISCOVERED_EXTRA_MODELS)];
-  return ranked.length > 0 ? ranked : priorityList;
-};
-
-const getModelsFromRedisCache = async (providerId) => {
-  const raw = await getCache(modelsRedisKey(providerId));
-  return Array.isArray(raw) ? raw : null;
-};
-
-const discoverModelsRedisBacked = async (providerId, baseURL, apiKey) => {
-  const cached = await getModelsFromRedisCache(providerId);
-  if (cached) return cached;
-
-  const lockKey = modelsLockRedisKey(providerId);
-  const { acquired, result } = await withLock(lockKey, MODEL_LOCK_TTL_S, async () => {
-    // Re-check in case another process finished discovery while we were
-    // waiting to acquire the lock.
-    const recheck = await getModelsFromRedisCache(providerId);
-    if (recheck) return recheck;
-
-    try {
-      const ranked = await fetchAndRankModelsFromProvider(providerId, baseURL, apiKey);
-      await setCache(modelsRedisKey(providerId), ranked, MODEL_CACHE_TTL_S);
-      console.log(`[MultiProvider] ${providerId}: discovered ${ranked.length} chat model(s) (Redis-cached, 6h)`);
-      return ranked;
-    } catch (err) {
-      console.warn(`[MultiProvider] ${providerId}: Redis-backed discovery failed (${err.message}) — will use static priority list`);
-      return null;
-    }
-  });
-
-  if (acquired) return result; // may be null if the fetch itself failed — falls through to static list at the call site
-  // Someone else holds the lock right now — don't perform the HTTP call
-  // ourselves this cycle.
-  return null;
-};
-
-// Evict a specific model from the Redis-backed cache (BAD_MODEL
-// classification — see providerErrors.js). Preserves the cache entry's
-// remaining TTL rather than resetting to the full 6-hour window, so this
-// eviction doesn't artificially extend the cache's natural refresh
-// schedule.
-const evictModelFromRedisCache = async (providerId, modelId) => {
-  try {
-    const current = await getModelsFromRedisCache(providerId);
-    if (!current) return;
-    const updated = current.filter(m => m !== modelId);
-    if (updated.length === current.length) return; // nothing to evict
-
-    let remainingTtl = MODEL_CACHE_TTL_S;
-    const client = await getRawClient();
-    if (client) {
-      try {
-        const ttl = await client.ttl(modelsRedisKey(providerId));
-        if (ttl > 0) remainingTtl = ttl;
-      } catch { /* fall back to full TTL if reading it fails */ }
-    }
-
-    await setCache(modelsRedisKey(providerId), updated, remainingTtl);
-    console.warn(`[MultiProvider] Evicted bad model "${modelId}" from ${providerId}'s Redis-cached model list`);
-  } catch (err) {
-    console.warn(`[MultiProvider] evictModelFromRedisCache(${providerId}, ${modelId}) failed (non-fatal):`, err.message);
-  }
-};
-
-// Fire-and-forget observability counters — never awaited at the call
-// site, never block the real request path. Observe-only in this
-// rollout: not read by any decision logic yet (see file header and
-// providerErrors.js's PROVIDER_TRANSIENT reasoning) — deliberately
-// staged this way so real production traffic data can inform sensible
-// thresholds before anything acts on these numbers.
-const recordUsageAttempt = (providerId, index) => {
-  incrementCounter(usageRedisKey(providerId, index), USAGE_COUNTER_TTL_S).catch(() => {});
-};
-
-const recordProviderTransient = (providerId) => {
-  hashIncrementField(providerHealthRedisKey(providerId), 'count', 1, PROVIDER_HEALTH_TTL_S).catch(() => {});
-};
-
-// ══════════════════════════════════════════════════════════════
-// Original in-memory implementation — kept as the fallback path when
-// MULTIPROVIDER_REDIS_STATE_ENABLED is explicitly set to 'false', or
-// when a Redis operation itself fails at runtime (fail-open: a Redis
-// hiccup degrades precision, never takes down AI features). See the
-// file header for why this is deliberately not deleted yet.
-// ══════════════════════════════════════════════════════════════
-
-// Cooldown in-memory fallback now lives in providerCooldown.js (shared
-// with exa.js) — see this file's markKeyFailed/isKeyCooling imports above.
-
-let _pools = null;
-
-const _discoveredModels = {};
-const _discoveryDone    = {};
-
-const _discoverProviderModelsInMemory = async (providerId, baseURL, apiKey) => {
-  try {
-    const ranked = await fetchAndRankModelsFromProvider(providerId, baseURL, apiKey);
-    _discoveredModels[providerId] = ranked;
-    console.log(`[MultiProvider] ${providerId}: discovered ${ranked.length} chat model(s) — using dynamic list (in-memory fallback)`);
-  } catch (err) {
-    console.warn(`[MultiProvider] ${providerId}: model discovery failed (${err.message}) — using static priority list`);
-    _discoveredModels[providerId] = MODEL_PRIORITY[providerId] || [];
-  }
-  _discoveryDone[providerId] = true;
-};
-
-const getEffectiveModelsInMemory = (providerId, tier = 'quality') => {
-  if (_discoveryDone[providerId] && _discoveredModels[providerId]?.length > 0) {
-    if (tier === 'fast') {
-      const fastIds = FAST_MODEL_PRIORITY[providerId] || [];
-      const matched = _discoveredModels[providerId].filter(id => fastIds.includes(id));
-      if (matched.length > 0) return matched;
-    }
-    return _discoveredModels[providerId];
-  }
-  return getModelPriorityForTier(providerId, tier) || PROVIDER_REGISTRY[providerId]?.models || [];
-};
-
-// ══════════════════════════════════════════════════════════════
-// IMPL-MULTIPROVIDER-01 — dispatchers: route to Redis-backed logic by
-// default, fall back to the in-memory implementation when the kill
-// switch is off OR when a Redis operation fails at runtime. Every
-// caller elsewhere in this file goes through these dispatchers rather
-// than calling either implementation directly, so the rest of the file
-// doesn't need to know which mode is active.
-// ══════════════════════════════════════════════════════════════
-
-// Local id helper used only for this file's own per-call dedup Set
-// (cooledThisCall) — not the source of truth for cooldown state itself,
-// which now lives in providerCooldown.js.
-const cooldownId = (provider, keyIndex) => `${provider}-${keyIndex}`;
-
-const getEffectiveModels = async (providerId, tier = 'quality', baseURL, apiKey) => {
-  if (isRedisStateEnabled()) {
-    try {
-      const discovered = await discoverModelsRedisBacked(providerId, baseURL, apiKey);
-      const source = discovered || (await getModelsFromRedisCache(providerId));
-      if (source?.length > 0) {
-        if (tier === 'fast') {
-          const fastIds = FAST_MODEL_PRIORITY[providerId] || [];
-          const matched = source.filter(id => fastIds.includes(id));
-          if (matched.length > 0) return matched;
-        }
-        return source;
-      }
-    } catch (err) {
-      console.warn(`[MultiProvider] Redis-backed model discovery failed, falling back to static list for this call:`, err.message);
-      reportDegradedMode('multiprovider-redis-unavailable', { operation: 'getEffectiveModels', providerId, error: err.message });
-    }
-    // Redis enabled but no cached/discovered list available yet this
-    // cycle (cache miss + lost the lock race, or discovery itself
-    // failed) — fall through to the static list, same as the original
-    // pre-Redis "discovery hasn't finished yet" behavior.
-    return getModelPriorityForTier(providerId, tier) || PROVIDER_REGISTRY[providerId]?.models || [];
-  }
-
-  // Kill switch off — original in-memory path, including its own
-  // fire-and-forget discovery kickoff (triggered from getPools() below,
-  // unchanged from the original design).
-  return getEffectiveModelsInMemory(providerId, tier);
-};
-
-const getPools = () => {
-  if (!_pools) {
-    _pools = {};
-    let total = 0;
-
-    for (const id of PROVIDER_ORDER) {
-      _pools[id] = buildKeyPool(PROVIDER_REGISTRY[id]);
-      total += _pools[id].length;
-
-      const firstKey = _pools[id][0];
-      if (firstKey && !isRedisStateEnabled()) {
-        // Only kick off the old fire-and-forget in-memory discovery when
-        // the Redis path is disabled — the Redis-backed path performs
-        // discovery lazily, lock-guarded, at the point getEffectiveModels
-        // is actually called (see discoverModelsRedisBacked above), not
-        // eagerly at pool-construction time.
-        _discoverProviderModelsInMemory(id, PROVIDER_REGISTRY[id].baseURL, firstKey.key)
-          .catch((err) => console.warn(`[MultiProvider] ${id} discovery kickoff failed: ${err.message}`));
-      }
-    }
-
-    if (total === 0) {
-      console.error('[MultiProvider] CRITICAL: No API keys found for any provider!');
-    } else {
-      console.log(`[MultiProvider] Ready — ${total} total key(s) across ${PROVIDER_ORDER.length} providers: Cerebras, Groq, Mistral, OpenRouter (Redis-backed state: ${isRedisStateEnabled() ? 'enabled' : 'disabled'})`);
-    }
-  }
-  return _pools;
 };
 
 // ──────────────────────────────────────────
 // VISION HELPER
 // Attaches image parts to the LAST message in the array (assumed to be
-// the current user turn), but only when the model actually receiving
-// this request is vision-capable. History/system messages are always
-// left as plain strings — we only ever have image bytes for the
-// current turn anyway (see chat.js).
+// the current user turn). History/system messages are always left as
+// plain strings — we only ever have image bytes for the current turn
+// anyway (see chat.js).
 // ──────────────────────────────────────────
-const buildMessagesForProvider = (messages, images, isVisionCapable) => {
-  if (!isVisionCapable || !images?.length || messages.length === 0) return messages;
+const buildMessagesForProvider = (messages, images, hasImages) => {
+  if (!hasImages || messages.length === 0) return messages;
 
   const lastIdx = messages.length - 1;
   const last    = messages[lastIdx];
@@ -505,65 +125,53 @@ const buildMessagesForProvider = (messages, images, isVisionCapable) => {
   return [...messages.slice(0, lastIdx), { ...last, content }];
 };
 
-// IMPL-H8-01: callProvider/streamProvider now accept `providerId` (threaded
-// through from the caller's queue entry) and throw ProviderCallError with
-// the real structured status/parsedBody/networkErrorCode instead of a
-// bare Error carrying only a formatted message string. Network-level
-// failures (fetch itself throwing, before any HTTP response exists) are
-// now distinguished from HTTP-level failures (a response came back with
-// !res.ok) — the original code did not make this distinction explicitly,
-// relying on whatever shape fetch's own thrown error happened to have.
-// Full audit 1.68 — timeouts and failure shaping for provider HTTP calls.
-const TRANSIENT_SKIP_THRESHOLD = 2;
-const CALL_TIMEOUT_MS         = 90_000; // whole non-streaming request
-const STREAM_HEADERS_TIMEOUT_MS = 30_000; // waiting for the response to start
-const STREAM_STALL_TIMEOUT_MS   = 45_000; // silence between streamed chunks
-const MAX_DISCOVERED_EXTRA_MODELS = 8;
-
 // A timeout surfaces as a DOMException named TimeoutError/AbortError with no
 // `cause.code`, which the classifier would treat as NON_RETRYABLE and abort
 // the whole chain. A timed-out or unreadable response is a transient
 // connection failure, so give it a code the classifier already treats as such.
-const toTransientError = (err, providerId) =>
+const toTransientError = (err) =>
   new ProviderCallError(err.message, {
-    providerId,
+    providerId: PROVIDER_ID,
     networkErrorCode:
       err.cause?.code ||
       (err.name === 'TimeoutError' || err.name === 'AbortError' ? 'ETIMEDOUT' : 'ECONNRESET'),
   });
 
-const callProvider = async ({
-  baseURL, apiKey, model, extraHeaders, providerId,
-  messages, systemPrompt, temperature, maxTokens, images,
-}) => {
-  const isVisionCapable = VISION_CAPABLE_MODELS.has(model);
-  const finalMessages   = buildMessagesForProvider(messages, images, isVisionCapable);
+const buildRequestBody = ({ messages, systemPrompt, temperature, maxTokens, images, stream }) => {
+  const hasImages = !!images?.length;
+  const finalMessages = buildMessagesForProvider(messages, images, hasImages);
 
-  const body = {
-    model,
+  return {
+    model:           hasImages ? VISION_MODEL : TEXT_MODEL,
+    fallback_models: hasImages ? VISION_FALLBACK_MODELS : TEXT_FALLBACK_MODELS,
     max_tokens:  maxTokens   ?? 1024,
     temperature: temperature ?? 0.7,
+    ...(stream ? { stream: true, stream_options: { include_usage: true } } : {}),
     messages: [
       ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
       ...finalMessages,
     ],
   };
+};
+
+const callProvider = async ({ messages, systemPrompt, temperature, maxTokens, images }) => {
+  const hasImages = !!images?.length;
+  const body = buildRequestBody({ messages, systemPrompt, temperature, maxTokens, images, stream: false });
 
   let res;
   try {
-    res = await fetch(`${baseURL}/chat/completions`, {
+    res = await fetch(`${GATEWAY_BASE_URL}/chat/completions`, {
       method:  'POST',
       headers: {
         'Content-Type':  'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-        ...extraHeaders,
+        'Authorization': `Bearer ${GATEWAY_API_KEY}`,
       },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
     });
   } catch (networkErr) {
     throw new ProviderCallError(networkErr.message, {
-      providerId,
+      providerId: PROVIDER_ID,
       networkErrorCode: networkErr.cause?.code
         || (networkErr.name === 'TimeoutError' || networkErr.name === 'AbortError' ? 'ETIMEDOUT' : null),
     });
@@ -573,7 +181,7 @@ const callProvider = async ({
     const errText = await res.text().catch(() => res.statusText);
     let parsedBody = null;
     try { parsedBody = JSON.parse(errText); } catch { /* not JSON — parsedBody stays null, classified conservatively */ }
-    throw new ProviderCallError(`HTTP ${res.status}: ${errText}`, { status: res.status, providerId, parsedBody });
+    throw new ProviderCallError(`HTTP ${res.status}: ${errText}`, { status: res.status, providerId: PROVIDER_ID, parsedBody });
   }
 
   let data;
@@ -581,38 +189,26 @@ const callProvider = async ({
     data = await res.json();
   } catch (bodyErr) {
     // A 200 whose body can't be read/parsed (connection cut mid-body, or a
-    // timeout while reading it) is a transient failure: try the next entry.
-    throw toTransientError(bodyErr, providerId);
+    // timeout while reading it) is a transient failure: let the caller retry.
+    throw toTransientError(bodyErr);
   }
-  const content = data.choices?.[0]?.message?.content ?? '';
-  const usage   = data.usage ?? {};
-  return { content, usage, used_vision: isVisionCapable && !!images?.length };
+  const content    = data.choices?.[0]?.message?.content ?? '';
+  const usage      = data.usage ?? {};
+  // The gateway's own actually-used upstream model/provider, from its
+  // `gateway` metadata block (see llm-gateway README) — falls back to
+  // the model we requested if that block is ever absent so model_used
+  // is never empty.
+  const modelUsed  = data.gateway?.model_used || data.model || (hasImages ? VISION_MODEL : TEXT_MODEL);
+
+  return { content, usage, used_vision: hasImages, model_used: modelUsed };
 };
 
 const streamProvider = async ({
-  baseURL, apiKey, model, extraHeaders, providerId,
   messages, systemPrompt, temperature, maxTokens, images,
   onToken, onComplete,
 }) => {
-  const isVisionCapable = VISION_CAPABLE_MODELS.has(model);
-  const finalMessages   = buildMessagesForProvider(messages, images, isVisionCapable);
-
-  const body = {
-    model,
-    max_tokens:  maxTokens   ?? 1024,
-    temperature: temperature ?? 0.7,
-    stream:      true,
-    // Required by OpenAI-compatible providers (Groq/Cerebras/Mistral/
-    // OpenRouter) to emit a final SSE chunk containing `usage` — without
-    // this, streamed responses have no token accounting at all (see
-    // onComplete below, which previously always sent tokens_in/tokens_out
-    // as undefined).
-    stream_options: { include_usage: true },
-    messages: [
-      ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
-      ...finalMessages,
-    ],
-  };
+  const hasImages = !!images?.length;
+  const body = buildRequestBody({ messages, systemPrompt, temperature, maxTokens, images, stream: true });
 
   // Abort only if the response hasn't STARTED within the headers timeout;
   // cleared as soon as fetch resolves so long streams are not cut off.
@@ -620,19 +216,18 @@ const streamProvider = async ({
   const startTimer = setTimeout(() => startController.abort(), STREAM_HEADERS_TIMEOUT_MS);
   let res;
   try {
-    res = await fetch(`${baseURL}/chat/completions`, {
+    res = await fetch(`${GATEWAY_BASE_URL}/chat/completions`, {
       method:  'POST',
       headers: {
         'Content-Type':  'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-        ...extraHeaders,
+        'Authorization': `Bearer ${GATEWAY_API_KEY}`,
       },
       body: JSON.stringify(body),
       signal: startController.signal,
     });
   } catch (networkErr) {
     throw new ProviderCallError(networkErr.message, {
-      providerId,
+      providerId: PROVIDER_ID,
       networkErrorCode: networkErr.cause?.code
         || (networkErr.name === 'AbortError' || networkErr.name === 'TimeoutError' ? 'ETIMEDOUT' : null),
     });
@@ -644,23 +239,20 @@ const streamProvider = async ({
     const errText = await res.text().catch(() => res.statusText);
     let parsedBody = null;
     try { parsedBody = JSON.parse(errText); } catch { /* not JSON — parsedBody stays null */ }
-    throw new ProviderCallError(`HTTP ${res.status}: ${errText}`, { status: res.status, providerId, parsedBody });
+    throw new ProviderCallError(`HTTP ${res.status}: ${errText}`, { status: res.status, providerId: PROVIDER_ID, parsedBody });
   }
 
   const reader      = res.body.getReader();
   const decoder     = new TextDecoder();
   let   fullContent = '';
   let   buffer      = '';
-  // Populated from the final SSE chunk's `usage` field (present because
-  // of stream_options.include_usage above). Providers emit this on the
-  // last chunk, typically alongside an empty `choices` array.
   let   usage       = null;
+  let   modelUsed   = hasImages ? VISION_MODEL : TEXT_MODEL;
 
   while (true) {
     // Stall guard: a stream that goes silent mid-reply is cancelled. This is a
     // plain Error (not a ProviderCallError), so it classifies NON_RETRYABLE and
-    // ends the call via onError instead of restarting on another provider and
-    // re-emitting tokens the client already has (see 1.49).
+    // ends the call via onError rather than being retried.
     let stallTimer;
     const { done, value } = await Promise.race([
       reader.read(),
@@ -695,164 +287,106 @@ const streamProvider = async ({
         if (parsed.usage) {
           usage = parsed.usage;
         }
+        if (parsed.gateway?.model_used) {
+          modelUsed = parsed.gateway.model_used;
+        } else if (parsed.model) {
+          modelUsed = parsed.model;
+        }
       } catch {
-        // Malformed SSE chunk — skip silently (upstream provider framing
-        // issue, not something the caller can act on).
+        // Malformed SSE chunk — skip silently (upstream framing issue,
+        // not something the caller can act on).
       }
     }
   }
 
   onComplete?.(fullContent, {
-    used_vision:  isVisionCapable && !!images?.length,
+    used_vision:  hasImages,
     tokens_in:    usage?.prompt_tokens     || 0,
     tokens_out:   usage?.completion_tokens || 0,
     tokens_total: usage?.total_tokens      || 0,
+    model_used:   modelUsed,
   });
 };
 
-// IMPL-MULTIPROVIDER-01: buildProviderQueue is now async — it awaits the
-// (now-async) cooldown check per key and the (now-async) effective-models
-// lookup per provider, both of which may involve a Redis round trip.
-// Every caller below (callWithFallback, streamWithFallback) awaits this.
-const buildProviderQueue = async (tier = 'quality') => {
-  const pools = getPools();
-  const queue = [];
-
-  for (const providerId of PROVIDER_ORDER) {
-    const def     = PROVIDER_REGISTRY[providerId];
-    const keyPool = pools[providerId];
-
-    const coolingFlags = await Promise.all(keyPool.map(k => isKeyCooling(k.provider, k.index)));
-    const healthy = keyPool.filter((_, i) => !coolingFlags[i]);
-
-    if (healthy.length === 0) continue;
-
-    const firstHealthyKey = healthy[0];
-    const models = await getEffectiveModels(providerId, tier, def.baseURL, firstHealthyKey.key);
-
-    for (const model of models) {
-      for (const keyEntry of healthy) {
-        queue.push({
-          providerId,
-          model,
-          keyEntry,
-          baseURL:      def.baseURL,
-          extraHeaders: def.extraHeaders ?? {},
-          // Debug-only label with key index — used for logs and cooldown
-          // bookkeeping. NOT what gets persisted as model_used anymore
-          // (audit §5.3) — see cleanModelUsed below.
-          debugName:    `${providerId}-${model}-key${keyEntry.index}`,
-        });
-      }
-    }
-  }
-
-  return queue;
-};
-
-const cleanModelUsed = (providerId, model) => `${providerId}:${model}`;
-
 export const callWithFallback = async ({ images, ...opts }) => {
-  const queue = await buildProviderQueue(opts.tier || 'quality');
+  warnIfMisconfigured();
 
-  if (queue.length === 0) {
-    throw new Error('ALL_PROVIDERS_FAILED: No healthy keys available across Cerebras, Groq, Mistral, or OpenRouter');
+  if (!GATEWAY_API_KEY) {
+    throw new Error('ALL_PROVIDERS_FAILED: GATEWAY_API_KEY is not configured');
   }
 
-  let lastError;
-  const cooledThisCall = new Set();
-  // Full audit 1.68: after TRANSIENT_SKIP_THRESHOLD provider-wide transient
-  // failures (5xx / network / timeout) from one provider in this call, skip
-  // that provider's remaining queue entries instead of retrying every
-  // model x key against a provider that is down.
-  const transientByProvider = new Map();
-
-  for (const provider of queue) {
-    if ((transientByProvider.get(provider.providerId) || 0) >= TRANSIENT_SKIP_THRESHOLD) continue;
-    try {
-      console.log(`[MultiProvider] Trying ${provider.debugName}...`);
-      recordUsageAttempt(provider.providerId, provider.keyEntry.index); // fire-and-forget, observe-only
-
-      const result = await callProvider({
-        baseURL:      provider.baseURL,
-        apiKey:       provider.keyEntry.key,
-        model:        provider.model,
-        extraHeaders: provider.extraHeaders,
-        providerId:   provider.providerId,
-        messages:     opts.messages,
-        systemPrompt: opts.systemPrompt,
-        temperature:  opts.temperature,
-        maxTokens:    opts.maxTokens,
-        images,
-      });
-
-      console.log(`[MultiProvider] ✓ Success via ${provider.debugName}${result.used_vision ? ' (vision)' : ''}`);
-      return {
-        content:      result.content,
-        tokens_in:    result.usage?.prompt_tokens     || 0,
-        tokens_out:   result.usage?.completion_tokens || 0,
-        tokens_total: result.usage?.total_tokens       || 0,
-        model_used:   cleanModelUsed(provider.providerId, provider.model),
-        used_vision:  result.used_vision,
-      };
-
-    } catch (err) {
-      lastError = err;
-      console.warn(`[MultiProvider] ✗ ${provider.debugName} failed: ${err.message}`);
-
-      // IMPL-H8-01: structured classification replaces the old
-      // isRetryableError/shouldCoolKey string-matching — see
-      // utils/providerErrors.js for the full taxonomy and reasoning.
-      const category = classifyProviderError(err);
-      const cid = cooldownId(provider.keyEntry.provider, provider.keyEntry.index);
-
-      if (category === 'KEY_FAULT') {
-        if (!cooledThisCall.has(cid)) {
-          await markKeyFailed(provider.keyEntry.provider, provider.keyEntry.index);
-          cooledThisCall.add(cid);
-        }
-      } else if (category === 'PROVIDER_TRANSIENT') {
-        // Deliberately do NOT cool the key — this failure is provider-wide
-        // or network-related, not attributable to this specific key.
-        recordProviderTransient(provider.providerId);
-        transientByProvider.set(provider.providerId, (transientByProvider.get(provider.providerId) || 0) + 1);
-      } else if (category === 'BAD_MODEL') {
-        // Deliberately do NOT cool the key — the model reference is what's
-        // wrong, not the key. Evict it so other requests/instances stop
-        // hitting the same known-dead model.
-        evictModelFromRedisCache(provider.providerId, provider.model).catch(() => {});
-      } else {
-        // NON_RETRYABLE — likely a genuine application bug in how this
-        // request was constructed. Report to Sentry (see file header for
-        // why this must happen HERE, not left to bubble up) and abort the
-        // fallback chain immediately rather than wasting time retrying
-        // the same malformed payload against every remaining provider.
-        try {
-          Sentry.captureException(err, {
-            tags: { source: 'multiProvider', provider: provider.providerId, model: provider.model, category },
-          });
-        } catch { /* Sentry must never be able to break the call path */ }
-        throw err;
-      }
-      // KEY_FAULT / PROVIDER_TRANSIENT / BAD_MODEL all fall through to the
-      // next queue entry.
-    }
+  if (await isKeyCooling(PROVIDER_ID, KEY_INDEX)) {
+    throw new Error('ALL_PROVIDERS_FAILED: gateway key is currently cooling down after a recent auth/rate-limit failure');
   }
 
-  console.error('[MultiProvider] All providers exhausted:', lastError?.message);
   try {
-    Sentry.captureException(lastError || new Error('ALL_PROVIDERS_FAILED'), {
-      tags: { source: 'multiProvider', reason: 'all_providers_failed' },
+    console.log(`[MultiProvider] Calling gateway (${images?.length ? 'vision' : 'text'})...`);
+
+    const result = await callProvider({
+      messages:     opts.messages,
+      systemPrompt: opts.systemPrompt,
+      temperature:  opts.temperature,
+      maxTokens:    opts.maxTokens,
+      images,
     });
-  } catch { /* Sentry must never be able to break the call path */ }
-  throw new Error(`ALL_PROVIDERS_FAILED: ${lastError?.message}`);
+
+    console.log(`[MultiProvider] ✓ Success via gateway${result.used_vision ? ' (vision)' : ''} — upstream model: ${result.model_used}`);
+    return {
+      content:      result.content,
+      tokens_in:    result.usage?.prompt_tokens     || 0,
+      tokens_out:   result.usage?.completion_tokens || 0,
+      tokens_total: result.usage?.total_tokens       || 0,
+      model_used:   result.model_used,
+      used_vision:  result.used_vision,
+    };
+
+  } catch (err) {
+    console.warn(`[MultiProvider] ✗ gateway call failed: ${err.message}`);
+
+    const category = classifyProviderError(err);
+
+    if (category === 'KEY_FAULT') {
+      // A genuine bad/rejected gateway credential — see
+      // providerErrors.js's ADMISSION_LIMIT_CODES carve-out for why a
+      // 429 doesn't always land here (daily budget / concurrency caps
+      // land in PROVIDER_TRANSIENT instead, since those aren't this
+      // key's fault and will resolve on their own).
+      await markKeyFailed(PROVIDER_ID, KEY_INDEX);
+    } else if (category === 'PROVIDER_TRANSIENT' || category === 'BAD_MODEL') {
+      // Nothing further to do: there is no second provider/key to fall
+      // back to — the gateway itself is responsible for its own
+      // upstream fallback_models chain. These categories are not
+      // reported to Sentry (expected, routinely-handled conditions).
+    } else {
+      // NON_RETRYABLE — likely a genuine application bug in how this
+      // request was constructed.
+      try {
+        Sentry.captureException(err, {
+          tags: { source: 'multiProvider', provider: PROVIDER_ID, category },
+        });
+      } catch { /* Sentry must never be able to break the call path */ }
+    }
+
+    try {
+      Sentry.captureException(err, {
+        tags: { source: 'multiProvider', reason: 'gateway_call_failed', category },
+      });
+    } catch { /* Sentry must never be able to break the call path */ }
+    throw new Error(`ALL_PROVIDERS_FAILED: ${err.message}`);
+  }
 };
 
 export const callWithFallbackGroq = async ({
   messages, systemPrompt, temperature, maxTokens, tier = 'quality',
   workspaceId = null, userId = null, sourceJob = null, images = undefined,
 }) => {
-  const result = await callWithFallback({ messages, systemPrompt, temperature, maxTokens, tier, images });
+  // `tier` is accepted for call-site compatibility but is no longer
+  // acted on here — the gateway resolves its own model chain. If
+  // tier-based routing (e.g. a cheaper model for "fast") is wanted
+  // again later, it belongs as a second GATEWAY_*_MODEL pair selected
+  // on `tier` here, not as a reintroduction of the old per-provider
+  // pool.
+  const result = await callWithFallback({ messages, systemPrompt, temperature, maxTokens, images });
 
   if (workspaceId && userId) {
     const { recordGroqUsage } = await import('./tokenTracker.js');
@@ -869,130 +403,86 @@ export const streamWithFallback = async ({
   messages, systemPrompt, temperature, maxTokens,
   onToken, onComplete, onError, images = undefined,
 }) => {
-  const queue = await buildProviderQueue();
+  warnIfMisconfigured();
 
-  if (queue.length === 0) {
-    onError?.(new Error('ALL_PROVIDERS_FAILED: No healthy keys available across Cerebras, Groq, Mistral, or OpenRouter'));
+  if (!GATEWAY_API_KEY) {
+    onError?.(new Error('ALL_PROVIDERS_FAILED: GATEWAY_API_KEY is not configured'));
     return;
   }
 
-  const cooledThisCall = new Set();
-  // Full audit 1.68: after TRANSIENT_SKIP_THRESHOLD provider-wide transient
-  // failures (5xx / network / timeout) from one provider in this call, skip
-  // that provider's remaining queue entries instead of retrying every
-  // model x key against a provider that is down.
-  const transientByProvider = new Map();
-
-  for (const provider of queue) {
-    if ((transientByProvider.get(provider.providerId) || 0) >= TRANSIENT_SKIP_THRESHOLD) continue;
-    try {
-      console.log(`[MultiProvider] Streaming via ${provider.debugName}`);
-      recordUsageAttempt(provider.providerId, provider.keyEntry.index); // fire-and-forget, observe-only
-
-      await streamProvider({
-        baseURL:      provider.baseURL,
-        apiKey:       provider.keyEntry.key,
-        model:        provider.model,
-        extraHeaders: provider.extraHeaders,
-        providerId:   provider.providerId,
-        messages,
-        systemPrompt,
-        temperature,
-        maxTokens,
-        images,
-        onToken,
-        onComplete: (content, meta) =>
-          onComplete?.(content, {
-            ...meta,
-            model_used: cleanModelUsed(provider.providerId, provider.model),
-          }),
-      });
-
-      return;
-
-    } catch (err) {
-      console.warn(`[MultiProvider] Stream failed for ${provider.debugName}: ${err.message}`);
-
-      const category = classifyProviderError(err);
-      const cid = cooldownId(provider.keyEntry.provider, provider.keyEntry.index);
-
-      if (category === 'KEY_FAULT') {
-        if (!cooledThisCall.has(cid)) {
-          await markKeyFailed(provider.keyEntry.provider, provider.keyEntry.index);
-          cooledThisCall.add(cid);
-        }
-      } else if (category === 'PROVIDER_TRANSIENT') {
-        recordProviderTransient(provider.providerId);
-        transientByProvider.set(provider.providerId, (transientByProvider.get(provider.providerId) || 0) + 1);
-      } else if (category === 'BAD_MODEL') {
-        evictModelFromRedisCache(provider.providerId, provider.model).catch(() => {});
-      } else {
-        try {
-          Sentry.captureException(err, {
-            tags: { source: 'multiProvider-stream', provider: provider.providerId, model: provider.model, category },
-          });
-        } catch { /* Sentry must never be able to break the call path */ }
-        onError?.(err);
-        return;
-      }
-    }
+  if (await isKeyCooling(PROVIDER_ID, KEY_INDEX)) {
+    onError?.(new Error('ALL_PROVIDERS_FAILED: gateway key is currently cooling down after a recent auth/rate-limit failure'));
+    return;
   }
 
-  const finalErr = new Error('ALL_PROVIDERS_FAILED: All providers and keys exhausted');
   try {
-    Sentry.captureException(finalErr, { tags: { source: 'multiProvider-stream', reason: 'all_providers_failed' } });
-  } catch { /* Sentry must never be able to break the call path */ }
-  onError?.(finalErr);
+    console.log(`[MultiProvider] Streaming via gateway (${images?.length ? 'vision' : 'text'})...`);
+
+    await streamProvider({
+      messages, systemPrompt, temperature, maxTokens, images,
+      onToken,
+      onComplete,
+    });
+
+  } catch (err) {
+    console.warn(`[MultiProvider] Stream failed for gateway: ${err.message}`);
+
+    const category = classifyProviderError(err);
+
+    if (category === 'KEY_FAULT') {
+      await markKeyFailed(PROVIDER_ID, KEY_INDEX);
+    } else if (category === 'PROVIDER_TRANSIENT' || category === 'BAD_MODEL') {
+      // See callWithFallback above — no second provider to fall back to.
+    } else {
+      try {
+        Sentry.captureException(err, {
+          tags: { source: 'multiProvider-stream', provider: PROVIDER_ID, category },
+        });
+      } catch { /* Sentry must never be able to break the call path */ }
+    }
+
+    const finalErr = new Error(`ALL_PROVIDERS_FAILED: ${err.message}`);
+    try {
+      Sentry.captureException(finalErr, { tags: { source: 'multiProvider-stream', reason: 'gateway_call_failed', category } });
+    } catch { /* Sentry must never be able to break the call path */ }
+    onError?.(finalErr);
+  }
 };
 
-// IMPL-MULTIPROVIDER-01: reads from Redis (or the in-memory fallback,
-// depending on the kill switch) instead of only ever reflecting this
-// one process's local view. Return shape is unchanged — this is a
-// data-source change, not a contract change. Not currently exposed via
-// any HTTP route in this codebase, so there is no external
-// backward-compatibility concern.
+// Return shape is unchanged from the previous multi-provider version —
+// this is a data-source change (one gateway key instead of N
+// per-provider pools), not a contract change. Not currently exposed via
+// any HTTP route in this codebase.
 export const getProviderStatus = async () => {
-  const pools  = getPools();
-  const status = [];
+  let cooling = false;
+  let failCount = 0;
+  let failedAt = null;
 
-  for (const providerId of PROVIDER_ORDER) {
-    const def     = PROVIDER_REGISTRY[providerId];
-    const keyPool = pools[providerId];
-
-    for (const k of keyPool) {
-      let cooling = false;
-      let failCount = 0;
-      let failedAt = null;
-
-      if (isRedisStateEnabled()) {
-        try {
-          const state = await getCooldownState(k.provider, k.index);
-          cooling   = !!state;
-          failCount = state ? parseInt(state.failCount || '0', 10) : 0;
-          failedAt  = state?.failedAt ? new Date(parseInt(state.failedAt, 10)).toISOString() : null;
-        } catch {
-          cooling = isKeyCoolingInMemorySync(k.provider, k.index);
-        }
-      } else {
-        cooling = isKeyCoolingInMemorySync(k.provider, k.index);
-        const cd = getInMemoryCooldownState(k.provider, k.index);
-        failCount = cd?.failCount || 0;
-        failedAt  = cd?.failedAt ? new Date(cd.failedAt).toISOString() : null;
-      }
-
-      status.push({
-        provider:      providerId,
-        models_static: def.models,
-        key_index:     k.index,
-        status:        cooling ? 'cooling' : 'healthy',
-        fail_count:    failCount,
-        cooling_since: failedAt,
-        state_source:  isRedisStateEnabled() ? 'redis' : 'in-memory',
-      });
+  if (isRedisStateEnabled()) {
+    try {
+      const state = await getCooldownState(PROVIDER_ID, KEY_INDEX);
+      cooling   = !!state;
+      failCount = state ? parseInt(state.failCount || '0', 10) : 0;
+      failedAt  = state?.failedAt ? new Date(parseInt(state.failedAt, 10)).toISOString() : null;
+    } catch {
+      cooling = isKeyCoolingInMemorySync(PROVIDER_ID, KEY_INDEX);
     }
+  } else {
+    cooling = isKeyCoolingInMemorySync(PROVIDER_ID, KEY_INDEX);
+    const cd = getInMemoryCooldownState(PROVIDER_ID, KEY_INDEX);
+    failCount = cd?.failCount || 0;
+    failedAt  = cd?.failedAt ? new Date(cd.failedAt).toISOString() : null;
   }
 
-  return status;
+  return [{
+    provider:      PROVIDER_ID,
+    models_static: [TEXT_MODEL, VISION_MODEL],
+    key_index:     KEY_INDEX,
+    status:        cooling ? 'cooling' : 'healthy',
+    fail_count:    failCount,
+    cooling_since: failedAt,
+    state_source:  isRedisStateEnabled() ? 'redis' : 'in-memory',
+  }];
 };
 
 export default { callWithFallback, callWithFallbackGroq, streamWithFallback, getProviderStatus };

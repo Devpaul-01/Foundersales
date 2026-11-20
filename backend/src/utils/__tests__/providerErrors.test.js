@@ -61,4 +61,34 @@ describe('classifyProviderError', () => {
     const plainError = new Error('something unexpected');
     expect(classifyProviderError(plainError)).toBe('NON_RETRYABLE');
   });
+
+  it('classifies a 429 with error.code daily_token_budget_exceeded as PROVIDER_TRANSIENT, not KEY_FAULT (llm-gateway)', () => {
+    const budgetErr = new ProviderCallError('HTTP 429', {
+      status: 429,
+      providerId: 'gateway',
+      parsedBody: { error: { message: 'daily token budget exceeded', type: 'rate_limit_error', code: 'daily_token_budget_exceeded' } },
+    });
+    expect(classifyProviderError(budgetErr)).toBe('PROVIDER_TRANSIENT');
+  });
+
+  it('classifies a 429 with error.code too_many_concurrent_requests as PROVIDER_TRANSIENT, not KEY_FAULT (llm-gateway)', () => {
+    const concurrencyErr = new ProviderCallError('HTTP 429', {
+      status: 429,
+      providerId: 'gateway',
+      parsedBody: { error: { message: 'too many concurrent requests', type: 'rate_limit_error', code: 'too_many_concurrent_requests' } },
+    });
+    expect(classifyProviderError(concurrencyErr)).toBe('PROVIDER_TRANSIENT');
+  });
+
+  it('still classifies a plain 429 (no admission-limit code) as KEY_FAULT', () => {
+    const plainRateLimit = new ProviderCallError('HTTP 429', {
+      status: 429,
+      providerId: 'gateway',
+      parsedBody: { error: { message: 'rate limited', type: 'rate_limit_error', code: 'rate_limit_error' } },
+    });
+    expect(classifyProviderError(plainRateLimit)).toBe('KEY_FAULT');
+
+    const noBodyAtAll = new ProviderCallError('HTTP 429', { status: 429, providerId: 'gateway' });
+    expect(classifyProviderError(noBodyAtAll)).toBe('KEY_FAULT');
+  });
 });

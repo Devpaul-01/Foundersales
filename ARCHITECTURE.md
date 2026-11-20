@@ -399,14 +399,13 @@ The two sources score genuinely different axes — real messages are scored on w
 
 ## 10. Redis Usage
 
-Redis is used for six genuinely different purposes here, not one "caching layer" — worth being precise about which is which:
+Redis is used for five genuinely different purposes here, not one "caching layer" — worth being precise about which is which:
 
 | Purpose | Where | Mechanism |
 |---|---|---|
 | **Caching** | Auth profile (30s), workspace context (30s), insights/coaching-report results (4–24h) | `getCache`/`setCache`, plain key-value with TTL |
 | **Queues** | All background job processing | BullMQ over a **separate `ioredis` connection**, deliberately isolated from the `redis`-package client used for everything else |
 | **Rate limiting** | 19 namespaced limiters | `rate-limit-redis` wrapping the shared raw client, one Redis key-prefix per limiter |
-| **Distributed locks** | Model-discovery refresh (15s TTL) | `SET NX PX` + a Lua script for compare-and-delete release, so a lock can only be released by the process that acquired it |
 | **Cross-instance coordination** | AI gateway-key cooldown, Exa key cooldowns | Redis hash per `(provider, keyIndex)`, shared by `multiProvider.js` and `exa.js` via one module (`providerCooldown.js`) |
 | **Distributed concurrency guard** | Onboarding AI-call staggering | A Redis sorted set (`stagger:groq_queue:active`) where each in-flight call is a member scored by its acquisition timestamp — self-healing via a staleness sweep rather than depending on a single shared TTL |
 

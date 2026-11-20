@@ -77,12 +77,12 @@ The momentum score itself is computed deterministically (not by AI) from outreac
 
 ### How a search decision gets made
 
-Before spending an Exa search credit, `needsRealTimeSearch()` runs a cheap AI pass judging whether a live search right now has a good chance of finding anything — checking profile completeness and whether the ICP trigger and preferred platforms give it something specific to search for. If the router says no, or the workspace's daily Exa quota (tiered: 5/50/200 by plan) is exhausted, the system falls back to Groq-generated realistic practice examples instead — clearly labeled `is_example: true`, never presented as real leads.
+Before spending an Exa search credit, `needsRealTimeSearch()` runs a cheap AI pass judging whether a live search right now has a good chance of finding anything — checking profile completeness and whether the ICP trigger and preferred platforms give it something specific to search for. If the router says no, or the workspace's daily Exa quota (tiered: 5/50/200 by plan) is exhausted, the system falls back to AI-generated realistic practice examples instead — clearly labeled `is_example: true`, never presented as real leads.
 
 ```mermaid
 flowchart TB
     A[Trigger: onboarding, manual refresh, or 6-hour scan] --> B{needsRealTimeSearch?}
-    B -->|no / quota exceeded| C[Groq fallback: realistic practice examples]
+    B -->|no / quota exceeded| C[AI fallback: realistic practice examples]
     B -->|yes| D[Exa neural search per preferred platform]
     D --> E[scoreOpportunities — fit/timing/intent, one AI call for the batch]
     E --> F{composite score ≥ threshold?}
@@ -98,7 +98,7 @@ Every scored opportunity gets its own drafted outreach message before the user s
 
 ### Opportunity detail and AI intel
 
-Opening an opportunity shows the drafted message and a deeper "Clutch AI intel" panel — pain points, talking points, and risks synthesized from a live Exa search plus a second parallel Groq call that turns the same research into personalized outreach specifics (opening line, message suggestion, follow-up hook, tone). This intel result is cached on the opportunity row for 7 days so repeat views don't re-trigger both calls.
+Opening an opportunity shows the drafted message and a deeper "Clutch AI intel" panel — pain points, talking points, and risks synthesized from a live Exa search plus a second parallel AI call that turns the same research into personalized outreach specifics (opening line, message suggestion, follow-up hook, tone). This intel result is cached on the opportunity row for 7 days so repeat views don't re-trigger both calls.
 
 <p align="center"><img src="assets/opportunity-detail-ai-intel.png" width="700" alt="Opportunity detail with pain points, talking points, risks, and a generated outreach message"></p>
 

@@ -75,3 +75,35 @@ configuration this app uses, confirming the file is parsed correctly (right file
 `Buffer`), and a second script confirming the `fileFilter` rejection path (`cb(new Error(...))`) still surfaces
 the same error message through Express's error handler. Full app boot + `/health` check also confirmed clean
 post-upgrade.
+
+## D5 — AI layer: replaced the in-repo four-provider chain with a self-hosted llm-gateway
+**Date:** 2026-11-20
+
+`services/multiProvider.js` used to be a full failover engine inside the product: a fixed Cerebras → Groq → Mistral
+→ OpenRouter queue, a pool of keys per provider, Redis-cached model discovery with a distributed refresh lock, and
+per-key cooldowns. The owner already runs a separate multi-provider gateway (`Devpaul-01/llm-gateway`) that does
+model-alias resolution, `fallback_models` chaining, and upstream key rotation server-side, so keeping a second copy
+of that logic here meant two layers doing the same job. Decided to make FounderSales a plain client of the gateway.
+
+Choices made, and why:
+- **Replace, not add.** The gateway is the only chat upstream. Considered keeping it first in the old chain, or as a
+  last-resort fallback; chose full replacement because the whole point of the gateway is to own failover.
+- **Strip-down rewrite, not a minimal swap.** One key, one provider entry, no model discovery, no multi-key pool.
+  Kept the Redis-backed cooldown (a revoked or rejected gateway key is a failure the gateway can't self-heal) and the
+  four exported functions with unchanged signatures and return shapes, so none of the ~24 call sites changed.
+- **Models.** `openai/gpt-oss-120b` primary for text; the gateway's own default priority models sent as
+  `fallback_models`. For image requests, `meta-llama/llama-4-scout-17b-16e-instruct` is sent as the primary, because
+  a text-only primary can't see the image no matter what trails it. All overridable via `GATEWAY_*` env vars.
+- **429 handling fix.** The gateway returns 429 for a bad key, an exhausted daily token budget, and a concurrency
+  cap, distinguishing them only by `error.code`. The classifier previously treated every 429 as `KEY_FAULT` (cool the
+  key for an hour). `daily_token_budget_exceeded` and `too_many_concurrent_requests` now classify as
+  `PROVIDER_TRANSIENT`; plain 429s are unchanged.
+- **`GROQ_API_KEY` stays required.** Voice-memo transcription (`services/transcription.js`) calls Groq Whisper
+  directly and has no gateway equivalent. `GATEWAY_API_KEY` was added to the required set alongside it.
+- **Left alone on purpose.** `services/groq-client.js` / `groq.js` (a legacy direct-to-Groq client no live route or
+  job calls) was not deleted or repointed; that was explicitly out of scope for this change.
+
+Verification: full backend suite passing (158/158 at the time of the change), including rewritten
+`multiProvider.test.js` and new cases in `providerErrors.test.js` for the admission-limit codes. Not verified:
+a live request against the deployed gateway; the default `GATEWAY_BASE_URL` is a placeholder and must be set to the
+real deployment.

@@ -31,11 +31,9 @@ flowchart TB
         CLOUD[("Cloudinary\nfile storage")]
     end
 
-    subgraph AI["AI Provider Layer"]
-        CB["Cerebras"]
-        GQ["Groq"]
-        MI["Mistral"]
-        OR["OpenRouter"]
+    subgraph AI["AI Layer"]
+        GW["llm-gateway\nself-hosted, OpenAI-compatible"]
+        GQ["Groq Whisper\nvoice-memo transcription"]
     end
 
     subgraph Ext["External Services"]
@@ -51,13 +49,14 @@ flowchart TB
     EX -->|uploads| CLOUD
     EX -->|enqueue| REDIS
     EX -->|search| EXA
-    EX -->|fallback chain| CB & GQ & MI & OR
+    EX -->|chat completions| GW
 
     REDIS -->|BullMQ jobs| W1 & W2 & W3
     SCHED -->|repeatable jobs| REDIS
 
     W1 & W2 & W3 --> PG
-    W1 & W2 & W3 -->|fallback chain| CB & GQ & MI & OR
+    W1 & W2 & W3 -->|chat completions| GW
+    W1 & W2 & W3 -->|transcription| GQ
     W2 & W3 --> FCM
     W1 --> RESEND
     EX & W1 & W2 & W3 -.->|error tracking| SENTRY
@@ -74,7 +73,7 @@ flowchart TB
 3. **Workspace-scoped, not user-scoped, data.** Every AI-relevant table (`workspace_profiles`, `practice_sessions`, `conversation_analyses`, `skill_progression`, `communication_patterns`) is keyed by `(workspace_id, user_id)`, not `user_id` alone, because one person can belong to multiple workspaces with legitimately different voice profiles and practice history in each. This wasn't the original design — comments throughout the job files document a migration where `workspace_profiles!inner` joins started returning arrays from Supabase's client, and the fix in every case was finding the array element matching `active_workspace_id` rather than trusting index 0.
 4. **AI cost is a design constraint, not an afterthought.** `services/calendarAiGate.js` exists solely to decide whether an AI call is worth making *before* making it, with every decision logged to `calendar_ai_events` so the impact is queryable. See §6.
 5. **Structured error classification over string matching.** `utils/providerErrors.js` replaced substring-matching a formatted error message (`err.message.includes('429')`) with a typed `ProviderCallError` carrying the real HTTP status, network error code, and parsed response body — a substring match on "500" can't distinguish an actual HTTP 500 from a token count that happens to contain those digits.
-6. **Redis state is shared across instances by design, with an explicit kill switch.** AI-provider key cooldowns, model-discovery caching, and rate-limit counters are all Redis-backed so a horizontally-scaled deployment behaves correctly. Every one of these has a documented in-memory fallback and an environment-variable kill switch (`MULTIPROVIDER_REDIS_STATE_ENABLED`) to revert without a deploy.
+6. **Redis state is shared across instances by design, with an explicit kill switch.** The AI gateway-key cooldown and rate-limit counters are Redis-backed so a horizontally-scaled deployment behaves correctly. Every one of these has a documented in-memory fallback and an environment-variable kill switch (`MULTIPROVIDER_REDIS_STATE_ENABLED`) to revert without a deploy.
 
 ---
 
@@ -123,7 +122,7 @@ Every limiter is defined once in `config/limiters.js` via a `buildLimiter()` fac
 
 ### Routes and services
 
-Route files live in `routes/`, one per domain (`opportunities.js`, `practice.js`, `calendar.js`, etc.), mounted in `app.js` behind the `authenticate` + `resolveWorkspace` middleware pair (aliased `...ws`) except for auth routes themselves. Business logic lives in `services/` — AI orchestration (`groq-*.js` split by concern, `multiProvider.js`, `exa.js`), calendar intelligence (`calendarPrep.js`, `calendarAiGate.js`, `calendarCommitmentsSignals.js`, `groqCalendarIntelligence.js`, `exaCalendar.js`), prospect dedup (`prospectDedup.js`), notifications (`notifications.js`), file storage (`storage.js`, `voiceMemoService.js`), and infra (`redis.js`, `providerCooldown.js`, `tokenTracker.js`).
+Route files live in `routes/`, one per domain (`opportunities.js`, `practice.js`, `calendar.js`, etc.), mounted in `app.js` behind the `authenticate` + `resolveWorkspace` middleware pair (aliased `...ws`) except for auth routes themselves. Business logic lives in `services/` — AI orchestration (`groq-*.js` split by concern, `multiProvider.js` — the llm-gateway client, `exa.js`), calendar intelligence (`calendarPrep.js`, `calendarAiGate.js`, `calendarCommitmentsSignals.js`, `groqCalendarIntelligence.js`, `exaCalendar.js`), prospect dedup (`prospectDedup.js`), notifications (`notifications.js`), file storage (`storage.js`, `voiceMemoService.js`), and infra (`redis.js`, `providerCooldown.js`, `tokenTracker.js`).
 
 ### Validation
 
@@ -195,35 +194,51 @@ A single `users` row can hold membership in multiple `workspaces`, each a separa
 
 This is the layer every other AI feature sits on top of, and it's worth understanding on its own before looking at any individual feature.
 
-### 6.1 The fallback chain
+### 6.1 One gateway, one key
+
+Every AI chat call goes through one function, `callWithFallback(messages, tier)` in `services/multiProvider.js`, which sends a single OpenAI-compatible request to a self-hosted [llm-gateway](https://github.com/Devpaul-01/llm-gateway). The gateway is a separate service (its own repo) that fronts many upstream providers: it resolves model aliases, walks a per-request `fallback_models` chain, and rotates and cools its own upstream provider keys. FounderSales no longer does any of that itself.
+
+This file used to *be* that failover engine: a fixed four-provider queue (Cerebras → Groq → Mistral → OpenRouter), a pool of keys per provider, and a Redis-cached model-discovery subsystem. That was infrastructure living inside the product's own hottest request path, so it was extracted. `multiProvider.js` went from about a thousand lines to under five hundred, and the exported contract (`callWithFallback`, `callWithFallbackGroq`, `streamWithFallback`, `getProviderStatus`) did not change, so none of the roughly two dozen call sites were touched.
 
 ```mermaid
 flowchart TB
-    Start["callWithFallback(messages, tier)"] --> Build["buildProviderQueue(tier)"]
-    Build --> Loop{"For each\n(provider, model, key)\nin priority order"}
-    Loop -->|attempt| Call["callProvider()"]
-    Call -->|success| Done["Return content + usage\n+ model_used"]
+    Start["callWithFallback(messages, tier)"] --> Guard{"GATEWAY_API_KEY set?\nkey cooling in Redis?"}
+    Guard -->|"missing / cooling"| FailFast["throw ALL_PROVIDERS_FAILED\nno request sent"]
+    Guard -->|ok| Call["POST GATEWAY_BASE_URL/chat/completions\nmodel + fallback_models"]
+    Call -->|success| Done["Return content + usage\n+ model_used (gateway-reported)"]
     Call -->|failure| Classify["classifyProviderError(err)"]
-    Classify -->|KEY_FAULT\n401/403/429| Cool["markKeyFailed()\ncool this key 1h, Redis-shared"]
-    Classify -->|PROVIDER_TRANSIENT\n500/502/503/504,\nnetwork errors| Skip["do NOT cool the key —\nnot the key's fault"]
-    Classify -->|BAD_MODEL\n400 + model-not-found\nsignal in response body| Evict["evict this model from\nthe Redis-cached model list"]
-    Classify -->|NON_RETRYABLE\neverything else| Abort["report to Sentry,\nrethrow immediately —\nstop the whole chain"]
-    Cool --> Loop
-    Skip --> Loop
-    Evict --> Loop
-    Loop -->|queue exhausted| Fail["throw ALL_PROVIDERS_FAILED\nreport to Sentry"]
+    Classify -->|"KEY_FAULT\n401/403, plain 429"| Cool["markKeyFailed()\ncool the gateway key 1h, Redis-shared"]
+    Classify -->|"PROVIDER_TRANSIENT\n5xx, network errors,\n429 budget / concurrency code"| Skip["do NOT cool the key"]
+    Classify -->|"BAD_MODEL"| Bad["no cache to evict from —\nmodel resolution is the gateway's job"]
+    Classify -->|"NON_RETRYABLE\neverything else"| Abort["capture to Sentry with category"]
+    Cool --> Fail["throw ALL_PROVIDERS_FAILED"]
+    Skip --> Fail
+    Bad --> Fail
+    Abort --> Fail
 ```
 
-Provider priority is fixed — **Cerebras → Groq → Mistral → OpenRouter** — chosen by free-tier throughput. Within each provider, multiple API keys can be configured (`GROQ_API_KEY_1` through `_10`, similarly for the others) so one account hitting its own rate limit doesn't take the whole provider out of rotation. Every request tries every (provider, model, key) combination in priority order until one succeeds or the queue is exhausted — in the common case the first entry succeeds and nothing past it is touched.
+There is deliberately no retry loop here any more. With one upstream and one key, "try the next key or provider" has nothing to try; that decision now lives inside the gateway, which has the full picture of every provider behind it.
+
+Configuration is a single required key plus optional overrides (defaults are built in and mirror the gateway's own default priority list):
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `GATEWAY_API_KEY` | Project key for the gateway (**required**) | none |
+| `GATEWAY_BASE_URL` | Gateway endpoint including `/v1`; set this to your own deployment | placeholder `https://llm-gateway.fly.dev/v1` |
+| `GATEWAY_TEXT_MODEL` | Primary model for text requests | `openai/gpt-oss-120b` |
+| `GATEWAY_TEXT_FALLBACK_MODELS` | Comma-separated `fallback_models` sent with text requests | `mistral-large-latest,meta-llama/llama-3.1-8b-instruct` |
+| `GATEWAY_VISION_MODEL` | Primary model when images are attached | `meta-llama/llama-4-scout-17b-16e-instruct` |
+| `GATEWAY_VISION_FALLBACK_MODELS` | `fallback_models` for image requests | `gemini-2.5-flash-lite` |
 
 ### 6.2 Why four classifications, not "retryable vs. not"
 
-The classifier's real question is **who is at fault**:
+The classifier's real question is still **who is at fault**. The categories are unchanged; what they describe is now the gateway's error surface rather than each vendor's raw API:
 
-- A `429` is the key's fault right now — cool it, try the next key or provider.
-- A `503` is the provider's fault — cooling the key would be actively wrong, leaving it unavailable for an hour over an outage that has nothing to do with it.
-- A `400` naming a model that no longer exists is the model reference's fault, not the key's — evicting the model from the discovery cache (rather than the key from rotation) means other requests, and other instances via the shared Redis cache, stop hitting the same known-dead model without waiting out an unrelated key cooldown.
-- Anything else is presumed to be an actual bug in how the request was built — retrying that against three more providers just wastes time reproducing the same failure, so the chain aborts immediately and reports to Sentry.
+- A `401`/`403`, or a plain `429` from the gateway, is the gateway key's fault right now — cool it, so repeated calls don't hammer a credential that is being rejected. This is the one failure the gateway cannot heal for itself.
+- A `5xx` or a network error is the service's fault — cooling the key would be actively wrong, leaving it unavailable for an hour over an outage that has nothing to do with it.
+- **A `429` is not always a bad key.** The gateway returns `429` for three different conditions, distinguished only by `error.code`: a genuine rate limit, `daily_token_budget_exceeded`, and `too_many_concurrent_requests`. The last two are capacity signals, not evidence the key is bad — one resets at UTC midnight, the other frees up in seconds. `classifyProviderError()` checks for those codes ahead of the blanket `429` rule and files them as `PROVIDER_TRANSIENT`, so a spent daily budget doesn't sideline a perfectly good key for an hour. A `429` with no body, or any other code, is still a `KEY_FAULT`.
+- A `400` naming a model that doesn't exist classifies as `BAD_MODEL`. It used to evict the model from a Redis-cached discovery list; with discovery removed there is nothing to evict, and model resolution is the gateway's responsibility.
+- Anything else is presumed to be an actual bug in how the request was built, and is captured to Sentry with its category. Failed calls surface to callers as `ALL_PROVIDERS_FAILED`, as before.
 
 ### 6.3 Cross-instance coordination
 
@@ -233,29 +248,29 @@ sequenceDiagram
     participant R as Redis
     participant I2 as Instance 2
 
-    I1->>I1: Groq key #3 returns 429
-    I1->>R: HSET mp:cooldown:groq:3<br/>{failCount, failedAt}, EX 3600
+    I1->>I1: Gateway returns 401 (key rejected)
+    I1->>R: HSET mp:cooldown:gateway:0<br/>{failCount, failedAt}, EX 3600
     Note over R: Shared cooldown state
 
-    I2->>I2: buildProviderQueue() for a new request
-    I2->>R: HGETALL mp:cooldown:groq:3
+    I2->>I2: callWithFallback() for a new request
+    I2->>R: HGETALL mp:cooldown:gateway:0
     R-->>I2: {failCount: 1, failedAt: ...}
-    I2->>I2: key #3 excluded from this queue —<br/>never attempted, no wasted 429
+    I2->>I2: fail fast — no request sent,<br/>no wasted 401
 
     Note over I1,I2: Same pattern applies to Exa search keys<br/>via the same shared providerCooldown.js module
 ```
 
-Without this, an instance that discovers a bad key has no way to tell any other instance — every other instance keeps sending traffic to a key already known to be failing until it independently rediscovers the same failure. `services/providerCooldown.js` is generic over an arbitrary `provider` string, which is why Exa's key rotation shares the exact same mechanism rather than maintaining a structurally identical, independently-drifting copy.
+Without this, an instance that discovers a bad key has no way to tell any other instance — every other instance keeps sending traffic to a key already known to be failing until it independently rediscovers the same failure. The cooldown is now a single slot (`provider = gateway`, `keyIndex = 0`) instead of a pool of them, but the mechanism is unchanged. `services/providerCooldown.js` is generic over an arbitrary `provider` string, which is why Exa's key rotation shares the exact same module rather than maintaining a structurally identical, independently-drifting copy, and why it needed no changes. `MULTIPROVIDER_REDIS_STATE_ENABLED` still reverts the cooldown to in-memory state without a deploy.
 
-Model discovery works the same way: cached in Redis for 6 hours, refreshed by whichever instance wins a short-lived distributed lock (`withLock()`, 15s TTL) rather than every instance independently hitting every provider's `/models` endpoint on every boot.
+The model-discovery cache and its distributed lock (a 6-hour Redis cache refreshed by whichever instance won a `withLock()` race) were removed along with the provider pool — the gateway resolves model names itself.
 
-### 6.4 Selective vision routing
+### 6.4 Vision routing
 
-Only two models across the entire four-provider, ~13-model priority list (`meta-llama/llama-4-scout-17b-16e-instruct`, `google/gemma-4-31b-it:free`) are actually vision-capable. Rather than sending a multi-part payload to every model regardless, `buildMessagesForProvider()` checks the *specific* model about to be called on *this specific attempt* and only restructures the request when that model can use it — every other model in the queue gets the same plain-text request it always would, with the image attachment represented instead as a text placeholder describing that an image was attached (built by `buildGrokAttachmentPrompt()`). If the fallback chain lands on a non-vision model, the user's image doesn't cause a malformed request; it just isn't visually interpreted on that particular attempt.
+Text requests use `GATEWAY_TEXT_MODEL` with its fallback chain. `gpt-oss-120b` cannot read images, so a request with attachments needs a vision-capable model as the *primary* — a fallback list can't help if the first attempt can't see the image. When images are present, `buildRequestBody()` sends `GATEWAY_VISION_MODEL` as `model` with `GATEWAY_VISION_FALLBACK_MODELS` as `fallback_models`, and `buildMessagesForProvider()` attaches the images as `image_url` parts on the last user message only (history and system messages stay plain strings). Every model in the vision chain can read images, so a fallback never lands on a model that can't. Everything past that choice — which upstream provider actually serves the request — is the gateway's decision, and the model that really answered is reported back in the response's `gateway.model_used` field.
 
 ### 6.5 Usage tracking
 
-Every AI call carrying `workspaceId` + `userId` is recorded via `record_ai_usage`, a Postgres RPC that writes an append-only row to `ai_usage_events` *and* atomically upserts a same-day rollup in `workspace_ai_usage_daily` in one write. This backs Exa's daily quota checks and the workspace usage-summary endpoint, deliberately workspace-and-user-scoped together — a prior single-`id`-parameter design had genuinely ambiguous semantics (sometimes "user," sometimes "workspace") that made cost reporting unreliable.
+Every AI call carrying `workspaceId` + `userId` is recorded via `record_ai_usage` (the model name stored is the upstream model the gateway reports having used, not the one requested), a Postgres RPC that writes an append-only row to `ai_usage_events` *and* atomically upserts a same-day rollup in `workspace_ai_usage_daily` in one write. This backs Exa's daily quota checks and the workspace usage-summary endpoint, deliberately workspace-and-user-scoped together — a prior single-`id`-parameter design had genuinely ambiguous semantics (sometimes "user," sometimes "workspace") that made cost reporting unreliable.
 
 ### 6.6 AI workflow inventory
 
@@ -298,7 +313,7 @@ flowchart TB
     T1 --> G2{"shouldRunResearch()\n— already researched?\n— research done <14 days ago\nfor this SAME prospect,\nany event?\n— workspace quota available?"}
     G2 -->|reuse| P3["Reuse existing research —\nzero-cost, cross-event"]
     G2 -->|quota exceeded| P4["Skip entirely"]
-    G2 -->|proceed| P5["Exa search + Groq synthesis"]
+    G2 -->|proceed| P5["Exa search + AI synthesis"]
 
     T3 --> G3{"shouldExtractCommitmentsSignals()\n— raw notes >= 20 chars?"}
     G3 -->|too short| P6[Skip]
@@ -323,7 +338,7 @@ The most conversationally sophisticated AI feature, and the one running synchron
 sequenceDiagram
     participant U as User
     participant R as practice.js routes
-    participant AI as multiProvider (fallback chain)
+    participant AI as multiProvider (llm-gateway client)
     participant Q as practice-jobs queue
 
     U->>R: POST /start {scenario_type, pressure_modifier?}
@@ -384,15 +399,14 @@ The two sources score genuinely different axes — real messages are scored on w
 
 ## 10. Redis Usage
 
-Redis is used for six genuinely different purposes here, not one "caching layer" — worth being precise about which is which:
+Redis is used for five genuinely different purposes here, not one "caching layer" — worth being precise about which is which:
 
 | Purpose | Where | Mechanism |
 |---|---|---|
-| **Caching** | Auth profile (30s), workspace context (30s), insights/coaching-report results (4–24h), model discovery lists (6h) | `getCache`/`setCache`, plain key-value with TTL |
+| **Caching** | Auth profile (30s), workspace context (30s), insights/coaching-report results (4–24h) | `getCache`/`setCache`, plain key-value with TTL |
 | **Queues** | All background job processing | BullMQ over a **separate `ioredis` connection**, deliberately isolated from the `redis`-package client used for everything else |
 | **Rate limiting** | 19 namespaced limiters | `rate-limit-redis` wrapping the shared raw client, one Redis key-prefix per limiter |
-| **Distributed locks** | Model-discovery refresh (15s TTL) | `SET NX PX` + a Lua script for compare-and-delete release, so a lock can only be released by the process that acquired it |
-| **Cross-instance coordination** | AI provider key cooldowns, Exa key cooldowns | Redis hash per `(provider, keyIndex)`, shared by `multiProvider.js` and `exa.js` via one module (`providerCooldown.js`) |
+| **Cross-instance coordination** | AI gateway-key cooldown, Exa key cooldowns | Redis hash per `(provider, keyIndex)`, shared by `multiProvider.js` and `exa.js` via one module (`providerCooldown.js`) |
 | **Distributed concurrency guard** | Onboarding AI-call staggering | A Redis sorted set (`stagger:groq_queue:active`) where each in-flight call is a member scored by its acquisition timestamp — self-healing via a staleness sweep rather than depending on a single shared TTL |
 
 The queue Redis connection and the caching/coordination Redis connection are two separate client instances (`bullmq.js`'s `ioredis` vs `redis.js`'s `redis` package) that can share the same `REDIS_URL` but are configured, connected, and retried independently.
@@ -408,7 +422,7 @@ The codebase can run as a single combined process (`app.js` — starts the Expre
 - **`server.js`** — API only, no `startAllJobs()` call. Bull Board is still mounted here (read-only — it reads queue state from Redis, not from in-process workers), so it's safe to expose from the API process even with no local workers running.
 - **`workers/index.js`** — scheduler + all three workers, no Express server at all. Has its own top-level `SIGTERM`/`SIGINT` handler with a bounded 10-second force-exit timer as a safety net on top of each worker's own graceful-shutdown handler.
 
-Both files are fully implemented today. `app.js` remains what `package.json`'s `start`/`dev` scripts actually run — the split topology is available and correctly wired, not merely sketched out, but adopting it as the default deployment shape is an operational decision that hasn't been made yet. The AI provider layer's Redis-backed state (§6.3) is what makes horizontal *API* scaling safe regardless of which topology is running — any number of instances can run concurrently against the same Redis without duplicating rate-limit counters or key-cooldown state, because none of that state is held in process memory as the source of truth.
+Both files are fully implemented today. `app.js` remains what `package.json`'s `start`/`dev` scripts actually run — the split topology is available and correctly wired, not merely sketched out, but adopting it as the default deployment shape is an operational decision that hasn't been made yet. The AI layer's Redis-backed gateway-key cooldown (§6.3) is what makes horizontal *API* scaling safe regardless of which topology is running — any number of instances can run concurrently against the same Redis without duplicating rate-limit counters or key-cooldown state, because none of that state is held in process memory as the source of truth.
 
 ---
 
@@ -436,3 +450,6 @@ Documented explicitly because a system with zero visible trade-offs is less cred
 6. **No billing system.** Tier values (`free`/`pro`/`enterprise`) gate a handful of things (Exa quota tiers, market-intel enrichment eligibility) but there's no payment provider integration or subscription lifecycle behind them.
 7. **Dead job handlers kept, not removed.** `PRACTICE_REPLY` and `PRACTICE_GHOST` still have working handlers in `messageQueueWorker.js`, but nothing enqueues them since the practice reply path moved fully synchronous (§8). Kept as a defensive fallback rather than deleted mid-migration.
 8. **Frontend architecture isn't documented here.** This document covers the backend; the frontend's own source wasn't part of this documentation pass.
+9. **Two Groq paths remain outside the gateway.** Voice-memo transcription (`services/transcription.js`) still calls Groq Whisper directly with its own key pool, since the gateway has no audio endpoint. `services/groq-client.js`, a legacy direct-to-Groq chat client re-exported through the `groq.js` barrel, is no longer called by any route or job, but hasn't been removed. `streaming.js` still defaults to it when a caller omits `streamFn`; the only caller (`chat.js`) always passes `streamWithFallback` explicitly, so that default is dormant, not active.
+10. **`tier` is accepted but ignored.** `callWithFallbackGroq` still takes `tier` (`fast`/`quality`) so no call site had to change, and still records it for usage tracking, but it no longer selects a different model. Cheaper-model routing for `fast` would be a second `GATEWAY_*_MODEL` pair keyed on `tier`.
+11. **The gateway is now a single upstream dependency.** If it is down, every AI feature is down; previously four independent providers had to fail. The gateway key's Redis cooldown fails fast in that case, but there is no second path. Features with a non-AI fallback (e.g. the template-based practice examples) degrade as before.

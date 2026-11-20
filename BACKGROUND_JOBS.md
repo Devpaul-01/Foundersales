@@ -12,7 +12,7 @@ Three different shapes of "not right now" work exist here, deliberately handled 
 
 1. **Scheduled work** — daily tip generation, weekly pattern detection, nightly metrics rollups. Nothing triggers these except the clock.
 2. **Event-driven, delayed follow-up work** — a practice session ends, and several downstream jobs need to fire at different delays so the UI can update progressively instead of blocking on the slowest one.
-3. **Fire-and-forget-but-durable work triggered mid-request** — a calendar event gets created, prep generation needs to happen, but the event-creation response shouldn't wait on a Groq call. This used to be bare `.catch(() => {})` IIFEs scattered through route handlers; each was replaced with a real queued job so a Redis blip or a transient Groq failure doesn't silently drop the work with no retry and no trace.
+3. **Fire-and-forget-but-durable work triggered mid-request** — a calendar event gets created, prep generation needs to happen, but the event-creation response shouldn't wait on an AI call. This used to be bare `.catch(() => {})` IIFEs scattered through route handlers; each was replaced with a real queued job so a Redis blip or a transient AI-provider failure doesn't silently drop the work with no retry and no trace.
 
 ---
 
@@ -116,7 +116,7 @@ Registration order matters for one reason: the Sunday pipeline (18:00 → 23:00 
 
 **`memory_extraction`** (every 30 min) — scans chats with `message_count >= 10` not re-extracted since their last message, per user's `memory_enabled` flag. Two-stage AI process per eligible chat: extract 2–5 new candidate facts from the last 20 messages, then (if the user already has stored facts) a second call decides per-candidate whether to skip (reinforce), replace, or insert. A 30-fact cap triggers priority-based eviction (reinforcement count, recency, source diversity) before any new insert.
 
-**`opportunity_fetch`** (every 6 hours) — for every onboarded active-workspace user, runs the Exa-search-or-Groq-fallback discovery pipeline and pushes a notification if new opportunities were found.
+**`opportunity_fetch`** (every 6 hours) — for every onboarded active-workspace user, runs the Exa-search-or-AI-fallback discovery pipeline and pushes a notification if new opportunities were found.
 
 **`feedback_prompts`** (hourly) — finds opportunities marked `sent` >48h ago with no feedback logged, groups per user, sends one push per user (not per opportunity).
 
@@ -233,7 +233,7 @@ flowchart LR
     H --> S["services/calendarPrep.js\ngenerateAndPersistPrep()"]
     S --> G{shouldGeneratePrep\nAI cost gate}
     G -->|skip| T[buildTrivialEventPrep\nno AI call, still flips\nprep_generated=true]
-    G -->|proceed| P["generateEnrichedEventPrep()\nsingle Groq call using\nprospect timeline + signals\n+ commitments + research"]
+    G -->|proceed| P["generateEnrichedEventPrep()\nsingle AI call using\nprospect timeline + signals\n+ commitments + research"]
     T --> D[(user_events row updated)]
     P --> D
 ```

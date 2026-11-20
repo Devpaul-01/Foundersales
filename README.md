@@ -6,10 +6,10 @@ An AI sales coaching and outreach platform for founders, freelancers, and early-
 
 This is a monorepo with two apps:
 
-- **`backend/`** — Node.js/Express API and background job system (Supabase, Redis, BullMQ, a four-provider AI fallback chain)
+- **`backend/`** — Node.js/Express API and background job system (Supabase, Redis, BullMQ, AI calls routed through a self-hosted multi-provider LLM gateway)
 - **`frontend/`** — the client the screenshots in this repo come from. Its source isn't part of this documentation pass; everything here about the frontend is inferred from the backend API surface and the app's own UI.
 
-**Status: actively under development.** This is a solo project I'm building toward a real product, not a finished SaaS. Large parts of the backend are genuinely solid — the AI provider layer, the background job system, the calendar cost-gating — and some parts are still rough edges or half-wired (see [Known Gaps](#known-gaps--in-progress-work) below). I'd rather show you both than pretend otherwise.
+**Status: actively under development.** This is a solo project I'm building toward a real product, not a finished SaaS. Large parts of the backend are genuinely solid — the AI gateway client, the background job system, the calendar cost-gating — and some parts are still rough edges or half-wired (see [Known Gaps](#known-gaps--in-progress-work) below). I'd rather show you both than pretend otherwise.
 
 **This is planned as a startup, not just a portfolio project.** I'm actively open to collaborating with other developers, and I'm open to a cofounder if the fit is right. If you're interested in either, reach out.
 
@@ -19,7 +19,7 @@ Most sales tools assume you already know how to sell and just need somewhere to 
 
 The premise here: everything the platform generates for a user should come from the *same* understanding of who they are and what they're selling, and that understanding should get sharper the longer they use it. A voice profile built during onboarding feeds opportunity scoring, outreach drafting, the personality of the simulated buyer in practice mode, and calendar meeting prep — not four separate AI features that happen to share a login.
 
-I used this project to go deep on the parts of shipping an AI product that don't show up in a "call an LLM API" tutorial: a four-provider fallback chain with structured error classification and cross-instance Redis-coordinated key cooldowns, a cost-gating layer that decides whether an AI call is worth making *before* making it, a single-request buyer simulation that bundles reply generation, a private internal monologue, and outcome detection into one model call instead of four, and a background-job system with real idempotency guarantees. It's also where I've tried to document real trade-offs and known gaps honestly rather than pretend the system has none — see [ARCHITECTURE.md §13](ARCHITECTURE.md#13-known-gaps--engineering-trade-offs).
+I used this project to go deep on the parts of shipping an AI product that don't show up in a "call an LLM API" tutorial: AI calls routed through a self-built, self-hosted multi-provider gateway ([llm-gateway](https://github.com/Devpaul-01/llm-gateway)) with structured error classification and a Redis-coordinated cooldown on the gateway key, a cost-gating layer that decides whether an AI call is worth making *before* making it, a single-request buyer simulation that bundles reply generation, a private internal monologue, and outcome detection into one model call instead of four, and a background-job system with real idempotency guarantees. It's also where I've tried to document real trade-offs and known gaps honestly rather than pretend the system has none — see [ARCHITECTURE.md §13](ARCHITECTURE.md#13-known-gaps--engineering-trade-offs).
 
 ## What It Does
 
@@ -39,9 +39,9 @@ See [PRODUCT_OVERVIEW.md](PRODUCT_OVERVIEW.md) for a full feature-by-feature tou
 
 ## Engineering Highlights
 
-**A real multi-provider AI fallback chain, not a single API call with a try/catch.** Four providers (Cerebras → Groq → Mistral → OpenRouter), each with its own key pool, tried in priority order until one succeeds. Failures are classified by *structured status code and parsed error body*, not string-matched against a formatted message — a 429 cools the specific key; a 500 doesn't, because it's the provider's fault, not the key's; a "model not found" response evicts the model from a shared discovery cache without touching the key; anything else aborts the whole chain and reports to Sentry, on the reasoning that retrying a malformed request against three more providers just wastes time reproducing the same bug.
+**AI calls go through one self-hosted gateway, not a hand-rolled failover engine inside the product.** Every AI chat call is a single OpenAI-compatible request to [llm-gateway](https://github.com/Devpaul-01/llm-gateway), my own Go service that fronts many providers. FounderSales sends a primary model plus a `fallback_models` chain and one gateway key; provider selection, upstream key rotation and model failover happen inside the gateway. This used to live in this repo as a four-provider chain (Cerebras → Groq → Mistral → OpenRouter) with per-provider key pools and a model-discovery cache — infrastructure that doesn't belong in a product's request path, so it moved out. What stayed is the part only the caller can know: failures from the gateway are still classified by *structured status code and parsed error body*, not string-matched — a plain 429 or 401/403 cools the gateway key; a 429 whose `error.code` is `daily_token_budget_exceeded` or `too_many_concurrent_requests` is a capacity signal, not a bad key, so it does **not** cool it; a 5xx or network error is transient; anything else is presumed to be a request-construction bug and is reported to Sentry.
 
-**Cross-instance coordination via Redis, with a documented rollback switch.** Key cooldown state, model-discovery caching, and rate-limit counters are all Redis-shared so a horizontally-scaled deployment behaves correctly — one instance discovering a bad key means every instance knows immediately. Every one of these systems has a working in-memory fallback and a single environment-variable kill switch to revert to it without a deploy.
+**Cross-instance coordination via Redis, with a documented rollback switch.** Gateway-key cooldown state and rate-limit counters are Redis-shared so a horizontally-scaled deployment behaves correctly — one instance discovering a bad key means every instance knows immediately. Every one of these systems has a working in-memory fallback and a single environment-variable kill switch to revert to it without a deploy.
 
 **A cost gate that runs before the AI call, not after.** `calendarAiGate.js` decides — cooldown reuse, low-stakes skip, quota-aware degradation — whether a calendar AI call is worth making, and logs every decision to an audit table (`calendar_ai_events`). That makes "cost was optimized here" a checkable query, not a claim.
 
@@ -67,7 +67,7 @@ flowchart LR
     SVC --> PG[(Supabase Postgres)]
     SVC --> REDIS[(Redis)]
     SVC -->|enqueue| BULLMQ[BullMQ Queues]
-    SVC -->|fallback chain| AI[Cerebras → Groq → Mistral → OpenRouter]
+    SVC -->|OpenAI-compatible API| AI[llm-gateway<br/>self-hosted · multi-provider]
     SVC --> EXA[Exa Search]
 
     subgraph Workers [Background Workers]
@@ -76,7 +76,7 @@ flowchart LR
         BULLMQ --> W3[Background Worker<br/>durable fire-and-forget]
     end
 
-    W1 & W2 & W3 -->|fallback chain| AI
+    W1 & W2 & W3 -->|OpenAI-compatible API| AI
     W1 --> RESEND[Resend / SMTP]
     W2 & W3 --> FCM[Firebase Cloud Messaging]
 ```
@@ -120,8 +120,8 @@ Full detail — trigger, idempotency mechanism, retry policy, and the one job cu
 | Auth | Supabase Auth (email/password + Google OAuth), JWT bearer tokens |
 | Cache / coordination | Redis (`ioredis` for BullMQ, `redis` for caching/locks/coordination) |
 | Background jobs | BullMQ (3 queues, 3 workers), `rate-limit-redis` |
-| AI providers | Cerebras, Groq (chat + Whisper transcription), Mistral, OpenRouter — multi-provider fallback chain |
-| Web search | Exa (neural search), with an AI router deciding when it's worth the cost, quota-aware Groq fallback |
+| AI | Self-hosted [llm-gateway](https://github.com/Devpaul-01/llm-gateway) (OpenAI-compatible, multi-provider, own repo) for all chat/generation calls; Groq Whisper, called directly, for voice-memo transcription |
+| Web search | Exa (neural search), with an AI router deciding when it's worth the cost, quota-aware AI-generated fallback |
 | File storage | Cloudinary (images, PDFs, audio) |
 | Validation | Zod |
 | Push notifications | Firebase Admin SDK (FCM) |
@@ -138,7 +138,8 @@ Full detail — trigger, idempotency mechanism, retry policy, and the one job cu
 - Node.js ≥ 18
 - A Supabase project (Postgres + Auth)
 - A Redis instance
-- At minimum, a Groq API key (every AI feature depends on it as part of the fallback chain)
+- A running [llm-gateway](https://github.com/Devpaul-01/llm-gateway) instance and a project key for it (every AI chat feature depends on it)
+- A Groq API key (still called directly for voice-memo transcription)
 
 ### Installation
 
@@ -164,9 +165,9 @@ node src/workers/index.js   # scheduler + all 3 workers only
 
 ### Configuration
 
-Required at startup (the process exits immediately with a clear per-variable message if any are missing): `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `GROQ_API_KEY`, `ADMIN_SECRET`. See `backend/.env.example` for every variable the app reads, required and optional.
+Required at startup (the process exits immediately with a clear per-variable message if any are missing): `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `GATEWAY_API_KEY` (AI chat, via llm-gateway), `GROQ_API_KEY` (voice-memo transcription only), `ADMIN_SECRET`. See `backend/.env.example` for every variable the app reads, required and optional.
 
-Optional, feature-gating (the app boots without these, with a startup warning, and the corresponding feature degrades): `REDIS_URL` (workspace/profile caching and all background job processing are skipped without it), `EXA_API_KEY` (opportunity discovery falls back to a Groq-generated practice-example mode), `FIREBASE_SERVICE_ACCOUNT`, `FRONTEND_URL`, additional provider keys (`CEREBRAS_API_KEY`, `MISTRAL_API_KEY`, `OPENROUTER_API_KEY`, numbered `_1`–`_N` variants for multi-key pools), `SENTRY_DSN`, `RESEND_API_KEY`/SMTP variables.
+Optional, feature-gating (the app boots without these, with a startup warning, and the corresponding feature degrades): `REDIS_URL` (workspace/profile caching and all background job processing are skipped without it), `EXA_API_KEY` (opportunity discovery falls back to an AI-generated practice-example mode), `FIREBASE_SERVICE_ACCOUNT`, `FRONTEND_URL`, gateway overrides (`GATEWAY_BASE_URL`, `GATEWAY_TEXT_MODEL`, `GATEWAY_TEXT_FALLBACK_MODELS`, `GATEWAY_VISION_MODEL`, `GATEWAY_VISION_FALLBACK_MODELS` — defaults are built in, but set `GATEWAY_BASE_URL` to your own deployment), `SENTRY_DSN`, `RESEND_API_KEY`/SMTP variables.
 
 The database schema is a single `schema.sql` file applied directly to the target Supabase project — it also defines every atomic Postgres RPC the app relies on. See [ARCHITECTURE.md §5](ARCHITECTURE.md#5-data-architecture) for the RPC list and what each one prevents.
 
@@ -181,6 +182,7 @@ This is a solo project, still moving. Some things worth being upfront about:
 - **Public booking pages exist at the schema level** (`booking_pages`, `availability_windows`) **but aren't wired to any route.** Planned, not shipped.
 - **No billing or subscription system.** No payment provider integration, no plan/tier enforcement beyond a few hardcoded tier checks, no subscription state in the schema. This is a solo project, not a business yet.
 - **Frontend source isn't part of this documentation pass.** The screenshots throughout this repo's docs reflect a real, working client; its internal architecture isn't traced here.
+- **Two Groq paths remain outside the gateway.** Voice-memo transcription (`services/transcription.js`) still calls Groq Whisper directly with its own key pool, because the gateway doesn't expose an audio endpoint. Separately, `services/groq-client.js` (a legacy direct-to-Groq chat client re-exported through the `groq.js` barrel) is no longer called by any route or job — every live chat path goes through `multiProvider.js` and the gateway — but it hasn't been deleted yet.
 - **Dead code kept intentionally, not cleaned up yet:** two practice-reply job handlers (`PRACTICE_REPLY`, `PRACTICE_GHOST`) remain registered in the worker even though nothing enqueues them anymore — the synchronous V3 reply path replaced them and the old handlers were kept as a fallback rather than deleted.
 
 I'd rather list these than have someone find them first.

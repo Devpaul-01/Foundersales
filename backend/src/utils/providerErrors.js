@@ -50,6 +50,24 @@ const KEY_FAULT_STATUSES = new Set([401, 403, 429]);
 const PROVIDER_TRANSIENT_STATUSES = new Set([500, 502, 503, 504]);
 const PROVIDER_TRANSIENT_NETWORK_CODES = new Set(['ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'ECONNRESET']);
 
+// llm-gateway (and potentially other OpenAI-compatible fronting layers)
+// returns 429 for three materially different conditions, distinguished
+// only by error.code, not by status: a genuinely bad/rate-limited
+// credential (gateway-key-specific — should cool this key), a per-project
+// daily token budget exhausted, and a per-project concurrency cap hit.
+// The latter two are capacity/admission conditions, not a fault in this
+// specific key — cooling the key for an hour over a budget that resets
+// at UTC midnight (or a concurrency slot that frees up in seconds) would
+// incorrectly sideline a perfectly good key. Checked ahead of the blanket
+// 429 → KEY_FAULT rule below.
+const ADMISSION_LIMIT_CODES = new Set([
+  'daily_token_budget_exceeded',
+  'too_many_concurrent_requests',
+]);
+
+const isAdmissionLimitSignal = (parsedBody) =>
+  ADMISSION_LIMIT_CODES.has(parsedBody?.error?.code);
+
 // Narrow, last-resort fallback used ONLY when a network failure doesn't
 // populate a structured networkErrorCode (some platforms/Node versions
 // may not consistently populate `cause.code` on a fetch failure). This is
@@ -82,6 +100,10 @@ const isBadModelSignal = (parsedBody) => {
  *                        Provider-wide or network condition unrelated to
  *                        this key's validity — penalizing the key would
  *                        be incorrect and would waste its availability.
+ *                        Also covers a 429 that is actually a capacity/
+ *                        admission signal (daily budget, concurrency cap)
+ *                        rather than a bad-credential signal — see
+ *                        ADMISSION_LIMIT_CODES.
  *   BAD_MODEL          — do NOT cool the key, skip this model specifically
  *                        (not just this key), evict the model from the
  *                        Redis-backed discovery cache so other requests/
@@ -101,6 +123,14 @@ export const classifyProviderError = (err) => {
     // classification must never itself throw) — treat conservatively as
     // non-retryable rather than guessing at a category.
     return 'NON_RETRYABLE';
+  }
+
+  // Checked ahead of the blanket 429 rule below: a 429 carrying one of
+  // these specific error.code values is a capacity/admission condition
+  // (daily budget, concurrency cap), not evidence this particular key is
+  // bad — see ADMISSION_LIMIT_CODES above.
+  if (err.status === 429 && isAdmissionLimitSignal(err.parsedBody)) {
+    return 'PROVIDER_TRANSIENT';
   }
 
   if (err.status != null && KEY_FAULT_STATUSES.has(err.status)) {

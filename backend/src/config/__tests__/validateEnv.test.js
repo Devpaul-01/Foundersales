@@ -20,7 +20,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // validateEnv() runs before any other static import via a dynamic
 // import() boundary.
 
-const REQUIRED_KEYS = ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'GROQ_API_KEY', 'ADMIN_SECRET'];
+// GATEWAY_API_KEY (llm-gateway, chat) and GROQ_API_KEY (direct Groq,
+// voice-memo transcription only — see transcription.js) are both
+// required and intentionally independent of each other.
+const REQUIRED_KEYS = ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'GATEWAY_API_KEY', 'GROQ_API_KEY', 'ADMIN_SECRET'];
 
 const ALL_ENV_KEYS = [
   ...REQUIRED_KEYS,
@@ -59,6 +62,7 @@ describe('validateEnv', () => {
     // bug let through silently.
     process.env.SUPABASE_URL = 'https://fake.supabase.co';
     process.env.SUPABASE_SERVICE_KEY = 'this-is-the-wrong-variable-name'; // old, unused name
+    process.env.GATEWAY_API_KEY = 'fake-gateway-key';
     process.env.GROQ_API_KEY = 'fake-groq-key';
     process.env.ADMIN_SECRET = 'fake-admin-secret';
 
@@ -74,6 +78,7 @@ describe('validateEnv', () => {
 
     process.env.SUPABASE_URL = 'https://fake.supabase.co';
     process.env.SUPABASE_SERVICE_ROLE_KEY = 'fake-service-role-key';
+    process.env.GATEWAY_API_KEY = 'fake-gateway-key';
     process.env.GROQ_API_KEY = 'fake-groq-key';
     process.env.ADMIN_SECRET = 'fake-admin-secret';
 
@@ -87,6 +92,7 @@ describe('validateEnv', () => {
 
     process.env.SUPABASE_URL = 'https://fake.supabase.co';
     process.env.SUPABASE_SERVICE_ROLE_KEY = 'fake-service-role-key';
+    process.env.GATEWAY_API_KEY = 'fake-gateway-key';
     process.env.GROQ_API_KEY = 'fake-groq-key';
     process.env.ADMIN_SECRET = 'fake-admin-secret';
     // REDIS_URL intentionally left unset.

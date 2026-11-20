@@ -22,7 +22,16 @@ const REQUIRED = [
   { key: 'SUPABASE_SERVICE_ROLE_KEY', hint: 'Supabase service role key (from project API settings, Service Role, not anon)' },
 
   // AI providers
-  { key: 'GROQ_API_KEY',            hint: 'Groq API key — required for all AI features' },
+  // GATEWAY_API_KEY (feat/llm-gateway-provider): all AI CHAT traffic now
+  // routes through a single self-hosted gateway
+  // (github.com/Devpaul-01/llm-gateway) instead of calling Cerebras,
+  // Groq, Mistral, or OpenRouter directly — see services/multiProvider.js.
+  { key: 'GATEWAY_API_KEY',         hint: 'llm-gateway API key — required for all AI chat features (see services/multiProvider.js)' },
+  // GROQ_API_KEY is UNRELATED to the gateway above and still required —
+  // it is read directly by services/transcription.js for voice-memo
+  // audio transcription (Groq's Whisper-compatible endpoint), which has
+  // no equivalent on the gateway and was intentionally left alone.
+  { key: 'GROQ_API_KEY',            hint: 'Groq API key — required for voice-memo audio transcription (see services/transcription.js)' },
 
   // Auth & security
   { key: 'ADMIN_SECRET',            hint: 'Secret header value for Bull Board at /admin/jobs' },
